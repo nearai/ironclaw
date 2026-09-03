@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * AuthDeviceLinkCard — rendered when `gate.challengeKind === "device_link"`.
  *

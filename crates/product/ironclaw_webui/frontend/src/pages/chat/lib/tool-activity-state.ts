@@ -1,8 +1,14 @@
-// @ts-nocheck
 import {
   isTerminalToolStatus,
   toolDisplayName,
 } from "./history-messages";
+
+type ToolCardOverrides = {
+  toolStatus?: string;
+  toolError?: string | null;
+  toolErrorKind?: string | null;
+  updatedAt?: string;
+};
 
 export function createToolActivityState() {
   return {
@@ -62,7 +68,7 @@ export function upsertToolActivityMessage(
   });
 }
 
-function toolCardFromGate(gate, overrides = {}) {
+function toolCardFromGate(gate, overrides: ToolCardOverrides = {}) {
   const isGatePrompt = gate?.kind === "gate";
   const isAuthPrompt = gate?.kind === "auth_required";
   const shouldFallbackToGateIdentity =

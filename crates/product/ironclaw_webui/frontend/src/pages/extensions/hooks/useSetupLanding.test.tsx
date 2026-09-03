@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// @ts-nocheck
 //
 // #7853: device-link guidance rendered into a Telegram or Slack thread cannot
 // show the link panel there, so it hands the user

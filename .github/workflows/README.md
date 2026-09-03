@@ -10,6 +10,26 @@ a check belongs to exactly one tier on purpose.
 | Post-merge confirm | `push` to `main` | Runs exhaustive coverage, warms shared caches, and feeds Codecov/canaries. A main-only deterministic failure means the affected-area classifier missed an impact and must be widened. |
 | Deep / scheduled | `schedule` (nightly) | Exhaustive suites too slow for the queue: legacy v1 matrix, full browser E2E, stress scans. |
 
+## Build caches
+
+Rust build caches (Swatinem/rust-cache) are saved only by pushes to `main`
+(the stress lane's by its nightly scan) and restored by every other event.
+GitHub lets a run restore caches from its own ref, its base branch, and the
+default branch, so a save from a `merge_group` run lands on the queue entry's
+`gh-readonly-queue/...` ref where no pull request and no later entry can read
+it; those saves were write-only and evicted `main`'s entries from the 10 GB
+repository limit. Two plain lineages exist. `reborn-hermetic` is every lane
+that builds inside `scripts/ci/run-hermetic-test-process.sh` (crate buckets,
+root partitions, the integration batch, QA replay, the Rust Reborn E2E
+groups): pinned stable toolchain, mold, and a stable hermetic Cargo home, so
+one entry is fresh for all of them. A shared key is written once per lockfile
+by the first job to finish, so only the push run's root partitions and QA
+replay, which build the same complete integration-test closure, save it;
+every other job restores. `reborn-direct` is the lanes that run
+cargo against the host Cargo home (the sandbox Docker tests, which save it,
+and the merge-queue mutation gate, which restores it). The instrumented
+coverage lanes on `main` keep their separate `-cov-llvm21` lineages.
+
 ## The invariant
 
 **No attributable deterministic failure may be main-only.** The merge queue
@@ -73,6 +93,16 @@ main retains exhaustive per-lane fan-out for instrumented coverage.
 Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.
+Uninstrumented whole-package buckets run ordinary libtest targets with nextest;
+packages declaring `harness = false` or an unknown test-target kind retain
+Cargo's runner. The planner derives that split from Cargo metadata and each
+selected manifest after bucket coalescing, failing closed when classification
+is impossible. Exact changed targets keep their existing direct `cargo test`
+path, and Cargo-only or exact-target buckets skip installing nextest. Nextest
+groups serialize runtime binaries whose existing locks are process-local and
+CLI trace-policy tests that share an on-disk global policy; the workflow checks
+representative tests against nextest's compiled inventory before execution.
+Zero-test package selections preserve Cargo's successful no-op.
 
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all

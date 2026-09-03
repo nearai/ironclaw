@@ -75,10 +75,10 @@ use ironclaw_loop_contracts::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
     LoopHostMilestone, LoopHostMilestoneSink, ModelProfileId,
 };
-use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     CapabilitySurfaceProfileResolver, HostManagedModelGateway, HostUserProfileSource,
-    JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ZeroCostTable,
+    JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ToolDisclosureMode,
+    ZeroCostTable,
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
@@ -117,6 +117,7 @@ use super::builder::{
     thread_scope_from_binding,
 };
 use super::doubles::{FailingTranscriptWriteThreadService, RecordingSecurityAuditSink};
+use super::external_tool_factory::ExternalToolCapabilityPortFactory;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -259,6 +260,13 @@ pub(crate) struct GroupSharedStorage {
     /// Retained so integration tests can assert production loop milestones
     /// without adding event-specific hooks to the runtime path.
     pub(crate) milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
+    /// The reply projection the group's ONE planned runtime composes every
+    /// run's safe reply document into (the production milestone decorator,
+    /// `ReplyProjectionMilestoneSink`, wraps the sink above). Tests that wire
+    /// their own run-delivery observer build their publication service over
+    /// it, so channel replies are published from the same live document the
+    /// composed runtime would use — not only from terminal facts.
+    pub(crate) reply_projection: Arc<ironclaw_assistant::projection::reply::ReplyProjection>,
     /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
     /// trace-capture sink was seeded with when `.with_trace_capture()` opted
     /// in; `None` otherwise. Recorded at wiring time so a test asserts against
@@ -515,6 +523,7 @@ impl RebornIntegrationGroup {
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
+            external_tool_specs: None,
         }
     }
 
@@ -948,6 +957,9 @@ pub struct RebornIntegrationGroupBuilder {
         Arc<dyn ironclaw_memory::MemoryService>,
         ironclaw_extension_contracts::memory::MemoryDescriptor,
     )>,
+    /// Test-only client-tool specs installed at run-port construction. `None`
+    /// preserves the normal group capability factory exactly.
+    external_tool_specs: Option<Vec<ironclaw_turns::ExternalToolSpec>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -1073,7 +1085,7 @@ impl RebornIntegrationGroupBuilder {
         } else {
             (None, None)
         };
-        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
+        let recorded_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
             if let Some(event_sink) = &durable_event_sink {
                 let durable_scope =
                     DurableLoopHostMilestoneScope::from_thread_scope(&group_thread_scope)?;
@@ -1087,6 +1099,17 @@ impl RebornIntegrationGroupBuilder {
             } else {
                 milestone_sink.clone()
             };
+        // Production decorator position: every milestone is recorded (and
+        // durably logged) first, then composed into the group's reply
+        // projection, exactly as `build_reborn_runtime` wires it.
+        let reply_projection =
+            Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new());
+        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+            ironclaw_assistant::projection::reply::ReplyProjectionMilestoneSink::new(
+                recorded_milestone_sink,
+                Arc::clone(&reply_projection),
+            ),
+        );
         let (
             capability_factory,
             capability_surface_resolver,
@@ -1099,6 +1122,18 @@ impl RebornIntegrationGroupBuilder {
             process_system.clone(),
             self.trajectory_observer.clone(),
         )?;
+        let external_tool_specs = self.external_tool_specs.clone();
+        let capability_factory: Arc<dyn ironclaw_loop_host::LoopCapabilityPortFactory> =
+            match external_tool_specs {
+                Some(specs) => Arc::new(ExternalToolCapabilityPortFactory {
+                    inner: capability_factory,
+                    catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+                    specs,
+                    input_resolver: Arc::clone(&capability_input_resolver),
+                    result_writer: Arc::clone(&capability_result_writer),
+                }),
+                None => capability_factory,
+            };
 
         // Enabler (b): production resolves `CapabilitySurfacePolicy::allow_all()` for a
         // top-level user turn; mirror that for bridged groups (narrowed
@@ -1515,6 +1550,7 @@ impl RebornIntegrationGroupBuilder {
                 durable_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
+                reply_projection: Arc::clone(&reply_projection),
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,

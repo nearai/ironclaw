@@ -205,7 +205,6 @@ registerPack("ja", {
   "activity.separator": "、",
   "tool.tabDetails": "詳細",
   "tool.tabParameters": "パラメーター",
-  "tool.tabResult": "結果",
   "tool.tabError": "エラー",
   "tool.tabDeclined": "拒否済み",
   "tool.noDetail": "追加の詳細なし。",
@@ -382,6 +381,9 @@ registerPack("ja", {
   "llm.idTaken": "プロバイダID「{id}」はすでに使用されています。",
   "llm.invalidId": "小文字、数字、ハイフン、またはアンダースコアを使用してください。",
   "llm.model": "モデル",
+  "llm.capabilityText": "テキスト",
+  "llm.capabilityImageInput": "画像入力",
+  "llm.capabilityImageOutput": "画像出力",
   "llm.modelPreference": "モデル設定",
   "llm.modelPreferenceDesc": "すべての会話で今後のメッセージに使用されます。",
   "llm.catalogLoadFailed": "利用可能なモデルを読み込めませんでした。",
@@ -1191,6 +1193,7 @@ registerPack("ja", {
   "common.deleteChat": "チャットを削除",
   "chat.deleteFailed": "この会話を削除できませんでした。",
   "chat.cancelFailed": "この実行を停止できませんでした。まだ実行中の可能性があります。もう一度お試しください。",
+  "chat.runStopped": "停止しました",
   "chat.deleteBusy": "実行中の会話は削除できません。先に停止してから、もう一度お試しください。",
   "command.placeholder": "コマンドを入力するか検索...",
   "routine.searchPlaceholder": "ルーチン名、トリガー、またはアクションを検索",
@@ -1400,7 +1403,6 @@ registerPack("ja", {
   "common.file": "ファイル",
   "chat.previewAttachment": "{name} をプレビュー",
   "chat.downloadAttachment": "{name} をダウンロード",
-  "tool.resultAlt": "ツール結果"
 });
 
 registerPack("ja", {

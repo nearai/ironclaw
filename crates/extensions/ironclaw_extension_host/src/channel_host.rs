@@ -89,7 +89,7 @@ const CONNECT_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_
 /// The privacy condition is the fail-closed half. This notice is the one a
 /// shared conversation shows an unlinked sender, and it is kept out of the
 /// room only by an `OutboundVisibility::EphemeralTo` request, which
-/// [`ChannelReply`](ironclaw_extension_contracts::channel_adapter::ChannelReply)
+/// [`ReplySink`](ironclaw_extension_contracts::reply::ReplySink)
 /// documents as a hint: an adapter that cannot honor it posts publicly
 /// instead. Appending a setup link on strategy alone would therefore broadcast
 /// it to every member of the conversation the first time an OAuth-strategy
@@ -124,9 +124,9 @@ fn surfaces_support_private_delivery(
     surfaces: &ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
 ) -> bool {
     surfaces
-        .reply
+        .delivery
         .as_ref()
-        .is_some_and(|reply| reply.supports_private_delivery())
+        .is_some_and(|delivery| delivery.supports_private_delivery())
 }
 
 /// The default admission resolver, or `None` (= reject every shared
@@ -1403,21 +1403,23 @@ mod tests {
         );
     }
 
-    /// The gate input itself: the link decision reads what the bound reply
-    /// adapter declares, so an adapter that never opted in (the default, e.g.
-    /// Telegram's `sendMessage`-only reply) reports `false` and a channel with
-    /// no reply half at all reports `false` too.
+    /// The gate input itself: the link decision reads what the bound
+    /// delivery adapter declares (source-routed notices ride the delivery
+    /// half), so an adapter that never opted in (the default, e.g. Telegram's
+    /// `sendMessage`-only send) reports `false` and a channel with no delivery
+    /// half at all reports `false` too.
     #[test]
-    fn private_delivery_support_is_read_from_the_bound_reply_adapter() {
+    // arch-exempt: large_file, one test beside the gate it pins (decomposition follow-up), plan #8007
+    fn private_delivery_support_is_read_from_the_bound_delivery_adapter() {
         use ironclaw_extension_contracts::channel_adapter::{
-            ChannelError, ChannelReply, ChannelSurfaces, DeliveryReport, OutboundEnvelope,
+            ChannelDelivery, ChannelError, ChannelSurfaces, DeliveryReport, OutboundEnvelope,
         };
         use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 
-        struct PublicOnlyReply;
+        struct PublicOnlyDelivery;
         #[async_trait::async_trait]
-        impl ChannelReply for PublicOnlyReply {
-            async fn send_reply(
+        impl ChannelDelivery for PublicOnlyDelivery {
+            async fn deliver(
                 &self,
                 _envelope: OutboundEnvelope,
                 _egress: &dyn RestrictedEgress,
@@ -1426,10 +1428,10 @@ mod tests {
             }
         }
 
-        struct EphemeralReply;
+        struct EphemeralDelivery;
         #[async_trait::async_trait]
-        impl ChannelReply for EphemeralReply {
-            async fn send_reply(
+        impl ChannelDelivery for EphemeralDelivery {
+            async fn deliver(
                 &self,
                 _envelope: OutboundEnvelope,
                 _egress: &dyn RestrictedEgress,
@@ -1446,10 +1448,10 @@ mod tests {
             &ChannelSurfaces::default()
         ));
         assert!(!surfaces_support_private_delivery(
-            &ChannelSurfaces::default().with_reply(Arc::new(PublicOnlyReply))
+            &ChannelSurfaces::default().with_delivery(Arc::new(PublicOnlyDelivery))
         ));
         assert!(surfaces_support_private_delivery(
-            &ChannelSurfaces::default().with_reply(Arc::new(EphemeralReply))
+            &ChannelSurfaces::default().with_delivery(Arc::new(EphemeralDelivery))
         ));
     }
 

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -30,7 +29,7 @@ function loadI18n() {
   const stateSetters = [];
   let stateIndex = 0;
 
-  const context = {
+  const context: vm.Context = {
     __dynamicImport: () => {
       throw new Error("locale loader was not overridden in this test");
     },
@@ -267,6 +266,21 @@ test("non-English locale packs localize model-selection settings", () => {
     const pack = loadLocalePack(locale);
     for (const key of keys) {
       assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
+    }
+  }
+});
+
+test("locale packs include model capability labels", () => {
+  const keys = [
+    "llm.capabilityText",
+    "llm.capabilityImageInput",
+    "llm.capabilityImageOutput",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of keys) {
+      assert.equal(typeof pack[key], "string", `${locale} must define ${key}`);
     }
   }
 });

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useNavigate } from "react-router";
 import {
@@ -9,7 +8,11 @@ import {
   writeDesktopSidebarOpen,
 } from "../lib/sidebar-state";
 
-export function useSidebar({ onNewChat } = {}) {
+type UseSidebarOptions = {
+  onNewChat?: () => string | null | void | Promise<string | null | void>;
+};
+
+export function useSidebar({ onNewChat }: UseSidebarOptions = {}) {
   const navigate = useNavigate();
   const [state, setState] = React.useState(() => ({
     mobileOpen: false,
@@ -53,7 +56,7 @@ export function useSidebar({ onNewChat } = {}) {
   }, [navigate, close, onNewChat]);
 
   const selectThread = React.useCallback(
-    (id) => {
+    (id: string) => {
       navigate(`/chat/${id}`);
       close();
     },

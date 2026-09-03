@@ -400,7 +400,7 @@ async fn stale_surface_batch_releases_unlaunched_invocation_budget() {
 /// Behavior tightening absorbed by the `BudgetLedger` refactor: a capability
 /// retry dispatch now charges the invocation budget through the same
 /// chokepoint the initial batch dispatch uses, BEFORE re-dispatching. Before
-/// this fix, the retry dispatch (`executor/capabilities.rs`, the
+/// this fix, the retry dispatch (`executor/capability_dispatch.rs`, the
 /// `RecoveryOutcome::Retry` arm inside `handle_capability_error`) counted
 /// unconditionally with no enforcement, so a retry could re-dispatch to the
 /// host even when the run's capability-invocation budget was already

@@ -212,7 +212,6 @@ registerPack("en", {
   "activity.separator": ", ",
   "tool.tabDetails": "Details",
   "tool.tabParameters": "Parameters",
-  "tool.tabResult": "Result",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Declined",
   "tool.noDetail": "No additional detail.",
@@ -397,6 +396,9 @@ registerPack("en", {
   "llm.idTaken": "Provider ID \"{id}\" is already used.",
   "llm.invalidId": "Use lowercase letters, numbers, hyphens, or underscores.",
   "llm.model": "Model",
+  "llm.capabilityText": "Text",
+  "llm.capabilityImageInput": "Image input",
+  "llm.capabilityImageOutput": "Image output",
   "llm.modelPreference": "Model preference",
   "llm.modelPreferenceDesc": "Used for future messages in all conversations.",
   "llm.catalogLoadFailed": "Could not load the available models.",
@@ -1300,6 +1302,7 @@ registerPack("en", {
   "chat.deleteFailed": "Couldn't delete this conversation.",
   "chat.deleteBusy": "Can't delete a conversation while it's still running. Stop it first, then try again.",
   "chat.cancelFailed": "Couldn't stop this run. It may still be running. Try again.",
+  "chat.runStopped": "Stopped",
   "command.placeholder": "Type a command or search...",
   "routine.searchPlaceholder": "Search routine name, trigger, or action",
   "routine.unavailable": "Routine unavailable",
@@ -1455,7 +1458,6 @@ registerPack("en", {
   "common.file": "file",
   "chat.previewAttachment": "Preview {name}",
   "chat.downloadAttachment": "Download {name}",
-  "tool.resultAlt": "Tool result"
 });
 
 registerPack("en", {

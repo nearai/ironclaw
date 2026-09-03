@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Unit tests for the composer's attachment staging helpers.
 //
 //   pnpm test -- pages/chat/lib/attachments.test.ts
@@ -8,7 +7,9 @@
 // carries. Everything else is pure.
 
 import assert from "node:assert/strict";
-import { beforeAll as before, test } from "vitest";
+import { afterAll as after, beforeAll as before, test } from "vitest";
+
+import { replaceBrowserGlobal } from "../../../test-support/browser-mocks";
 
 import {
   attachmentKindFromMime,
@@ -20,15 +21,26 @@ import {
   toWireAttachment,
 } from "./attachments";
 
+let restoreFileReader: (() => void) | null = null;
+
 before(() => {
-  globalThis.FileReader = class {
+  class FakeFileReader {
+    result: string | ArrayBuffer | null = null;
+    onload: (() => void) | null = null;
+
     readAsDataURL(file) {
       queueMicrotask(() => {
         this.result = file.__dataUrl;
         if (this.onload) this.onload();
       });
     }
-  };
+  }
+  restoreFileReader = replaceBrowserGlobal("FileReader", FakeFileReader);
+});
+
+after(() => {
+  restoreFileReader?.();
+  restoreFileReader = null;
 });
 
 // A fake `File` carrying its own data URL so the stubbed reader is

@@ -51,7 +51,6 @@ use ironclaw_product_contracts::prompt_source::{
 };
 
 use crate::ProductSurfaceFailure;
-use crate::ProjectFilesystemReader;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
@@ -140,15 +139,14 @@ pub struct RunDeliveryServices {
     /// Durable product-owned Inbox destination. `None` is allowed only for
     /// ingress-only/test graphs; production composition always supplies it.
     pub notification_inbox: Option<Arc<dyn NotificationInboxStorePort>>,
-    /// Canonical project-scoped reader used to materialize assistant-authored
-    /// `/workspace/...` references only after outbound policy approves the
-    /// delivery.
-    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// The owner-scoped outbound target catalog. The background-run notifier
     /// resolves the creator's stored notification-channel ids through it at
     /// fire time; a target that vanished since it was chosen simply drops out.
     pub delivery_targets: Arc<dyn OutboundDeliveryTargetProvider>,
-    /// The coordinator every send goes through (OUT-1: none bypasses).
+    /// The coordinator every send goes through (OUT-1: none bypasses). It
+    /// also owns the run's answer: the observer registers the originating
+    /// conversation as a reply publication target on it and never sends the
+    /// reply itself (design doc §6–§7).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the
     /// coordinator resolves the adapter + egress from the active snapshot by

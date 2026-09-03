@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Click-to-preview modal for a message attachment.
 //
 // Renders one attachment in a focused modal, choosing a CSP-allowed
@@ -22,6 +21,16 @@ import { saveBlob } from "../../../lib/download";
 import { workspaceViewerRouteFromFilePath } from "../../../lib/workspace-file-links";
 import { attachmentPreviewMode } from "../lib/attachments";
 
+type AttachmentPreviewView = {
+  mode?: ReturnType<typeof attachmentPreviewMode>;
+  dataUrl?: string;
+  frameUrl?: string;
+  text?: string;
+  downloadUrl?: string;
+  downloadBlob?: Blob;
+  truncated?: boolean;
+};
+
 // Cap inline text rendering so a large (but within the byte limit) text file
 // can't jank the modal. The full file is still one Download away.
 const MAX_TEXT_PREVIEW_CHARS = 100_000;
@@ -32,7 +41,7 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
   // `view` holds the resolved representation: { dataUrl?, frameUrl?, text?,
   // downloadUrl?, truncated? }. `status` is the load state machine.
   const [status, setStatus] = React.useState("loading");
-  const [view, setView] = React.useState({});
+  const [view, setView] = React.useState<AttachmentPreviewView>({});
 
   const mode = attachment ? attachmentPreviewMode(attachment.mime_type) : "download";
   // This is a navigation target, not an authorization decision. The workspace
@@ -65,7 +74,7 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
     }
 
     let cancelled = false;
-    let objectUrl = null;
+    let objectUrl: string | null = null;
     fetchAttachmentBlob(attachment.fetch_url)
       .then(async (blob) => {
         // Once bytes have landed, the authenticated response's Content-Type is
@@ -77,7 +86,7 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
         // Keep the Blob for downloads so `saveBlob` can force the logical
         // filename even when Chromium's PDF viewer owns the preview object URL.
         objectUrl = URL.createObjectURL(blob);
-        const next = {
+        const next: AttachmentPreviewView = {
           downloadUrl: objectUrl,
           downloadBlob: blob,
           mode: resolvedMode,
@@ -87,7 +96,11 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
           resolvedMode === "audio" ||
           resolvedMode === "video"
         ) {
-          next.dataUrl = await blobToDataUrl(blob);
+          const dataUrl = await blobToDataUrl(blob);
+          if (typeof dataUrl !== "string") {
+            throw new TypeError("attachment data URL must be a string");
+          }
+          next.dataUrl = dataUrl;
         } else if (resolvedMode === "pdf") {
           next.frameUrl = objectUrl;
         } else if (resolvedMode === "text") {

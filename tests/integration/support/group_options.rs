@@ -60,6 +60,17 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Install a run-scoped client-tool catalog around the group's actual
+    /// production capability factory. This is a test-only opt-in for driving
+    /// external-tool gates through the caller/coordinator path.
+    pub fn with_external_tools_for_test(
+        mut self,
+        specs: Vec<ironclaw_turns::ExternalToolSpec>,
+    ) -> Self {
+        self.external_tool_specs = Some(specs);
+        self
+    }
+
     /// E-MEMORY / #7276: register the periodic memory-curation hook at the
     /// group's `after_turn` point, firing a pass every `interval_turns`
     /// completed turns. Mirrors production's opt-in shape exactly — production

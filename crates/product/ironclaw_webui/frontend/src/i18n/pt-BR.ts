@@ -205,7 +205,6 @@ registerPack("pt-BR", {
   "activity.separator": ", ",
   "tool.tabDetails": "Detalhes",
   "tool.tabParameters": "Parâmetros",
-  "tool.tabResult": "Resultado",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Recusado",
   "tool.noDetail": "Sem detalhes adicionais.",
@@ -382,6 +381,9 @@ registerPack("pt-BR", {
   "llm.idTaken": "O ID do provedor \"{id}\" já está em uso.",
   "llm.invalidId": "Use letras minúsculas, números, hífens ou sublinhados.",
   "llm.model": "Modelo",
+  "llm.capabilityText": "Texto",
+  "llm.capabilityImageInput": "Entrada de imagem",
+  "llm.capabilityImageOutput": "Saída de imagem",
   "llm.modelPreference": "Preferência de modelo",
   "llm.modelPreferenceDesc": "Usada nas próximas mensagens de todas as conversas.",
   "llm.catalogLoadFailed": "Não foi possível carregar os modelos disponíveis.",
@@ -1191,6 +1193,7 @@ registerPack("pt-BR", {
   "common.deleteChat": "Excluir bate-papo",
   "chat.deleteFailed": "Não foi possível excluir esta conversa.",
   "chat.cancelFailed": "Não foi possível interromper esta execução. Ela ainda pode estar em andamento. Tente novamente.",
+  "chat.runStopped": "Interrompido",
   "chat.deleteBusy": "Não é possível excluir uma conversa enquanto ela está em execução. Pare-a primeiro e tente novamente.",
   "command.placeholder": "Digite um comando ou pesquise...",
   "routine.searchPlaceholder": "Pesquise o nome da rotina, gatilho ou ação",
@@ -1400,7 +1403,6 @@ registerPack("pt-BR", {
   "common.file": "arquivo",
   "chat.previewAttachment": "Visualizar {name}",
   "chat.downloadAttachment": "Baixar {name}",
-  "tool.resultAlt": "Resultado da ferramenta"
 });
 
 registerPack("pt-BR", {

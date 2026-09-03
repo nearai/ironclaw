@@ -7,6 +7,7 @@ import {
   providerDefaultModel,
   providerPayload,
 } from "../lib/llm-providers";
+import { normalizeModelCatalog } from "../lib/model-capabilities";
 
 function initialForm(provider, overrides) {
   return {
@@ -32,6 +33,7 @@ export function useProviderDialogForm({
   const [form, setForm] = React.useState(() => initialForm(provider, builtinOverrides));
   const [apiKey, setApiKey] = React.useState("");
   const [models, setModels] = React.useState([]);
+  const [modelEntries, setModelEntries] = React.useState([]);
   const [message, setMessage] = React.useState(null);
   const [busy, setBusy] = React.useState("");
   const idEditedRef = React.useRef(Boolean(provider));
@@ -41,6 +43,7 @@ export function useProviderDialogForm({
     setForm(initialForm(provider, builtinOverrides));
     setApiKey("");
     setModels([]);
+    setModelEntries([]);
     setMessage(null);
     setBusy("");
     idEditedRef.current = Boolean(provider);
@@ -112,15 +115,17 @@ export function useProviderDialogForm({
     setBusy("models");
     try {
       const result = await onListModels(providerPayload(provider, form, apiKey, builtinOverrides));
-      if (!result.ok || !Array.isArray(result.models) || !result.models.length) {
+      const catalog = normalizeModelCatalog(result);
+      if (!result.ok || !catalog.models.length) {
         setMessage({ tone: "error", text: result.message || t("llm.modelsFetchFailed") });
       } else {
-        setModels(result.models);
+        setModels(catalog.models);
+        setModelEntries(catalog.modelEntries);
         // Commit a valid model so the controlled SelectMenu shows what will save
         // (see nextModelAfterFetch for the empty/stale-selection rationale).
-        const pick = nextModelAfterFetch(form.model, result.models);
+        const pick = nextModelAfterFetch(form.model, catalog.models);
         if (pick !== null) update("model", pick);
-        setMessage({ tone: "success", text: t("llm.modelsFetched", { count: result.models.length }) });
+        setMessage({ tone: "success", text: t("llm.modelsFetched", { count: catalog.models.length }) });
       }
     } catch (err) {
       setMessage({ tone: "error", text: err.message });
@@ -133,6 +138,7 @@ export function useProviderDialogForm({
     form,
     apiKey,
     models,
+    modelEntries,
     message,
     busy,
     isBuiltin,

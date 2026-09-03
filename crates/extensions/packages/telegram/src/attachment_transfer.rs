@@ -15,10 +15,7 @@ use ironclaw_host_api::{
 };
 
 use crate::TELEGRAM_API_HOST;
-use crate::channel::{
-    TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_TOKEN_PLACEHOLDER, telegram_message_response_outcome,
-    telegram_outcome_for_egress_error,
-};
+use crate::channel::{TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_TOKEN_PLACEHOLDER, TelegramCallOutcome};
 
 /// Pure normalization result retained inside the Telegram package until the
 /// channel adapter completes the Bot API file-handle exchange.
@@ -180,21 +177,22 @@ pub(super) async fn send_document(
     message_thread_id: Option<i64>,
     reply_to_message_id: Option<i64>,
     file: &WorkspaceFile,
-) -> PartDeliveryOutcome {
+) -> TelegramCallOutcome {
     if file.bytes.len() as u64 > max_transfer_bytes() {
-        return PartDeliveryOutcome::Permanent {
+        return TelegramCallOutcome::without_hint(PartDeliveryOutcome::Permanent {
             reason: "telegram attachment exceeds the channel size limit".to_string(),
-        };
+        });
     }
     let request = match document_request(chat_id, message_thread_id, reply_to_message_id, file) {
         Ok(request) => request,
-        Err(reason) => return PartDeliveryOutcome::Permanent { reason },
+        Err(reason) => {
+            return TelegramCallOutcome::without_hint(PartDeliveryOutcome::Permanent { reason });
+        }
     };
-    let response = match egress.send(request).await {
-        Ok(response) => response,
-        Err(error) => return telegram_outcome_for_egress_error(&error),
-    };
-    telegram_message_response_outcome("sendDocument", response.status, &response.body)
+    match egress.send(request).await {
+        Ok(response) => TelegramCallOutcome::from_message_response("sendDocument", &response),
+        Err(error) => TelegramCallOutcome::from_egress_error(&error),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

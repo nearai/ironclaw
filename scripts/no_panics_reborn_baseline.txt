@@ -4,7 +4,6 @@
 # Duplicate fingerprints are repeated because the checker compares this as a multiset.
 # Remove an entry when its invariant is eliminated; CI rejects both new and stale entries.
 
-crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs	impl CapabilityStage::fn handle_capability_error :: _ => unreachable!("guarded to RecoverableFailure")	Exhaustive match after the recoverable-failure arm returns to the model.
 crates/loop/ironclaw_agent_loop/src/strategies/recovery.rs	impl SanitizedStrategySummary::fn from_trusted_static :: Err(reason) => panic!("invalid trusted static strategy summary: {reason}")	Compile-time-owned recovery strategy text is validated during construction.
 crates/domains/ironclaw_auth/src/credential.rs	fn single_account_recovery :: unreachable!("single account recovery cannot produce account selection required")	Single-account recovery cannot construct the multi-account selection outcome.
 crates/domains/ironclaw_auth/src/domain.rs	fn recovery_projection_for_single_account :: unreachable!("single account recovery cannot produce account selection required")	Single-account recovery cannot construct the multi-account selection outcome.

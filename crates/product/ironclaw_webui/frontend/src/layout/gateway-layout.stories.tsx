@@ -16,7 +16,7 @@ const THREADS_DATA = {
   next_cursor: null,
 };
 
-const PROFILE = { id: "u_ada", display_name: "Ada Lovelace", email: "ada@ironclaw.dev", role: "member" };
+const PROFILE = { tenant_id: "tenant-demo", user_id: "u_ada" };
 
 function OutletContent() {
   // Placeholder for the routed page that GatewayLayout renders into its Outlet.

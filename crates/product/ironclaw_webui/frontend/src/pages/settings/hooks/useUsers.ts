@@ -1,7 +1,9 @@
-// @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchUsers, createUser, updateUser } from "../lib/settings-api";
+
+type UserPayload = Record<string, unknown>;
+type UpdateUserVariables = { id: string; payload: UserPayload };
 
 export function useUsers() {
   const queryClient = useQueryClient();
@@ -15,12 +17,12 @@ export function useUsers() {
   const users = query.data?.users || [];
   const isForbidden = query.error?.message?.includes("403") || query.error?.message?.includes("Forbidden");
 
-  const createMutation = useMutation({
+  const createMutation = useMutation<unknown, Error, UserPayload>({
     mutationFn: createUser,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-users"] }),
   });
 
-  const updateMutation = useMutation({
+  const updateMutation = useMutation<unknown, Error, UpdateUserVariables>({
     mutationFn: ({ id, payload }) => updateUser(id, payload),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-users"] }),
   });
@@ -30,7 +32,8 @@ export function useUsers() {
     query,
     isForbidden,
     createUser: createMutation.mutate,
-    updateUser: (id, payload) => updateMutation.mutate({ id, payload }),
+    updateUser: (id: string, payload: UserPayload) =>
+      updateMutation.mutate({ id, payload }),
     createError: createMutation.error,
     isCreating: createMutation.isPending,
   };

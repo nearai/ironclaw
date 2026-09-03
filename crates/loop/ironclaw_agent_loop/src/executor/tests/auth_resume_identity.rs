@@ -645,7 +645,7 @@ async fn truncated_batch_gate_preserves_unlaunched_sibling_auth_resume() {
 /// that surfaces when a capability's approval-resume dispatch returns a transient
 /// `Backend` error.
 ///
-/// # Bug (capabilities.rs, pre-fix)
+/// # Bug (`capability_dispatch.rs`, pre-fix)
 ///
 /// 1. Executor dispatches the capability with `approval_resume` set (batch path).
 /// 2. Host returns `Failed(Backend)`.
@@ -835,7 +835,7 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
 /// that surfaces when a capability's **auth-resume** dispatch returns a transient
 /// `Backend` error.
 ///
-/// # Bug (capabilities.rs, pre-fix)
+/// # Bug (`capability_dispatch.rs`, pre-fix)
 ///
 /// 1. Phase 1: executor dispatches the capability; host returns `AuthRequired`.
 ///    GateStage stores `pending_auth_resume` in the BeforeBlock checkpoint.

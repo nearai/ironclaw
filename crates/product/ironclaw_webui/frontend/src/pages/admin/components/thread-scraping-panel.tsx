@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { Button } from "../../../design-system/button";
 import { Panel } from "../../../design-system/primitives";
@@ -42,7 +41,10 @@ export function ThreadScrapingPanel({ userId }) {
         new Set(
           (artifact?.messages || [])
             .map((message) => message.run_id)
-            .filter(Boolean),
+            .filter(
+              (runId): runId is string =>
+                typeof runId === "string" && runId.length > 0,
+            ),
         ),
       ),
     [artifact],

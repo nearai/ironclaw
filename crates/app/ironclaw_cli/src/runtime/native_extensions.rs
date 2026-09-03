@@ -33,6 +33,9 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
 /// The binary-assembled channel extension set.
 pub(crate) struct BundledChannelExtensions {
     pub(crate) bindings: Vec<ChannelExtensionBinding>,
+    /// The channel whose reply is the deployment's session stream;
+    /// composition attaches the product projection sink to its binding.
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
 }
 
 /// Deployment channel-adapter bindings. These are independent of native tool
@@ -78,11 +81,16 @@ pub(crate) fn bundled_channel_extensions(
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("web-app".to_string()),
-            // DELIVERY ONLY, and both absences are load-bearing: input
-            // arrives on the authenticated session door (whose actor
-            // authority an adapter may never mint), and the manifest's
-            // `transport = "stream"` reply is published by the host. Adding a
-            // half here fails activation — see `check_binding`.
+            // No reply half here: web-app is the deployment's session-reply
+            // channel (`session_reply_channel` below), so composition
+            // attaches the product-tier projection sink to this binding's
+            // ordinary `surfaces.reply` slot — the browser's SSE/WebSocket
+            // tail is the edge, reconciled from the same reply document
+            // every other channel publishes from.
+            // No ingress half, and that absence is load-bearing: input
+            // arrives on the authenticated session door, whose actor
+            // authority an adapter may never mint. Delivery is the web-push
+            // half.
             surfaces: ChannelSurfaces::default().with_delivery(Arc::new(
                 ironclaw_web_app_extension::WebAppChannelAdapter::new(),
             )),
@@ -98,7 +106,10 @@ pub(crate) fn bundled_channel_extensions(
             registration_document_path: Some("/web-push/subscriptions.json".to_string()),
         },
     ];
-    BundledChannelExtensions { bindings }
+    BundledChannelExtensions {
+        bindings,
+        session_reply_channel: Some(ExtensionId::from_trusted("web-app".to_string())),
+    }
 }
 
 /// Bindings-only view (tests and callers that do not wire composition).
@@ -321,6 +332,36 @@ mod tests {
         assert!(
             telegram.preference_target_codec.is_some(),
             "the shipping Telegram binding must expose outbound preference targets"
+        );
+    }
+
+    #[test]
+    fn web_app_is_the_session_reply_channel_and_binds_delivery_only() {
+        let bundled = bundled_channel_extensions(None);
+        assert_eq!(
+            bundled
+                .session_reply_channel
+                .as_ref()
+                .map(|extension_id| extension_id.as_str()),
+            Some("web-app"),
+            "the binary names web-app as the deployment's session-reply channel"
+        );
+        let web_app = bundled
+            .bindings
+            .iter()
+            .find(|binding| binding.extension_id.as_str() == "web-app")
+            .expect("the named session-reply channel has a binding");
+        assert!(
+            web_app.surfaces.reply.is_none(),
+            "the package leaves the reply slot empty: composition attaches the projection sink"
+        );
+        assert!(
+            web_app.surfaces.ingress.is_none(),
+            "authenticated-session ingress is host-owned; an adapter may never mint its trust"
+        );
+        assert!(
+            web_app.surfaces.delivery.is_some(),
+            "web-push delivery is the one half the package binds"
         );
     }
 

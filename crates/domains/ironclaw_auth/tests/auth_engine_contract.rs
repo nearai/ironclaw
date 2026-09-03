@@ -25,6 +25,7 @@ use ironclaw_auth::{
 use ironclaw_extension_contracts::recipe::{
     HttpsEndpoint, RecipeClientCredentials, VendorAuthRecipe,
 };
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -189,6 +190,14 @@ struct Harness {
 
 impl Harness {
     fn new(recipes: Vec<ResolvedVendorAuthRecipe>) -> Self {
+        Self::with_secret_store(recipes, Arc::new(SecretStore::ephemeral()), CALLBACK_BASE)
+    }
+
+    fn with_secret_store(
+        recipes: Vec<ResolvedVendorAuthRecipe>,
+        secrets: Arc<dyn SecretStorePort>,
+        callback_base: &str,
+    ) -> Self {
         let mut by_vendor = HashMap::new();
         for recipe in &recipes {
             by_vendor.insert(
@@ -200,13 +209,12 @@ impl Harness {
             );
         }
         let server = Arc::new(ScriptedVendorServer::default());
-        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let engine = AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
             client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
             secret_store: Arc::clone(&secrets),
-            callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
+            callback_base: EngineCallbackBase::new(callback_base).expect("callback base"),
             dcr_client_name: "IronClaw test".to_string(),
         });
         Self {
@@ -1335,6 +1343,235 @@ async fn refresh_invalid_grant_is_a_typed_permanent_failure() {
 // ---------------------------------------------------------------------------
 // DCR (notion row): register once, reuse, standard oauth2_code after
 // ---------------------------------------------------------------------------
+
+fn script_notion_dcr(server: &ScriptedVendorServer, client_id: &str) {
+    server.script(
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
+    );
+    server.script(
+        "https://mcp.notion.com/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://mcp.notion.com",
+            "authorization_endpoint": "https://mcp.notion.com/discovered/authorize",
+            "token_endpoint": "https://mcp.notion.com/discovered/token",
+            "registration_endpoint": "https://mcp.notion.com/register"
+        }),
+    );
+    server.script(
+        "https://mcp.notion.com/register",
+        201,
+        serde_json::json!({ "client_id": client_id }),
+    );
+}
+
+#[tokio::test]
+async fn dcr_replaces_an_unreadable_machine_generated_registration() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let original_store: Arc<dyn SecretStorePort> =
+        Arc::new(SecretStore::ephemeral_over(Arc::clone(&backend)));
+    let original = Harness::with_secret_store(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        original_store,
+        CALLBACK_BASE,
+    );
+    script_notion_dcr(&original.server, "old-dcr-client");
+    original
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("initial DCR registration");
+
+    // The same persisted filesystem is opened with a new master key, which
+    // reproduces a local deployment whose renewable DCR registration can no
+    // longer be decrypted. User credentials must remain fail-closed; this
+    // handle is machine-generated registration metadata.
+    let replacement_store: Arc<dyn SecretStorePort> =
+        Arc::new(SecretStore::ephemeral_over(backend));
+    let replacement = Harness::with_secret_store(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        replacement_store,
+        CALLBACK_BASE,
+    );
+    script_notion_dcr(&replacement.server, "replacement-dcr-client");
+
+    let prepared = replacement
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("unreadable generated registration is replaced");
+
+    let authorization_url =
+        url::Url::parse(prepared.authorization_url.as_str()).expect("authorization URL parses");
+    let query: HashMap<String, String> = authorization_url.query_pairs().into_owned().collect();
+    assert_eq!(
+        query.get("client_id").map(String::as_str),
+        Some("replacement-dcr-client")
+    );
+    assert_eq!(
+        replacement
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .len(),
+        1,
+        "the renewable DCR client is registered exactly once"
+    );
+}
+
+#[tokio::test]
+async fn dcr_replaces_a_malformed_persisted_registration() {
+    let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let harness = Harness::with_secret_store(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        Arc::clone(&secrets),
+        CALLBACK_BASE,
+    );
+    // Machine-generated registration metadata that no longer parses (a
+    // partial write, or a shape an older binary persisted) is renewable: it
+    // is re-registered rather than treated as a fail-closed user credential.
+    secrets
+        .put(
+            test_scope().resource.clone(),
+            SecretHandle::new("oauth-dcr-client-notion").unwrap(),
+            SecretString::from("{not json".to_string()),
+            None,
+        )
+        .await
+        .expect("seed the malformed persisted registration");
+    script_notion_dcr(&harness.server, "replacement-dcr-client");
+
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("malformed generated registration is replaced");
+    let authorization_url =
+        url::Url::parse(prepared.authorization_url.as_str()).expect("authorization URL parses");
+    let query: HashMap<String, String> = authorization_url.query_pairs().into_owned().collect();
+    assert_eq!(
+        query.get("client_id").map(String::as_str),
+        Some("replacement-dcr-client")
+    );
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .len(),
+        1,
+        "the malformed registration is replaced by exactly one new registration"
+    );
+
+    // The replacement persisted: a second flow reuses it and registers nothing.
+    let again = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("the replaced registration is reused");
+    let authorization_url =
+        url::Url::parse(again.authorization_url.as_str()).expect("authorization URL parses");
+    let query: HashMap<String, String> = authorization_url.query_pairs().into_owned().collect();
+    assert_eq!(
+        query.get("client_id").map(String::as_str),
+        Some("replacement-dcr-client")
+    );
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .len(),
+        1,
+        "a second flow reuses the replaced registration and registers nothing"
+    );
+}
+
+#[tokio::test]
+async fn dcr_replaces_a_registration_for_an_old_callback_base() {
+    let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let original = Harness::with_secret_store(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        Arc::clone(&secrets),
+        CALLBACK_BASE,
+    );
+    script_notion_dcr(&original.server, "old-callback-client");
+    original
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("initial DCR registration");
+
+    const NEW_CALLBACK_BASE: &str = "https://new-host.example/api/reborn/product-auth/oauth";
+    let replacement = Harness::with_secret_store(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        secrets,
+        NEW_CALLBACK_BASE,
+    );
+    script_notion_dcr(&replacement.server, "new-callback-client");
+    replacement
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("registration with a stale callback is replaced");
+
+    let registration = replacement
+        .server
+        .requests_for("https://mcp.notion.com/register")
+        .into_iter()
+        .next()
+        .expect("replacement registration request");
+    let body: serde_json::Value =
+        serde_json::from_slice(&registration.body).expect("registration JSON");
+    assert_eq!(
+        body["redirect_uris"][0],
+        format!("{NEW_CALLBACK_BASE}/notion/callback")
+    );
+}
 
 #[tokio::test]
 async fn dcr_requires_advertised_protected_resource_metadata() {

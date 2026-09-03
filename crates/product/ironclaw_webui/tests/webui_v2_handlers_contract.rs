@@ -8000,6 +8000,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                     run_id: None,
                     body: "projection body".to_string(),
                     finalized: false,
+                    narration: false,
                 }],
             )
             .expect("projection state"),

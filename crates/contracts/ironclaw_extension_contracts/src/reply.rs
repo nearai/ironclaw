@@ -1,0 +1,1226 @@
+//! The progressive-reply seam: what crosses between the host's publication
+//! lane and a channel's reply adapter.
+//!
+//! A run's answer is published as a **desired-state document**. Every channel
+//! that declares `[channel.reply]` binds one [`ReplySink`]; the declared
+//! [`ReplyTransport`] decides the **cadence** at which the host asks it to
+//! reconcile: `stream` sees every revision, `message` sees only the terminal
+//! materialization. One seam, two cadences.
+//!
+//! **What this vocabulary cannot represent is the point.** There is no field
+//! for raw chain-of-thought, hidden model reasoning, unrestricted tool
+//! arguments or results, credentials, secrets, host paths, or provider
+//! payloads: every text field is a validating newtype with a byte bound and a
+//! control-character ban, every collection is capped by construction, and the
+//! only reasoning that can appear is a product-approved summary segment.
+//! Provider verbs (`startStream`, session status, Block Kit, SSE frames)
+//! never appear here — a sink owns those behind its checkpoint.
+//!
+//! The document evolves only through its bounded semantic mutators
+//! (deterministic, side-effect free, total: answer/activity overflow
+//! truncates or drops with a flag, reasoning-summary overflow drops
+//! silently — reasoning is best-effort enrichment with no truncation facet —
+//! ordering surprises land as rows rather than errors, and the first
+//! terminal outcome is durable). The host's projection is the only producer;
+//! sinks read the document and never mutate it.
+
+use std::fmt;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ironclaw_host_api::attachment::WorkspaceFile;
+use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope};
+use serde::{Deserialize, Serialize};
+
+use crate::channel::ReplyTransport;
+use crate::channel_adapter::ChannelError;
+use crate::external::ExternalConversationRef;
+use crate::tool_adapter::RestrictedEgress;
+
+/// Bound on the cumulative answer text of one reply.
+pub const REPLY_ANSWER_MAX_BYTES: usize = 128 * 1024;
+/// Bound on titles, headlines, status lines, and other one-line display text.
+pub const REPLY_DISPLAY_TEXT_MAX_BYTES: usize = 2 * 1024;
+/// Bound on sanitized activity input/output previews and attention bodies.
+pub const REPLY_DISPLAY_PREVIEW_MAX_BYTES: usize = 4 * 1024;
+/// Bound on one product-approved reasoning summary segment.
+pub const REPLY_REASONING_SEGMENT_MAX_BYTES: usize = 8 * 1024;
+/// Bound on one narration entry (the text of a model call the loop went on
+/// past); longer text is kept up to this bound on a character boundary.
+pub const REPLY_NARRATION_ENTRY_MAX_BYTES: usize = 8 * 1024;
+/// Bound on a reply/item identifier.
+pub const REPLY_ITEM_ID_MAX_BYTES: usize = 128;
+/// Bound on activity rows retained per document (older rows stay; later
+/// starts are dropped and the document says so).
+pub const REPLY_MAX_ACTIVITIES: usize = 256;
+/// Bound on retained reasoning summary segments.
+pub const REPLY_MAX_REASONING_SEGMENTS: usize = 128;
+/// Bound on retained narration entries (later ones are dropped).
+pub const REPLY_MAX_NARRATION_ENTRIES: usize = 32;
+/// Bound on final attachments.
+pub const REPLY_MAX_ATTACHMENTS: usize = 16;
+/// Bound on the adapter-owned checkpoint the host persists between
+/// reconciliations.
+pub const REPLY_SINK_CHECKPOINT_MAX_BYTES: usize = 16 * 1024;
+/// Bound on one provider reference in sink evidence.
+pub const REPLY_PROVIDER_REF_MAX_BYTES: usize = 256;
+/// Bound on provider references retained per report.
+pub const REPLY_MAX_PROVIDER_REFS: usize = 32;
+/// Bound on a vendor threading anchor.
+pub const REPLY_THREAD_ANCHOR_MAX_BYTES: usize = 256;
+/// Bound on the adapter's stored ingress context handed back at reply time
+/// (the same 4 KiB `NormalizedInboundMessage::reply_context` bound).
+pub const REPLY_CONTEXT_MAX_BYTES: usize = 4 * 1024;
+/// Bound on a diagnostic outcome reason.
+pub const REPLY_OUTCOME_REASON_MAX_BYTES: usize = 512;
+
+/// Failures constructing reply vocabulary from untrusted or unbounded input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReplyContractError {
+    #[error("{field} exceeds {max} bytes")]
+    TextTooLong { field: &'static str, max: usize },
+    #[error("{field} must not be empty")]
+    EmptyText { field: &'static str },
+    #[error("{field} contains a control character")]
+    ControlCharacter { field: &'static str },
+    #[error("{field} is not a valid identifier: {reason}")]
+    InvalidId {
+        field: &'static str,
+        reason: &'static str,
+    },
+    #[error("{field} holds more than {max} items")]
+    TooManyItems { field: &'static str, max: usize },
+    #[error("reply sink checkpoint exceeds {max} bytes")]
+    CheckpointTooLarge { max: usize },
+    #[error("reply context exceeds {max} bytes")]
+    ReplyContextTooLarge { max: usize },
+}
+
+fn validate_text(
+    field: &'static str,
+    value: &str,
+    max: usize,
+    allow_empty: bool,
+) -> Result<(), ReplyContractError> {
+    if value.len() > max {
+        return Err(ReplyContractError::TextTooLong { field, max });
+    }
+    if !allow_empty && value.trim().is_empty() {
+        return Err(ReplyContractError::EmptyText { field });
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t' | '\r'))
+    {
+        return Err(ReplyContractError::ControlCharacter { field });
+    }
+    Ok(())
+}
+
+/// Fold arbitrary text into the bound: strip control characters (keeping
+/// line structure) and cut at the last character boundary under `max`.
+/// Used by the constructors that must never fail because their input is
+/// diagnostic (an adapter's reason string) rather than product content.
+fn fold_text(value: &str, max: usize) -> String {
+    let stripped: String = value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect();
+    if stripped.len() <= max {
+        return stripped;
+    }
+    let mut end = max;
+    while end > 0 && !stripped.is_char_boundary(end) {
+        end -= 1;
+    }
+    stripped[..end].to_string() // safety: `end` walked back to a char boundary above.
+}
+
+macro_rules! bounded_text {
+    ($(#[$doc:meta])* $name:ident, $field:literal, $max:expr, allow_empty = $allow_empty:expr) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, ReplyContractError> {
+                let value = value.into();
+                validate_text($field, &value, $max, $allow_empty)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = ReplyContractError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+    };
+}
+
+bounded_text!(
+    /// One-line display text: titles, headlines, status lines, failure
+    /// summaries, gate refs, URLs shown as text. Never empty.
+    ReplyDisplayText,
+    "reply display text",
+    REPLY_DISPLAY_TEXT_MAX_BYTES,
+    allow_empty = false
+);
+
+bounded_text!(
+    /// A sanitized, bounded preview a product surface may show beside an
+    /// activity (an input summary, an output excerpt) or under an attention
+    /// headline. Producers build it only from already-sanitized display
+    /// sources — never from raw tool arguments or results.
+    ReplyDisplayPreview,
+    "reply display preview",
+    REPLY_DISPLAY_PREVIEW_MAX_BYTES,
+    allow_empty = false
+);
+
+bounded_text!(
+    /// Cumulative answer text. May be empty (a run can finish with only
+    /// attachments, or fail before producing text).
+    ReplyAnswerText,
+    "reply answer text",
+    REPLY_ANSWER_MAX_BYTES,
+    allow_empty = true
+);
+
+bounded_text!(
+    /// One product-approved reasoning summary segment. This is the only
+    /// reasoning the seam can carry; disclosure policy decides which
+    /// audiences see it at all.
+    ReplyReasoningText,
+    "reply reasoning summary",
+    REPLY_REASONING_SEGMENT_MAX_BYTES,
+    allow_empty = false
+);
+
+bounded_text!(
+    /// A vendor threading anchor within the target conversation (a thread
+    /// timestamp, a reply-to message id).
+    ReplyThreadAnchor,
+    "reply thread anchor",
+    REPLY_THREAD_ANCHOR_MAX_BYTES,
+    allow_empty = false
+);
+
+bounded_text!(
+    /// One provider-issued reference (message id, stream id) a sink reports
+    /// as evidence.
+    ReplyProviderRef,
+    "reply provider ref",
+    REPLY_PROVIDER_REF_MAX_BYTES,
+    allow_empty = false
+);
+
+/// A diagnostic reason attached to a non-applied sink outcome. Always
+/// constructible: adapter-supplied text is folded into the bound rather than
+/// rejected, because a reason exists to explain a failure, never to gate it.
+/// The host treats it as diagnostic text — it is never rendered to a user
+/// and never parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ReplyOutcomeReason(String);
+
+impl ReplyOutcomeReason {
+    pub fn new(value: impl AsRef<str>) -> Self {
+        let folded = fold_text(value.as_ref(), REPLY_OUTCOME_REASON_MAX_BYTES);
+        if folded.trim().is_empty() {
+            return Self("unspecified".to_string());
+        }
+        Self(folded)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReplyOutcomeReason {
+    type Error = ReplyContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Ok(Self::new(value))
+    }
+}
+
+impl fmt::Display for ReplyOutcomeReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+fn validate_identifier(field: &'static str, value: &str) -> Result<(), ReplyContractError> {
+    if value.is_empty() {
+        return Err(ReplyContractError::InvalidId {
+            field,
+            reason: "must not be empty",
+        });
+    }
+    if value.len() > REPLY_ITEM_ID_MAX_BYTES {
+        return Err(ReplyContractError::InvalidId {
+            field,
+            reason: "exceeds the identifier byte bound",
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(ReplyContractError::InvalidId {
+            field,
+            reason: "may contain only ASCII alphanumerics, '.', '_', ':' and '-'",
+        });
+    }
+    Ok(())
+}
+
+/// Stable identity of one item inside a document (an activity row, an
+/// attachment). Sinks key provider-side state on it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ReplyItemId(String);
+
+impl ReplyItemId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ReplyContractError> {
+        let value = value.into();
+        validate_identifier("reply item id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ReplyItemId {
+    type Error = ReplyContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ReplyItemId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ReplyItemId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Where a reply stands. `WaitingForInput`, `Completed`, `Failed`, and
+/// `Cancelled` are derived from the control-critical mutators; the others are
+/// set by [`ReplyDocument::note_phase`] or by activity starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyPhase {
+    Preparing,
+    Thinking,
+    Working,
+    WaitingForInput,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl ReplyPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// The answer as it currently stands: the text of the current model call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyAnswer {
+    /// Cumulative text of the current model call (progressive appends, then
+    /// the canonical finalized transcript text once the run finalizes it).
+    pub text: ReplyAnswerText,
+    /// Which model call's text this is, counting the calls that produced
+    /// text: a call the loop goes on past ([`ReplyDocument::reset_answer`])
+    /// starts the next one, a call that produced no text does not. A surface
+    /// keys what it shows per call instead of per run. Distinct from the
+    /// document's lifecycle [`ReplyDocument::phase`].
+    #[serde(default = "first_answer_call")]
+    pub call: u64,
+    /// True once [`ReplyDocument::finalize_answer`] replaced the progressive
+    /// text with the canonical transcript row. Progressive appends after that
+    /// are ignored.
+    pub finalized: bool,
+    /// True when appends were dropped at the answer byte bound. The finalized
+    /// text is authoritative regardless.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl Default for ReplyAnswer {
+    fn default() -> Self {
+        Self {
+            text: ReplyAnswerText(String::new()),
+            call: first_answer_call(),
+            finalized: false,
+            truncated: false,
+        }
+    }
+}
+
+fn first_answer_call() -> u64 {
+    1
+}
+
+/// The text of one model call the loop went on past — narration such as
+/// "Let me check the workspace.", never the answer — kept under the call it
+/// streamed as, so a surface that showed it as the provisional answer can
+/// re-home it, and a surface that never shows narration can ignore it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyNarration {
+    pub call: u64,
+    pub text: ReplyAnswerText,
+}
+
+/// Lifecycle state of one capability/tool activity row. The projection folds
+/// capability milestones straight from started to finished, so these three
+/// states are the complete producer vocabulary (a killed capability arrives
+/// as `Failed` with its failure kind).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyActivityState {
+    Started,
+    Completed,
+    Failed { kind: ReplyDisplayText },
+}
+
+impl ReplyActivityState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed { .. })
+    }
+}
+
+/// Where a finished activity ran, as neutral display facts: the extension
+/// that served it, the runtime lane, and how much output it produced. Never
+/// the output itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyActivityProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ReplyDisplayText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ReplyDisplayText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+}
+
+/// One activity row: a capability invocation as a product surface may show
+/// it. `detail` and `output_preview` are sanitized display previews, never
+/// raw arguments or results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyActivity {
+    pub id: ReplyItemId,
+    pub title: ReplyDisplayText,
+    pub state: ReplyActivityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ReplyDisplayPreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<ReplyDisplayPreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ReplyActivityProvenance>,
+    /// The mutation ordinal that created this row; rows render in this order.
+    pub started_ordinal: u64,
+    /// The mutation ordinal of the last update to this row.
+    pub updated_ordinal: u64,
+}
+
+/// Why the run is parked on the user — the gate family behind a
+/// [`ReplyAttention`], so a sink can choose its headline and the publisher
+/// can enrich the prompt (approval context, a serviceable sign-in URL) per
+/// kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyAttentionKind {
+    /// A capability call waits on an explicit approval.
+    Approval,
+    /// A credential must be connected before the run can continue.
+    Auth,
+    /// The run waits on something neither party answers directly (a resource
+    /// reservation, or any gate kind the projection does not name).
+    Resource,
+}
+
+/// The run is parked on the user. `action_url` is present only when the
+/// disclosure policy allowed it for the target audience (a connect URL must
+/// never land in a shared conversation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyAttention {
+    pub kind: ReplyAttentionKind,
+    pub headline: ReplyDisplayText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ReplyDisplayPreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_url: Option<ReplyDisplayText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<ReplyDisplayText>,
+}
+
+/// Metadata of one final attachment. Bytes never enter the document; a
+/// terminal reconciliation carries the materialized files separately
+/// ([`ReplyReconcileRequest::materialized_attachments`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyAttachmentRef {
+    pub id: ReplyItemId,
+    pub filename: ReplyDisplayText,
+    pub mime_type: ReplyDisplayText,
+    pub size_bytes: u64,
+}
+
+/// The terminal fact. Once set it is never replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyOutcome {
+    Completed,
+    Failed { summary: ReplyDisplayText },
+    Cancelled,
+}
+
+/// The kind of work a status line describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyStatusKind {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
+}
+
+/// The desired state of one reply at one revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyDocument {
+    pub phase: ReplyPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ReplyDisplayText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_kind: Option<ReplyStatusKind>,
+    #[serde(default)]
+    pub answer: ReplyAnswer,
+    /// Text of the model calls the loop went on past, in call order
+    /// ([`ReplyDocument::reset_answer`]). Progress, not the answer: a
+    /// surface with an activity panel shows it there; a stream surface
+    /// never shows it. Bounded like every facet of this display document
+    /// ([`REPLY_MAX_NARRATION_ENTRIES`] entries of
+    /// [`REPLY_NARRATION_ENTRY_MAX_BYTES`]); the durable transcript keeps
+    /// every model call in full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub narration: Vec<ReplyNarration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<ReplyReasoningText>,
+    /// True while the last reasoning segment is still being produced
+    /// ([`ReplyDocument::append_reasoning`] grows it;
+    /// [`ReplyDocument::close_reasoning`] closes it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_open: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activities: Vec<ReplyActivity>,
+    /// True when activity starts were dropped at [`REPLY_MAX_ACTIVITIES`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub activities_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<ReplyAttention>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ReplyAttachmentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ReplyOutcome>,
+    /// Number of mutations folded so far; the source of activity ordinals.
+    #[serde(default)]
+    pub applied_changes: u64,
+}
+
+impl Default for ReplyDocument {
+    fn default() -> Self {
+        Self {
+            phase: ReplyPhase::Preparing,
+            status: None,
+            status_kind: None,
+            answer: ReplyAnswer::default(),
+            narration: Vec::new(),
+            reasoning: Vec::new(),
+            reasoning_open: false,
+            activities: Vec::new(),
+            activities_truncated: false,
+            attention: None,
+            attachments: Vec::new(),
+            outcome: None,
+            applied_changes: 0,
+        }
+    }
+}
+
+/// The bounded semantic mutators. Each returns whether the document changed —
+/// mutations after the terminal outcome (and appends after finalization) are
+/// ignored, matching the first-terminal-wins rule. Every text bound holds by
+/// construction of the argument newtypes; the two raw-`&str` answer paths
+/// truncate at the answer byte bound on a character boundary and set
+/// `answer.truncated`.
+impl ReplyDocument {
+    /// Whether a terminal outcome has been recorded.
+    pub fn is_terminal(&self) -> bool {
+        self.outcome.is_some()
+    }
+
+    fn next_ordinal(&mut self) -> u64 {
+        self.applied_changes = self.applied_changes.saturating_add(1);
+        self.applied_changes
+    }
+
+    /// Note a non-terminal phase while nothing overrides it (attention and
+    /// the terminal outcome own the phase once present).
+    pub fn note_phase(&mut self, phase: ReplyPhase) -> bool {
+        if self.is_terminal() || self.attention.is_some() || phase.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.phase = phase;
+        true
+    }
+
+    /// The current one-line status (a driver note) and what kind of work it
+    /// describes.
+    pub fn set_status(&mut self, text: ReplyDisplayText, work: Option<ReplyStatusKind>) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.status = Some(text);
+        self.status_kind = work;
+        true
+    }
+
+    /// Grow the progressive answer. Ignored once finalized or terminal;
+    /// growth past the answer bound truncates on a character boundary.
+    pub fn append_answer(&mut self, delta: &str) -> bool {
+        if self.is_terminal() || self.answer.finalized || delta.is_empty() {
+            return false;
+        }
+        self.next_ordinal();
+        self.push_answer_bounded(delta);
+        true
+    }
+
+    /// Replace the progressive answer wholesale (a model call restarted its
+    /// text, a moderation rewrite). Ignored once finalized: the transcript
+    /// row is authoritative from then on.
+    pub fn rewrite_answer(&mut self, text: &str) -> bool {
+        if self.is_terminal() || self.answer.finalized {
+            return false;
+        }
+        self.next_ordinal();
+        self.answer.text = ReplyAnswerText(String::new());
+        self.answer.truncated = false;
+        self.push_answer_bounded(text);
+        true
+    }
+
+    /// The loop went on past the model call that produced the answer — a
+    /// capability ran, a gate blocked, another call started — so that text
+    /// was narration, not the answer: it moves to [`Self::narration`] under
+    /// its call and the next call's answer starts empty. This is the transcript's
+    /// own rule (only the run's final assistant message is the answer)
+    /// applied progressively. Ignored once finalized or terminal; a no-op
+    /// while the answer is empty.
+    pub fn reset_answer(&mut self) -> bool {
+        if self.is_terminal() || self.answer.finalized || self.answer.text.0.is_empty() {
+            return false;
+        }
+        self.next_ordinal();
+        if self.narration.len() < REPLY_MAX_NARRATION_ENTRIES {
+            let text = char_boundary_prefix(&self.answer.text.0, REPLY_NARRATION_ENTRY_MAX_BYTES);
+            self.narration.push(ReplyNarration {
+                call: self.answer.call,
+                text: ReplyAnswerText(text.to_string()),
+            });
+        }
+        self.answer.text = ReplyAnswerText(String::new());
+        self.answer.truncated = false;
+        self.answer.call = self.answer.call.saturating_add(1);
+        true
+    }
+
+    /// The canonical finalized transcript text (and its attachments) — the
+    /// authoritative answer, replacing progressive appends.
+    pub fn finalize_answer(
+        &mut self,
+        text: ReplyAnswerText,
+        attachments: Vec<ReplyAttachmentRef>,
+    ) -> bool {
+        self.next_ordinal();
+        self.answer.text = text;
+        self.answer.finalized = true;
+        self.answer.truncated = false;
+        self.attachments = attachments
+            .into_iter()
+            .take(REPLY_MAX_ATTACHMENTS)
+            .collect();
+        true
+    }
+
+    /// Grow the open reasoning segment — the one the model is still
+    /// producing — so a progressive surface can show thinking as it happens.
+    /// Bounded like every segment: growth past the segment bound is dropped
+    /// until [`Self::close_reasoning`] closes it.
+    pub fn append_reasoning(&mut self, text: &ReplyReasoningText) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        if self.reasoning_open
+            && let Some(open) = self.reasoning.last_mut()
+        {
+            let remaining = REPLY_REASONING_SEGMENT_MAX_BYTES.saturating_sub(open.0.len());
+            let fit = char_boundary_prefix(text.as_str(), remaining);
+            open.0.push_str(fit);
+        } else if self.reasoning.len() < REPLY_MAX_REASONING_SEGMENTS {
+            self.reasoning.push(text.clone());
+            self.reasoning_open = true;
+        }
+        if self.attention.is_none() && matches!(self.phase, ReplyPhase::Preparing) {
+            self.phase = ReplyPhase::Thinking;
+        }
+        true
+    }
+
+    /// Close the open reasoning segment with its final text (replace, never
+    /// duplicate), or record `text` as a finished segment.
+    pub fn close_reasoning(&mut self, text: ReplyReasoningText) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        if self.reasoning_open {
+            if let Some(open) = self.reasoning.last_mut() {
+                *open = text;
+            }
+            self.reasoning_open = false;
+        } else if self.reasoning.len() < REPLY_MAX_REASONING_SEGMENTS {
+            self.reasoning.push(text);
+        }
+        if self.attention.is_none() && matches!(self.phase, ReplyPhase::Preparing) {
+            self.phase = ReplyPhase::Thinking;
+        }
+        true
+    }
+
+    /// Start (or retitle) one activity row; the phase moves to `Working`
+    /// while no attention overrides it.
+    pub fn activity_started(
+        &mut self,
+        id: ReplyItemId,
+        title: ReplyDisplayText,
+        detail: Option<ReplyDisplayPreview>,
+    ) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        let ordinal = self.next_ordinal();
+        if let Some(existing) = self.activities.iter_mut().find(|row| row.id == id) {
+            existing.title = title;
+            if detail.is_some() {
+                existing.detail = detail;
+            }
+            existing.updated_ordinal = ordinal;
+        } else if self.activities.len() >= REPLY_MAX_ACTIVITIES {
+            self.activities_truncated = true;
+        } else {
+            self.activities.push(ReplyActivity {
+                id,
+                title,
+                state: ReplyActivityState::Started,
+                detail,
+                output_preview: None,
+                provenance: None,
+                started_ordinal: ordinal,
+                updated_ordinal: ordinal,
+            });
+        }
+        if self.attention.is_none() {
+            self.phase = ReplyPhase::Working;
+        }
+        true
+    }
+
+    /// Finish one activity row. A finish for a row this document never saw
+    /// start (a producer that only observed the terminal milestone) still
+    /// lands as a row: dropping it would hide a failure. Ignored once
+    /// terminal, like every other mutation.
+    pub fn activity_finished(
+        &mut self,
+        id: ReplyItemId,
+        state: ReplyActivityState,
+        output_preview: Option<ReplyDisplayPreview>,
+        provenance: Option<ReplyActivityProvenance>,
+    ) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        let ordinal = self.next_ordinal();
+        if let Some(existing) = self.activities.iter_mut().find(|row| row.id == id) {
+            existing.state = state;
+            if output_preview.is_some() {
+                existing.output_preview = output_preview;
+            }
+            if provenance.is_some() {
+                existing.provenance = provenance;
+            }
+            existing.updated_ordinal = ordinal;
+        } else if self.activities.len() >= REPLY_MAX_ACTIVITIES {
+            self.activities_truncated = true;
+        } else {
+            let title = ReplyDisplayText(id.as_str().to_string());
+            self.activities.push(ReplyActivity {
+                id,
+                title,
+                state,
+                detail: None,
+                output_preview,
+                provenance,
+                started_ordinal: ordinal,
+                updated_ordinal: ordinal,
+            });
+        }
+        true
+    }
+
+    /// The run parked on the user.
+    pub fn require_attention(&mut self, attention: ReplyAttention) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.attention = Some(attention);
+        self.phase = ReplyPhase::WaitingForInput;
+        true
+    }
+
+    /// The gate was answered; the run works again.
+    pub fn clear_attention(&mut self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        if self.attention.is_none() {
+            return false;
+        }
+        self.next_ordinal();
+        self.attention = None;
+        self.phase = ReplyPhase::Working;
+        true
+    }
+
+    pub fn complete(&mut self) -> bool {
+        self.settle(ReplyOutcome::Completed, ReplyPhase::Completed)
+    }
+
+    pub fn fail(&mut self, summary: ReplyDisplayText) -> bool {
+        self.settle(ReplyOutcome::Failed { summary }, ReplyPhase::Failed)
+    }
+
+    pub fn cancel(&mut self) -> bool {
+        self.settle(ReplyOutcome::Cancelled, ReplyPhase::Cancelled)
+    }
+
+    fn push_answer_bounded(&mut self, delta: &str) {
+        // The ban on control characters holds by construction even on the
+        // raw-`&str` paths: strip them (keeping line structure) before the
+        // byte bound is applied.
+        let delta: String = delta
+            .chars()
+            .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+            .collect();
+        let current = &self.answer.text.0;
+        let remaining = REPLY_ANSWER_MAX_BYTES.saturating_sub(current.len());
+        if remaining == 0 {
+            self.answer.truncated = true;
+            return;
+        }
+        if delta.len() <= remaining {
+            self.answer.text.0.push_str(&delta);
+            return;
+        }
+        let fit = char_boundary_prefix(&delta, remaining);
+        self.answer.text.0.push_str(fit);
+        self.answer.truncated = true;
+    }
+
+    fn settle(&mut self, outcome: ReplyOutcome, phase: ReplyPhase) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.outcome = Some(outcome);
+        self.phase = phase;
+        self.attention = None;
+        true
+    }
+}
+
+/// The longest prefix of `text` that fits in `max_bytes` without splitting a
+/// character.
+fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end] // safety: `end` walked back to a char boundary above.
+}
+
+/// Why the host is reconciling now — the cadence point this revision sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyReconcilePoint {
+    /// The first revision of the reply (the run has started answering).
+    Opened,
+    /// Intermediate desired state; only `stream` sinks see these.
+    Progress,
+    /// An input-required transition (attention required or cleared), the
+    /// canonical answer arriving before the terminal fact, or the answer's
+    /// first visible text — none of these wait out the progress pacing
+    /// window.
+    ControlCritical,
+    /// The terminal materialization.
+    Terminal,
+    /// No new change: the host is re-reconciling the same desired state
+    /// (a retry or a periodic heartbeat while the reply is open) so a sink
+    /// may refresh a provider-side liveness signal.
+    Heartbeat,
+}
+
+impl ReplyTransport {
+    /// Whether a sink with this transport is asked to reconcile at `point`.
+    /// `stream` sees every point; `message` sees only the terminal
+    /// materialization — a one-shot channel answers once, and progress,
+    /// attention, and liveness on such a channel stay with the host's
+    /// source-routed notices.
+    pub fn reconciles_at(self, point: ReplyReconcilePoint) -> bool {
+        match self {
+            Self::Stream => true,
+            Self::Message => matches!(point, ReplyReconcilePoint::Terminal),
+        }
+    }
+}
+
+/// One desired state at one monotonic revision of one reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyRevision {
+    /// Monotonic within one publisher's ownership of the reply. A sink keys
+    /// idempotency on its checkpoint, never on this number alone.
+    pub revision: u64,
+    pub document: ReplyDocument,
+}
+
+/// Who can see the target conversation. Decided by the host from facts it
+/// owns (trigger class, conversation model); drives disclosure policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyAudience {
+    /// An authenticated session or a direct conversation with one actor.
+    Private,
+    /// A channel, group, or any conversation with other members.
+    Shared,
+}
+
+/// Where a revision is being reconciled to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyTarget {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub run_id: TurnRunId,
+    /// The vendor conversation the run's input came from. `None` for the
+    /// product projection target (the browser subscribes by thread scope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<ExternalConversationRef>,
+    /// Optional vendor threading anchor within that conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_anchor: Option<ReplyThreadAnchor>,
+    pub audience: ReplyAudience,
+}
+
+/// The adapter's own stored ingress context (`NormalizedInboundMessage::
+/// reply_context`) handed back at reply time. Bounded by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyContextBytes(Vec<u8>);
+
+impl ReplyContextBytes {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, ReplyContractError> {
+        if bytes.len() > REPLY_CONTEXT_MAX_BYTES {
+            return Err(ReplyContractError::ReplyContextTooLarge {
+                max: REPLY_CONTEXT_MAX_BYTES,
+            });
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Adapter-owned reconciliation state the host persists between calls
+/// (provider session/message refs, appended offsets, task hashes). Opaque to
+/// the host beyond its bound; `version` lets a sink refuse a checkpoint it no
+/// longer understands after an upgrade instead of misapplying it. Fields are
+/// private so the bound holds by construction, including across
+/// deserialization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ReplySinkCheckpointWire")]
+pub struct ReplySinkCheckpoint {
+    version: u32,
+    payload: String,
+}
+
+#[derive(Deserialize)]
+struct ReplySinkCheckpointWire {
+    version: u32,
+    payload: String,
+}
+
+impl TryFrom<ReplySinkCheckpointWire> for ReplySinkCheckpoint {
+    type Error = ReplyContractError;
+
+    fn try_from(wire: ReplySinkCheckpointWire) -> Result<Self, Self::Error> {
+        Self::new(wire.version, wire.payload)
+    }
+}
+
+impl ReplySinkCheckpoint {
+    pub fn new(version: u32, payload: impl Into<String>) -> Result<Self, ReplyContractError> {
+        let payload = payload.into();
+        if payload.len() > REPLY_SINK_CHECKPOINT_MAX_BYTES {
+            return Err(ReplyContractError::CheckpointTooLarge {
+                max: REPLY_SINK_CHECKPOINT_MAX_BYTES,
+            });
+        }
+        Ok(Self { version, payload })
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub fn payload(&self) -> &str {
+        &self.payload
+    }
+}
+
+/// One reconciliation request: the desired revision, the target, the
+/// adapter's stored ingress context, its last checkpoint, and — on the
+/// terminal point only — the materialized final attachments.
+#[derive(Debug, Clone)]
+pub struct ReplyReconcileRequest {
+    pub revision: ReplyRevision,
+    pub point: ReplyReconcilePoint,
+    pub target: ReplyTarget,
+    /// The opaque `reply_context` the adapter attached to the originating
+    /// inbound message, when the target has one.
+    pub reply_context: Option<ReplyContextBytes>,
+    /// The checkpoint the sink returned from its previous applied
+    /// reconciliation for this `(reply, target)`, if any.
+    pub checkpoint: Option<ReplySinkCheckpoint>,
+    /// The extension generation the host resolved this sink from. A sink
+    /// compares it with the generation its checkpoint was minted under.
+    pub extension_generation: u64,
+    /// The final attachments, read by the host under policy immediately
+    /// before this call. Non-empty only at [`ReplyReconcilePoint::Terminal`]
+    /// (and only when the document lists attachments); transient — never
+    /// persisted in checkpoints, attempts, events, or projections.
+    pub materialized_attachments: Vec<WorkspaceFile>,
+}
+
+/// Provider-issued references, bounded by construction: at most
+/// [`REPLY_MAX_PROVIDER_REFS`], each within [`REPLY_PROVIDER_REF_MAX_BYTES`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<ReplyProviderRef>")]
+pub struct ReplyProviderRefs(Vec<ReplyProviderRef>);
+
+impl ReplyProviderRefs {
+    pub fn new(refs: Vec<ReplyProviderRef>) -> Result<Self, ReplyContractError> {
+        if refs.len() > REPLY_MAX_PROVIDER_REFS {
+            return Err(ReplyContractError::TooManyItems {
+                field: "reply sink provider refs",
+                max: REPLY_MAX_PROVIDER_REFS,
+            });
+        }
+        Ok(Self(refs))
+    }
+
+    /// Append one reference; a reference past the bound is refused rather
+    /// than silently dropped so a sink notices it is over-reporting.
+    pub fn push(&mut self, reference: ReplyProviderRef) -> Result<(), ReplyContractError> {
+        if self.0.len() >= REPLY_MAX_PROVIDER_REFS {
+            return Err(ReplyContractError::TooManyItems {
+                field: "reply sink provider refs",
+                max: REPLY_MAX_PROVIDER_REFS,
+            });
+        }
+        self.0.push(reference);
+        Ok(())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ReplyProviderRef> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl TryFrom<Vec<ReplyProviderRef>> for ReplyProviderRefs {
+    type Error = ReplyContractError;
+
+    fn try_from(refs: Vec<ReplyProviderRef>) -> Result<Self, Self::Error> {
+        Self::new(refs)
+    }
+}
+
+/// Provider evidence a sink reports — the neutral proof of what the provider
+/// did, distinct from the resume-state checkpoint. `read_back_verified` is
+/// true only when the sink re-read provider state and found the revision
+/// reflected. The host persists the latest evidence on the attempt
+/// aggregate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplySinkEvidence {
+    #[serde(default)]
+    pub provider_refs: ReplyProviderRefs,
+    #[serde(default)]
+    pub read_back_verified: bool,
+}
+
+/// What the provider did with one reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplySinkOutcome {
+    /// The provider now reflects the requested revision.
+    Applied,
+    /// Nothing was changed provider-side; try the same revision again after
+    /// `retry_after` (the provider's hint) or the host's backoff.
+    Retryable {
+        reason: ReplyOutcomeReason,
+        retry_after: Option<Duration>,
+    },
+    /// The request crossed into transport and the provider may or may not
+    /// have applied it. The host records the uncertainty; the sink's returned
+    /// checkpoint should reflect what it could read back.
+    Ambiguous { reason: ReplyOutcomeReason },
+    /// This target can no longer take this reply.
+    Permanent { reason: ReplyOutcomeReason },
+    /// The provider rejected the credential. The host records the sanitized
+    /// failure and settles the publication fail-closed
+    /// (`.claude/rules/lifecycle.md`: authentication rejection is terminal —
+    /// never retried until the credential changes). Restoring the channel's
+    /// credentials goes through the extension's ordinary reconnect/setup
+    /// flow; a settled reply is not republished afterwards.
+    Unauthorized { reason: ReplyOutcomeReason },
+    /// The provider reports the user stopped this reply. The host records a
+    /// cancellation for the reply.
+    StoppedByUser,
+}
+
+impl ReplySinkOutcome {
+    pub fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Retryable { .. } => "retryable",
+            Self::Ambiguous { .. } => "ambiguous",
+            Self::Permanent { .. } => "permanent",
+            Self::Unauthorized { .. } => "unauthorized",
+            Self::StoppedByUser => "stopped_by_user",
+        }
+    }
+}
+
+/// One reconciliation's result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplySinkReport {
+    pub outcome: ReplySinkOutcome,
+    /// The next checkpoint to persist for this `(reply, target)`; `None`
+    /// keeps the previous one.
+    pub checkpoint: Option<ReplySinkCheckpoint>,
+    pub evidence: ReplySinkEvidence,
+}
+
+impl ReplySinkReport {
+    pub fn applied(checkpoint: Option<ReplySinkCheckpoint>, evidence: ReplySinkEvidence) -> Self {
+        Self {
+            outcome: ReplySinkOutcome::Applied,
+            checkpoint,
+            evidence,
+        }
+    }
+}
+
+/// **The reply half** — every channel declaring `[channel.reply]` binds one.
+/// The host asks it to reconcile its provider toward successive desired
+/// revisions of one reply at the cadence its declared transport admits
+/// ([`ReplyTransport::reconciles_at`]); the sink owns every provider
+/// mechanic behind its checkpoint and never writes delivery state.
+///
+/// Contract:
+/// - Idempotent for a repeated `(reply, target, revision)`: the checkpoint
+///   tells the sink what it already applied.
+/// - Must never claim `Applied` for a request the provider may not have
+///   accepted; report `Ambiguous` and, where the provider allows, read back.
+/// - Must never trust a checkpoint whose `version` it does not understand.
+/// - Reasons are diagnostic text the host never renders; never put provider
+///   payloads, tokens, or user content in them.
+#[async_trait]
+pub trait ReplySink: Send + Sync {
+    async fn reconcile(
+        &self,
+        request: ReplyReconcileRequest,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<ReplySinkReport, ChannelError>;
+}

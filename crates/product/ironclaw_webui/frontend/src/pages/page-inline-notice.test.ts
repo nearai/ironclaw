@@ -13,7 +13,9 @@ const PAGE_FILES = [
   "./extensions/extensions-page.tsx",
 ] as const;
 
-const SETTINGS_ADMIN_NOTICE_CONSUMERS = [
+const NOTICE_CONSUMERS = [
+  ["./automations/automations-page.tsx", 3],
+  ["./automations/components/notification-channels-panel.tsx", 3],
   ["./settings/settings-page.tsx", 1],
   ["./settings/components/settings-toolbar.tsx", 1],
   ["./settings/components/restart-banner.tsx", 3],
@@ -24,6 +26,25 @@ const SETTINGS_ADMIN_NOTICE_CONSUMERS = [
   ["./admin/components/configuration-tab.tsx", 3],
   ["./admin/components/users-tab.tsx", 2],
   ["./admin/components/user-detail.tsx", 2],
+] as const;
+
+const AUTOMATIONS_NOTICE_CONSUMERS = [
+  [
+    "./automations/automations-page.tsx",
+    [
+      { roles: ["alert"], tones: ["danger"] },
+      { roles: ["status"], tones: ["warning"] },
+      { roles: ["status"], tones: ["warning"] },
+    ],
+  ],
+  [
+    "./automations/components/notification-channels-panel.tsx",
+    [
+      { roles: ["alert"], tones: ["danger"] },
+      { roles: ["status"], tones: ["success"] },
+      { roles: ["alert"], tones: ["danger"] },
+    ],
+  ],
 ] as const;
 
 function expressionValues(expression: ts.Expression): string[] | null {
@@ -91,7 +112,7 @@ for (const pageFile of PAGE_FILES) {
   });
 }
 
-for (const [consumerFile, minimumNoticeCount] of SETTINGS_ADMIN_NOTICE_CONSUMERS) {
+for (const [consumerFile, minimumNoticeCount] of NOTICE_CONSUMERS) {
   test(`${consumerFile} routes page feedback through InlineNotice`, () => {
     const source = readFileSync(new URL(consumerFile, import.meta.url), "utf8");
     const notices = inlineNoticeAttributes(source, consumerFile);
@@ -117,6 +138,15 @@ for (const [consumerFile, minimumNoticeCount] of SETTINGS_ADMIN_NOTICE_CONSUMERS
         );
       }
     }
+  });
+}
+
+for (const [consumerFile, expectedNotices] of AUTOMATIONS_NOTICE_CONSUMERS) {
+  test(`${consumerFile} assigns semantic roles and tones to every standard notice`, () => {
+    const source = readFileSync(new URL(consumerFile, import.meta.url), "utf8");
+
+    assert.deepEqual(inlineNoticeAttributes(source, consumerFile), expectedNotices);
+    assert.doesNotMatch(source, /bg-(?:red|amber|emerald)-500\/10/);
   });
 }
 

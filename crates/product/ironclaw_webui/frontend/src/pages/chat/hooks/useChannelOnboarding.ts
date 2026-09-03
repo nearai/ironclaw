@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import {
   channelConnectionContinuationMessage,
@@ -31,6 +30,22 @@ import {
 const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";
 const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
+
+type ChannelConnectionWaiter = {
+  channel: string;
+  threadId: string;
+  sourceMessageId?: string | null;
+};
+
+// The shared boundary module is typed by #8034. Keep this caller independently
+// checkable while preserving the complete waiter shape it already sends.
+function rememberConnectionWaiter(waiter: ChannelConnectionWaiter) {
+  rememberChannelConnectionWaiter(waiter);
+}
+
+function forgetConnectionWaiter(waiter: ChannelConnectionWaiter) {
+  forgetChannelConnectionWaiter(waiter);
+}
 
 function authPopupFailureMessage(reason, t) {
   return reason === "popup_blocked"
@@ -225,7 +240,7 @@ export function useChannelOnboarding(
 
   React.useEffect(() => {
     if (pendingOnboarding?.threadId && pendingOnboarding?.extensionName) {
-      rememberChannelConnectionWaiter({
+      rememberConnectionWaiter({
         channel: pendingOnboarding.extensionName,
         threadId: pendingOnboarding.threadId,
         sourceMessageId: pendingOnboarding.sourceMessageId || null,
@@ -245,7 +260,7 @@ export function useChannelOnboarding(
         dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
         persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
       }
-      forgetChannelConnectionWaiter({
+      forgetConnectionWaiter({
         channel: onboarding.extensionName,
         threadId: threadForResume,
         sourceMessageId: onboarding.sourceMessageId || null,
@@ -424,7 +439,7 @@ export function useChannelOnboarding(
         ? Promise.resolve(fetchOauthFlowStatus(pending.flowId, pending.invocationId))
         : Promise.resolve(null);
       flowStatus
-        .then((result) => {
+        .then<Awaited<ReturnType<typeof fetchExtensions>> | null | void>((result) => {
           if (!flowSnapshotIsCurrent(pending)) return null;
           if (result?.status === "completed") return finishCompletion(pending);
           const statusErrorKey = OAUTH_FLOW_STATUS_ERROR_KEYS[result?.status];
@@ -586,7 +601,7 @@ export function useChannelOnboarding(
         dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
         persistDismissedOnboardingId(threadForDismiss, onboarding.sourceMessageId);
       }
-      forgetChannelConnectionWaiter({
+      forgetConnectionWaiter({
         channel: onboarding.extensionName,
         threadId: threadForDismiss,
         sourceMessageId: onboarding.sourceMessageId || null,

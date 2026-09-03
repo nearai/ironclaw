@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 const COPY = {
   "automations.empty.copied": "Copied",
@@ -98,7 +99,10 @@ function t(key) {
   return COPY[key] || key;
 }
 
-function createHarness({ clipboard = async () => {}, includeClipboard = true } = {}) {
+function createHarness({
+  clipboard = async () => {},
+  includeClipboard = true,
+}: DynamicTestOptions = {}) {
   const state = [];
   let cursor = 0;
   let nextTimerId = 1;
@@ -144,7 +148,7 @@ function createHarness({ clipboard = async () => {}, includeClipboard = true } =
       }
     : {};
 
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     Button,
     Icon,

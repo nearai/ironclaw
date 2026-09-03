@@ -1,8 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../test-support/vm-module-harness";
+import type { DynamicTestValue } from "../test-support/dynamic-test-types";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -129,6 +129,7 @@ const defaultOptions = [
 ];
 
 function createHarness() {
+  const listeners: Record<string, DynamicTestValue> = {};
   const state = {
     effectCursor: 0,
     effects: [],
@@ -136,7 +137,7 @@ function createHarness() {
     hooks: [],
     listenerAdds: 0,
     listenerRemoves: 0,
-    listeners: {},
+    listeners,
     refCursor: 0,
     refs: [],
   };
@@ -254,14 +255,64 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
   assert.match(collectTemplateText(rendered), /aria-haspopup="listbox"/);
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
   assert.equal(collectObjects(rendered).some((value) => "aria-owns" in value), false);
-  assert.equal(collectObjects(rendered).some((value) => "aria-controls" in value), false);
+  assert.match(
+    firstObjectWith(rendered, "aria-controls")["aria-controls"],
+    /^v2-select-menu-\d+-listbox$/,
+  );
   assert.equal(
     collectObjects(rendered).some((value) => "aria-activedescendant" in value),
     false
   );
   assert.ok(collectScalars(rendered).includes("Follow global"));
   assert.doesNotMatch(collectTemplateText(rendered), /<select/);
-  assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
+  assert.match(collectTemplateText(rendered), /role="listbox"/);
+  assert.match(collectTemplateText(rendered), /hidden="true"/);
+});
+
+test("SelectMenu renders a generic option adornment in the trigger and listbox", () => {
+  const harness = createHarness();
+  const props = {
+    options: [
+      { value: "default", label: "Vision model", adornment: "Image input tag" },
+    ],
+  };
+
+  let rendered = harness.render(props);
+  assert.ok(collectScalars(rendered).includes("Image input tag"));
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  assert.equal(
+    collectScalars(rendered).filter((value) => value === "Image input tag").length,
+    2
+  );
+});
+
+test("SelectMenu describes selected and open options with accessible metadata", () => {
+  const harness = createHarness();
+  const props = {
+    options: [
+      {
+        value: "default",
+        label: "Vision model",
+        adornment: "Image input tag",
+        accessibleDescription: "Text, Image input",
+      },
+    ],
+  };
+
+  let rendered = harness.render(props);
+  const selectedDescriptionId = firstValueAfter(rendered, "aria-describedby=");
+  assert.match(selectedDescriptionId, /^v2-select-menu-\d+-selected-description$/);
+  assert.ok(collectScalars(rendered).includes("Text, Image input"));
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  const descriptionIds = valuesAfter(rendered, "aria-describedby=");
+  assert.ok(
+    descriptionIds.some((value) => /-option-0-description$/.test(value)),
+    "the open option should expose the same capability description",
+  );
 });
 
 test("SelectMenu supports a compact reusable size", () => {

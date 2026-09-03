@@ -6,7 +6,7 @@ import { Skeleton } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
 import { useAccountTraces } from "../hooks/useAccountTraces";
-import { mintAccountLoginLink } from "../lib/settings-api";
+import { mintAccountLoginLink } from "../lib/trace-api";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 

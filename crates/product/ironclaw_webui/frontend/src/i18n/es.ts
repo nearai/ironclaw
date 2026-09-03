@@ -205,7 +205,6 @@ registerPack("es", {
   "activity.separator": ", ",
   "tool.tabDetails": "Detalles",
   "tool.tabParameters": "Parámetros",
-  "tool.tabResult": "Resultado",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Rechazado",
   "tool.noDetail": "Sin detalles adicionales.",
@@ -382,6 +381,9 @@ registerPack("es", {
   "llm.idTaken": "El ID de proveedor \"{id}\" ya está utilizado.",
   "llm.invalidId": "Utilice letras minúsculas, números, guiones o guiones bajos.",
   "llm.model": "Modelo",
+  "llm.capabilityText": "Texto",
+  "llm.capabilityImageInput": "Entrada de imagen",
+  "llm.capabilityImageOutput": "Salida de imagen",
   "llm.modelPreference": "Preferencia de modelo",
   "llm.modelPreferenceDesc": "Se usa para los mensajes futuros en todas las conversaciones.",
   "llm.catalogLoadFailed": "No se pudieron cargar los modelos disponibles.",
@@ -1192,6 +1194,7 @@ registerPack("es", {
   "common.deleteChat": "Eliminar chat",
   "chat.deleteFailed": "No se pudo eliminar esta conversación.",
   "chat.cancelFailed": "No se pudo detener esta ejecución. Puede que siga en curso. Inténtalo de nuevo.",
+  "chat.runStopped": "Detenido",
   "chat.deleteBusy": "No se puede eliminar una conversación mientras se está ejecutando. Detenla primero y vuelve a intentarlo.",
   "command.placeholder": "Escriba un comando o busque...",
   "routine.searchPlaceholder": "Buscar nombre de rutina, activador o acción",
@@ -1401,7 +1404,6 @@ registerPack("es", {
   "common.file": "archivo",
   "chat.previewAttachment": "Previsualizar {name}",
   "chat.downloadAttachment": "Descargar {name}",
-  "tool.resultAlt": "Resultado de herramienta"
 });
 
 registerPack("es", {

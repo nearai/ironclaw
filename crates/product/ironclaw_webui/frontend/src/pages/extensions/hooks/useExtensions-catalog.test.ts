@@ -1,8 +1,12 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type {
+  DynamicTestOptions,
+  DynamicTestValue,
+} from "../../../test-support/dynamic-test-types";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 import { hasChannelSurface } from "../lib/extensions-schema";
 
@@ -31,13 +35,13 @@ function useExtensionsSourceForTest() {
   return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, useOauthSetup, useSetupSubmit };`;
 }
 
-function useExtensionsForTest({ extensions, registry }) {
+function useExtensionsForTest({ extensions, registry }: DynamicTestOptions) {
   const queryData = new Map([
     ["extensions", { extensions }],
     ["extension-registry", { entries: registry }],
     ["gateway-status-extensions", {}],
   ]);
-  const context = {
+  const context: vm.Context = {
     React: {
       useCallback: (fn) => fn,
       useEffect: () => {},
@@ -73,7 +77,7 @@ function useExtensionsForTest({ extensions, registry }) {
       };
     },
     useQueryClient: () => ({ invalidateQueries: () => {} }),
-    useT: () => (key, params = {}) =>
+    useT: () => (key, params: DynamicTestOptions = {}) =>
       `${key}${params.name ? `:${params.name}` : ""}`,
     window: { clearInterval: () => {}, setInterval: () => 1 },
   };
@@ -135,7 +139,7 @@ test("useExtensions merges registry and installed entries with installed first",
     ],
   });
 
-  const { catalogEntries } = result;
+  const catalogEntries: DynamicTestValue[] = result.catalogEntries;
   assert.deepEqual(
     Array.from(catalogEntries, (entry) => Boolean(entry.installed)),
     [true, true, true, false, false],
@@ -164,7 +168,7 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
   const catalogError = new Error("catalog unavailable");
   const refetched = [];
   const queryConfigs = [];
-  const context = {
+  const context: vm.Context = {
     React: {
       useCallback: (fn) => fn,
       useEffect: () => {},
@@ -234,7 +238,7 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
 test("extension mutations preserve stable client action ids through hook payloads", async () => {
   const calls = [];
   let generated = 0;
-  const context = {
+  const context: vm.Context = {
     React: {
       useCallback: (fn) => fn,
       useEffect: () => {},
@@ -324,7 +328,7 @@ function installMutationHarness(authoritativeExtension) {
   const openCalls = [];
   const setupRequests = [];
   const refetches = [];
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     URL,
@@ -587,7 +591,7 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
     },
     location: { href: "about:blank" },
   };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     URL,

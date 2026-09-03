@@ -205,7 +205,6 @@ registerPack("fr", {
   "activity.separator": ", ",
   "tool.tabDetails": "Détails",
   "tool.tabParameters": "Paramètres",
-  "tool.tabResult": "Résultat",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Refusé",
   "tool.noDetail": "Aucun détail supplémentaire.",
@@ -382,6 +381,9 @@ registerPack("fr", {
   "llm.idTaken": "L'ID du fournisseur \"{id}\" est déjà utilisé.",
   "llm.invalidId": "Utilisez des lettres minuscules, des chiffres, des traits d'union ou des traits de soulignement.",
   "llm.model": "Modèle",
+  "llm.capabilityText": "Texte",
+  "llm.capabilityImageInput": "Entrée d’image",
+  "llm.capabilityImageOutput": "Sortie d’image",
   "llm.modelPreference": "Préférence de modèle",
   "llm.modelPreferenceDesc": "Utilisée pour les futurs messages dans toutes les conversations.",
   "llm.catalogLoadFailed": "Impossible de charger les modèles disponibles.",
@@ -1191,6 +1193,7 @@ registerPack("fr", {
   "common.deleteChat": "Supprimer le chat",
   "chat.deleteFailed": "Impossible de supprimer cette conversation.",
   "chat.cancelFailed": "Impossible d'arrêter cette exécution. Elle est peut-être toujours en cours. Réessayez.",
+  "chat.runStopped": "Arrêté",
   "chat.deleteBusy": "Impossible de supprimer une conversation en cours d'exécution. Arrêtez-la d'abord, puis réessayez.",
   "command.placeholder": "Tapez une commande ou recherchez...",
   "routine.searchPlaceholder": "Rechercher le nom, le déclencheur ou l'action de la routine",
@@ -1400,7 +1403,6 @@ registerPack("fr", {
   "common.file": "fichier",
   "chat.previewAttachment": "Prévisualiser {name}",
   "chat.downloadAttachment": "Télécharger {name}",
-  "tool.resultAlt": "Résultat d'outil"
 });
 
 registerPack("fr", {

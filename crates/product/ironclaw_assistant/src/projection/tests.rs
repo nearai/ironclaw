@@ -26,8 +26,9 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_contracts::{
-    LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
-    SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+    AgentLoopHostError, LoopHostMilestone, LoopHostMilestoneSink, LoopSafeSummary,
+    SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
+    SystemInferenceTaskId, SystemTaskKind,
 };
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
@@ -48,7 +49,140 @@ mod display_preview;
 mod display_preview_runtime;
 mod failure_explanation;
 mod live_progress_stream;
+
+struct NoLiveEgress;
+
+#[async_trait]
+impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for NoLiveEgress {
+    async fn send(
+        &self,
+        _request: ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest,
+    ) -> Result<
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
+    > {
+        Err(ironclaw_extension_contracts::tool_adapter::RestrictedEgressError::PolicyDenied)
+    }
+}
+
+/// Drives loop milestones through the same two stages production uses —
+/// the reply projection composes the run's safe document, the projection
+/// reply sink renders each revision as live projection items — without the
+/// publication worker between them (its coalescing, leases, and persistence
+/// are covered by `crate::delivery_coordinator::publication`). Each revision is reconciled
+/// synchronously with the sink's own checkpoint from the previous one.
+struct ProjectionReplyDrive {
+    inner: Arc<dyn LoopHostMilestoneSink>,
+    projection: Arc<crate::projection::reply::ReplyProjection>,
+    sink: crate::projection::reply_sink::ProjectionReplySink,
+    owner: UserId,
+    checkpoints: std::sync::Mutex<
+        std::collections::HashMap<
+            TurnRunId,
+            (
+                u64,
+                ironclaw_extension_contracts::reply::ReplySinkCheckpoint,
+            ),
+        >,
+    >,
+}
+
+impl ProjectionReplyDrive {
+    async fn reconcile_latest(&self, scope: &TurnScope, run_id: TurnRunId) {
+        use ironclaw_extension_contracts::reply::{
+            ReplyAudience, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
+            ReplyTarget,
+        };
+        let Some(snapshot) = self.projection.snapshot(scope, run_id) else {
+            return;
+        };
+        let previous = self.checkpoints.lock().unwrap().get(&run_id).cloned();
+        if previous
+            .as_ref()
+            .is_some_and(|(revision, _)| *revision >= snapshot.revision)
+        {
+            return;
+        }
+        let point = if snapshot.document.is_terminal() {
+            ReplyReconcilePoint::Terminal
+        } else if previous.is_none() {
+            ReplyReconcilePoint::Opened
+        } else {
+            ReplyReconcilePoint::Progress
+        };
+        let actor = snapshot
+            .actor
+            .clone()
+            .unwrap_or_else(|| TurnActor::new(self.owner.clone()));
+        let report = self
+            .sink
+            .reconcile(
+                ReplyReconcileRequest {
+                    revision: ReplyRevision {
+                        revision: snapshot.revision,
+                        document: snapshot.document,
+                    },
+                    point,
+                    target: ReplyTarget {
+                        scope: scope.clone(),
+                        actor,
+                        run_id,
+                        conversation: None,
+                        thread_anchor: None,
+                        audience: ReplyAudience::Private,
+                    },
+                    reply_context: None,
+                    checkpoint: previous.map(|(_, checkpoint)| checkpoint),
+                    extension_generation: 0,
+                    materialized_attachments: Vec::new(),
+                },
+                &NoLiveEgress,
+            )
+            .await
+            .expect("projection reply sink reconciles");
+        if let Some(checkpoint) = report.checkpoint {
+            self.checkpoints
+                .lock()
+                .unwrap()
+                .insert(run_id, (snapshot.revision, checkpoint));
+        }
+    }
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for ProjectionReplyDrive {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.publish_loop_milestone(milestone.clone()).await?;
+        self.projection.observe_milestone(&milestone);
+        self.reconcile_latest(&milestone.scope, milestone.run_id)
+            .await;
+        Ok(())
+    }
+}
+
+/// The production-shaped live path for these tests: milestones → reply
+/// projection → projection reply sink → the live update source the product
+/// stream tails. Returns the drive so a test can also apply terminal facts.
+fn live_progress_sink_for_tests(
+    inner: Arc<dyn LoopHostMilestoneSink>,
+    publisher: Arc<LiveProjectionPublisher>,
+    owner: UserId,
+) -> Arc<ProjectionReplyDrive> {
+    let sink = crate::projection::reply_sink::ProjectionReplySink::new();
+    assert!(sink.bind_publisher(publisher));
+    Arc::new(ProjectionReplyDrive {
+        inner,
+        projection: Arc::new(crate::projection::reply::ReplyProjection::new()),
+        sink,
+        owner,
+        checkpoints: std::sync::Mutex::new(std::collections::HashMap::new()),
+    })
+}
 mod nested_dispatch_stream;
+mod reply_sink;
 mod runtime_stream;
 mod turn_stream;
 mod turn_stream_auth;

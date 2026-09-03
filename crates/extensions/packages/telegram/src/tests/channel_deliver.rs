@@ -11,21 +11,27 @@ use ironclaw_host_api::attachment::WorkspaceFile;
 
 use super::*;
 
-struct ScriptedEgress {
-    requests: Mutex<Vec<RestrictedEgressRequest>>,
+/// Scripted Bot API stand-in shared with the reply-sink tests
+/// (`crate::reply::tests`): answers each call from a queue and records every
+/// request so a test can read back exactly what reached the vendor.
+pub(crate) struct ScriptedEgress {
+    pub(crate) requests: Mutex<Vec<RestrictedEgressRequest>>,
     responses: Mutex<VecDeque<Result<RestrictedEgressResponse, RestrictedEgressError>>>,
 }
 
 impl ScriptedEgress {
-    fn new(responses: Vec<Result<RestrictedEgressResponse, RestrictedEgressError>>) -> Self {
+    pub(crate) fn new(
+        responses: Vec<Result<RestrictedEgressResponse, RestrictedEgressError>>,
+    ) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into_iter().collect()),
         }
     }
 
-    fn ok(body: &str) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+    pub(crate) fn ok(body: &str) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
         Ok(RestrictedEgressResponse {
+            retry_after: None,
             status: 200,
             body: body.as_bytes().to_vec(),
         })
@@ -72,7 +78,11 @@ fn envelope_with_reply(
     envelope
 }
 
-fn workspace_file(filename: Option<&str>, mime_type: &str, bytes: &[u8]) -> WorkspaceFile {
+pub(crate) fn workspace_file(
+    filename: Option<&str>,
+    mime_type: &str,
+    bytes: &[u8],
+) -> WorkspaceFile {
     WorkspaceFile {
         path: ironclaw_host_api::path::ScopedPath::new("/workspace/report.pdf")
             .expect("workspace path"),
@@ -212,6 +222,7 @@ async fn deliver_react_distinguishes_safe_retry_from_ambiguous_response() {
     for (response, expected_reason, expected_ambiguous) in [
         (
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 429,
                 body: Vec::new(),
             }),

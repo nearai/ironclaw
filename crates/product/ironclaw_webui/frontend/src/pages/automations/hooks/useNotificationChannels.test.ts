@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, test, vi } from "vitest";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 const notificationChannelsApi = vi.hoisted(() => ({
   getNotificationChannels: vi.fn(),
@@ -80,7 +81,7 @@ async function settleUntil(predicate, description) {
   throw new Error(`timed out waiting for: ${description}`);
 }
 
-function target(targetId, overrides = {}) {
+function target(targetId, overrides: DynamicTestOptions = {}) {
   return {
     target: {
       target_id: targetId,
@@ -98,7 +99,7 @@ function target(targetId, overrides = {}) {
  * `crates/ironclaw_product/src/reborn_services/types.rs`). Test fixtures that
  * pair `status: "available"` with `option: null` are not a shape the backend
  * ever actually sends. */
-function channel(targetId, overrides = {}) {
+function channel(targetId, overrides: DynamicTestOptions = {}) {
   const status = overrides.status ?? "available";
   const isAvailable = status === "available";
   return {

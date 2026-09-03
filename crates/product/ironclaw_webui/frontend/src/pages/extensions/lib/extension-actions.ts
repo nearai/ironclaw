@@ -1,4 +1,3 @@
-// @ts-nocheck
 export function primaryExtensionAction(ext) {
   const state = extensionLifecycleState(ext);
 

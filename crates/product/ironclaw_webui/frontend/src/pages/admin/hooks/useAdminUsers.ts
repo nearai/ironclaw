@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -16,11 +15,50 @@ import {
 
 const ADMIN_USERS_PAGE_SIZE = 20;
 
+type AdminUser = {
+  id: string;
+  user_id?: string;
+  token?: string;
+  display_name?: string;
+  email?: string;
+  role?: string;
+  status?: string;
+  created_at?: string;
+  last_login_at?: string;
+  last_active_at?: string;
+  created_by?: string;
+  job_count?: number;
+  total_cost?: number;
+  [key: string]: unknown;
+};
+
+type AdminUsersPage = {
+  users: AdminUser[];
+  total: number;
+  nextCursor: string | null;
+};
+
+type AdminUserPayload = Record<string, unknown>;
+type UpdateAdminUserVariables = { id: string; payload: AdminUserPayload };
+type PutSecretVariables = { handle: string; value: string };
+type AdminSecret = { handle: string; [key: string]: unknown };
+
+function apiErrorField(error: unknown, field: string): unknown {
+  return error && typeof error === "object" ? Reflect.get(error, field) : undefined;
+}
+
+function apiErrorPayloadField(error: unknown, field: string): unknown {
+  const payload = apiErrorField(error, "payload");
+  return payload && typeof payload === "object"
+    ? Reflect.get(payload, field)
+    : undefined;
+}
+
 export function useAdminUsers() {
   const queryClient = useQueryClient();
   const requestedMoreRef = React.useRef(false);
 
-  const query = useQuery({
+  const query = useQuery<AdminUsersPage>({
     queryKey: ["admin", "users"],
     queryFn: ({ signal }) => fetchAdminUsers({
       limit: ADMIN_USERS_PAGE_SIZE,
@@ -37,7 +75,7 @@ export function useAdminUsers() {
     },
   });
 
-  const [additionalPages, setAdditionalPages] = React.useState([]);
+  const [additionalPages, setAdditionalPages] = React.useState<AdminUsersPage[]>([]);
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [loadMoreError, setLoadMoreError] = React.useState(null);
   const initialPageUpdatedAtRef = React.useRef(query.dataUpdatedAt);
@@ -49,9 +87,11 @@ export function useAdminUsers() {
     requestedMoreRef.current = false;
   }, [query.dataUpdatedAt]);
 
-  const pages = [query.data, ...additionalPages].filter(Boolean);
+  const pages = [query.data, ...additionalPages].filter(
+    (page): page is AdminUsersPage => Boolean(page),
+  );
   const users = React.useMemo(() => {
-    const seen = new Set();
+    const seen = new Set<string>();
     return pages.flatMap((page) =>
       (page?.users || []).filter((user) => {
         const id = user?.id || user?.user_id;
@@ -62,7 +102,7 @@ export function useAdminUsers() {
     );
   }, [query.data, additionalPages]);
   const nextCursor = pages.at(-1)?.nextCursor || null;
-  const loadMoreInFlightRef = React.useRef(null);
+  const loadMoreInFlightRef = React.useRef<Promise<AdminUsersPage | null> | null>(null);
   const loadMore = React.useCallback(() => {
     if (!nextCursor) return Promise.resolve();
     requestedMoreRef.current = true;
@@ -76,11 +116,11 @@ export function useAdminUsers() {
     // matches React Query's default retry policy for the initial page query
     // above and keeps pagination resilient under brief backend hiccups.
     // Non-retryable failures (4xx authorization/validation) fail fast.
-    const isTransient = (error) => {
-      const status = error?.status;
+    const isTransient = (error: unknown) => {
+      const status = apiErrorField(error, "status");
       if (typeof status !== "number") return true;
       if (status === 429 || status >= 500) return true;
-      return Boolean(error?.payload?.retryable);
+      return Boolean(apiErrorPayloadField(error, "retryable"));
     };
     const attempt = (retriesLeft: number) =>
       fetchAdminUsers({
@@ -114,17 +154,18 @@ export function useAdminUsers() {
   // "403"/"Forbidden" would miss it and never render the admin-required panel.
   // Prefer the numeric status; fall back to the parsed error/kind code.
   const err = query.error;
-  const errorCode = err?.payload?.kind || err?.payload?.error;
+  const errorCode =
+    apiErrorPayloadField(err, "kind") || apiErrorPayloadField(err, "error");
   const isForbidden =
-    err?.status === 403 ||
+    apiErrorField(err, "status") === 403 ||
     errorCode === "forbidden" ||
     errorCode === "participant_denied";
 
   const invalidateUsers = () =>
     queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
-  const refreshUser = (userId, user) => {
+  const refreshUser = (userId: string, user: AdminUser) => {
     if (userId && user?.id === userId) {
-      queryClient.setQueryData(["admin", "user", userId], (currentUser) =>
+      queryClient.setQueryData<AdminUser>(["admin", "user", userId], (currentUser) =>
         currentUser ? { ...currentUser, ...user } : user,
       );
     }
@@ -141,20 +182,23 @@ export function useAdminUsers() {
     return Promise.all(invalidations);
   };
 
-  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
-  const updateMut = useMutation({
+  const createMut = useMutation<AdminUser, Error, AdminUserPayload>({
+    mutationFn: createAdminUser,
+    onSuccess: invalidateUsers,
+  });
+  const updateMut = useMutation<AdminUser, Error, UpdateAdminUserVariables>({
     mutationFn: ({ id, payload }) => updateAdminUser(id, payload),
     onSuccess: (user, { id }) => refreshUser(id, user),
   });
-  const deleteMut = useMutation({
+  const deleteMut = useMutation<unknown, Error, string>({
     mutationFn: (id) => deleteAdminUser(id),
     onSuccess: invalidateUsers,
   });
-  const suspendMut = useMutation({
+  const suspendMut = useMutation<AdminUser, Error, string>({
     mutationFn: (id) => suspendAdminUser(id),
     onSuccess: (user, id) => refreshUser(id, user),
   });
-  const activateMut = useMutation({
+  const activateMut = useMutation<AdminUser, Error, string>({
     mutationFn: (id) => activateAdminUser(id),
     onSuccess: (user, id) => refreshUser(id, user),
   });
@@ -178,7 +222,8 @@ export function useAdminUsers() {
     isCreating: createMut.isPending,
     createError: createMut.error,
     resetCreate: createMut.reset,
-    updateUser: (id, payload) => updateMut.mutateAsync({ id, payload }),
+    updateUser: (id: string, payload: AdminUserPayload) =>
+      updateMut.mutateAsync({ id, payload }),
     isUpdating: updateMut.isPending,
     updateError: updateMut.error,
     updatingUserId: updateMut.variables?.id || null,
@@ -209,8 +254,8 @@ export function useAdminUsers() {
   };
 }
 
-export function useAdminUserDetail(userId) {
-  return useQuery({
+export function useAdminUserDetail(userId: string) {
+  return useQuery<AdminUser | null>({
     queryKey: ["admin", "user", userId],
     queryFn: () => fetchAdminUser(userId),
     enabled: Boolean(userId),
@@ -218,21 +263,21 @@ export function useAdminUserDetail(userId) {
   });
 }
 
-export function useAdminUserSecrets(userId) {
+export function useAdminUserSecrets(userId: string) {
   const queryClient = useQueryClient();
   const queryKey = ["admin", "user", userId, "secrets"];
-  const query = useQuery({
+  const query = useQuery<AdminSecret[]>({
     queryKey,
     queryFn: () => fetchUserSecrets(userId),
     enabled: Boolean(userId),
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey });
-  const putMutation = useMutation({
+  const putMutation = useMutation<AdminSecret, Error, PutSecretVariables>({
     mutationFn: ({ handle, value }) => putUserSecret(userId, handle, value),
     onSuccess: invalidate,
   });
-  const deleteMutation = useMutation({
+  const deleteMutation = useMutation<unknown, Error, string>({
     mutationFn: (handle) => deleteUserSecret(userId, handle),
     onSuccess: invalidate,
   });
@@ -240,7 +285,8 @@ export function useAdminUserSecrets(userId) {
   return {
     secrets: Array.isArray(query.data) ? query.data : [],
     query,
-    putSecret: (handle, value) => putMutation.mutateAsync({ handle, value }),
+    putSecret: (handle: string, value: string) =>
+      putMutation.mutateAsync({ handle, value }),
     deleteSecret: deleteMutation.mutateAsync,
     isSaving: putMutation.isPending,
     isDeleting: deleteMutation.isPending,

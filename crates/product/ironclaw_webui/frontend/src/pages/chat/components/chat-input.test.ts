@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -12,7 +11,7 @@ function chatInputSourceForTest() {
 }
 
 function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     Icon() {},
     Button() {},

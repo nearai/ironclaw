@@ -19,6 +19,7 @@ vi.mock("../../../lib/i18n", () => ({
       "workspace.area.memory": "Speicher",
       "workspace.fileMeta": "{mime} · {size}",
       "workspace.filterPlaceholder": "Nach Namen filtern…",
+      "settings.clearSearch": "Suche löschen",
       "workspace.pickFileTitle": "Datei aus dem Arbeitsbereich auswählen",
       "workspace.breadcrumbRoot": "Arbeitsbereich",
       "workspace.unableOpenDirectory": "Ordner konnte nicht geöffnet werden",
@@ -94,13 +95,13 @@ test("workspace tree exposes hierarchy, expansion, selection, and roving focus s
   assert.equal((html.match(/tabindex="0"/g) || []).length, 1);
 });
 
-test("workspace filter and breadcrumb have accessible names and landmarks", () => {
+test("workspace uses the shared clearable search field and an accessible breadcrumb", () => {
   const sidebar = renderToStaticMarkup(
     <WorkspaceSidebar
       rootEntries={[]}
       selectedPath=""
       expandedPaths={new Set()}
-      filter=""
+      filter="memory"
       scopeKey="caller-default"
       listDirectory={listDirectory}
       onFilterChange={() => {}}
@@ -114,6 +115,8 @@ test("workspace filter and breadcrumb have accessible names and landmarks", () =
   );
 
   assert.match(sidebar, /aria-label="Nach Namen filtern…"/);
+  assert.match(sidebar, /<input[^>]*type="search"/);
+  assert.match(sidebar, /<button[^>]*aria-label="Suche löschen"/);
   assert.match(breadcrumb, /<nav aria-label="Arbeitsbereich"/);
 });
 

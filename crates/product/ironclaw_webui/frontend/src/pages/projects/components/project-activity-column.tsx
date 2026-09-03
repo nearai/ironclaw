@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
@@ -18,7 +17,11 @@ export function ProjectActivityColumn({
   isStartingConversation,
 }) {
   const t = useT();
-  const sortedThreads = [...threads].sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
+  const sortedThreads = [...threads].sort(
+    (a, b) =>
+      new Date(b.updated_at || b.created_at).getTime() -
+      new Date(a.updated_at || a.created_at).getTime(),
+  );
 
   return (
     <Panel className="p-4 sm:p-5">

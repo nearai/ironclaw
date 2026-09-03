@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../test-support/dynamic-test-types";
 
 const sharedPanelTabs = [
   ["./components/registry-tab.tsx", 2],
@@ -74,7 +75,11 @@ function componentProps(root, component) {
   return props;
 }
 
-function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}) {
+function renderExtensionsPage(
+  tab,
+  extensionState: DynamicTestOptions = {},
+  { isAdmin = false }: DynamicTestOptions = {},
+): DynamicTestOptions {
   const hookValues = [];
   let hookCursor = 0;
   const removeCalls = [];
@@ -96,7 +101,7 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
     "ext.catalog.retry": "Retry",
     "ext.catalog.retrying": "Retrying…",
   };
-  const context = {
+  const context: vm.Context = {
     ChannelsTab() {},
     ConfirmDialog,
     ConfigureModal,

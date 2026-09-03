@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -16,7 +15,7 @@ function extensionsApiSourceForTest() {
 
 test("registerCustomMcp sends only the complete admission wire shape", async () => {
   const apiCalls = [];
-  const context = {
+  const context: vm.Context = {
     apiFetch: async (url, options) => { apiCalls.push({ url, options }); return { success: true }; },
     clientActionId: () => "unused", encodeURIComponent, globalThis: {}, setupExtension: () => {},
   };
@@ -35,7 +34,7 @@ test("registerCustomMcp sends only the complete admission wire shape", async () 
 
 test("registerCustomMcp preserves automatic initial auth detection", async () => {
   const apiCalls = [];
-  const context = {
+  const context: vm.Context = {
     apiFetch: async (url, options) => { apiCalls.push({ url, options }); return { success: true }; },
     clientActionId: () => "unused", encodeURIComponent, globalThis: {}, setupExtension: () => {},
   };
@@ -49,7 +48,7 @@ test("registerCustomMcp preserves automatic initial auth detection", async () =>
 
 test("selectHostedMcpAuth sends only the recovery selection through setup", async () => {
   const setupCalls = [];
-  const context = {
+  const context: vm.Context = {
     apiFetch: () => {},
     clientActionId: () => "unused",
     encodeURIComponent,
@@ -82,7 +81,7 @@ test("selectHostedMcpAuth sends only the recovery selection through setup", asyn
 test("installExtension assigns a fresh client idempotency key to each gesture", async () => {
   const apiCalls = [];
   const ids = ["install-gesture-one", "install-gesture-two"];
-  const context = {
+  const context: vm.Context = {
     apiFetch: async (url, options) => {
       apiCalls.push({ url, options });
       return { success: true };
@@ -106,7 +105,7 @@ test("installExtension assigns a fresh client idempotency key to each gesture", 
 
 test("startExtensionOauth sends an expiry safely below the backend max TTL", async () => {
   const apiCalls = [];
-  const context = {
+  const context: vm.Context = {
     apiFetch: async (url, options) => {
       apiCalls.push({ url, options });
       return { success: true };
@@ -146,7 +145,7 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
 
 test("startExtensionOauth does not crash while a requirement projection is refreshing", async () => {
   const apiCalls = [];
-  const context = {
+  const context: vm.Context = {
     apiFetch: async (url, options) => {
       apiCalls.push({ url, options });
       return { success: false };
@@ -170,7 +169,7 @@ test("startExtensionOauth does not crash while a requirement projection is refre
 test("extension lifecycle mutations include a client action id", async () => {
   const apiCalls = [];
   const setupCalls = [];
-  const context = {
+  const context: vm.Context = {
     apiFetch: async (url, options) => {
       apiCalls.push({ url, options });
       return { success: true };

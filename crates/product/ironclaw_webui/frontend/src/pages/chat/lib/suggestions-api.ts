@@ -9,7 +9,7 @@
 // asynchronous: `generate` returns 202 with `status: "generating"` and a
 // `retry_after_seconds` hint; the client polls `list` until a terminal status.
 
-import { apiFetch, clientActionId } from "../../../lib/api";
+import { apiFetch, clientActionId, type ApiRecord } from "../../../lib/api";
 
 const SUGGESTIONS_BASE = "/api/webchat/v2/suggestions";
 
@@ -51,30 +51,126 @@ export interface SuggestionStartResponse {
   run_id: string;
 }
 
+const GENERATION_STATUSES: readonly SuggestionGenerationStatus[] = [
+  "empty",
+  "generating",
+  "ready",
+  "failed",
+];
+
+function decodeSuggestion(value: unknown): Suggestion {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    throw new TypeError("invalid suggestions response");
+  }
+  const suggestion = value as ApiRecord;
+  if (
+    typeof suggestion.id !== "string" ||
+    typeof suggestion.title !== "string" ||
+    typeof suggestion.description !== "string" ||
+    typeof suggestion.suggested_prompt !== "string" ||
+    (suggestion.icon !== undefined && typeof suggestion.icon !== "string") ||
+    (suggestion.sources !== undefined &&
+      (!Array.isArray(suggestion.sources) ||
+        !suggestion.sources.every((source) => typeof source === "string"))) ||
+    (suggestion.thread_id !== undefined &&
+      typeof suggestion.thread_id !== "string") ||
+    (suggestion.run_id !== undefined && typeof suggestion.run_id !== "string")
+  ) {
+    throw new TypeError("invalid suggestions response");
+  }
+  return {
+    id: suggestion.id,
+    title: suggestion.title,
+    description: suggestion.description,
+    suggested_prompt: suggestion.suggested_prompt,
+    ...(typeof suggestion.icon === "string" ? { icon: suggestion.icon } : {}),
+    ...(Array.isArray(suggestion.sources)
+      ? { sources: suggestion.sources as string[] }
+      : {}),
+    ...(typeof suggestion.thread_id === "string"
+      ? { thread_id: suggestion.thread_id }
+      : {}),
+    ...(typeof suggestion.run_id === "string"
+      ? { run_id: suggestion.run_id }
+      : {}),
+  };
+}
+
+function isGenerationStatus(
+  value: unknown,
+): value is SuggestionGenerationStatus {
+  return (
+    typeof value === "string" &&
+    GENERATION_STATUSES.includes(value as SuggestionGenerationStatus)
+  );
+}
+
+function decodeSuggestionsResponse(value: ApiRecord): SuggestionsResponse {
+  if (
+    !isGenerationStatus(value.status) ||
+    !Array.isArray(value.suggestions)
+  ) {
+    throw new TypeError("invalid suggestions response");
+  }
+  return {
+    status: value.status,
+    ...(typeof value.generation_id === "string"
+      ? { generation_id: value.generation_id }
+      : {}),
+    ...(typeof value.retry_after_seconds === "number"
+      ? { retry_after_seconds: value.retry_after_seconds }
+      : {}),
+    suggestions: value.suggestions.map(decodeSuggestion),
+  };
+}
+
+function decodeSuggestionStartResponse(
+  value: ApiRecord,
+): SuggestionStartResponse {
+  if (
+    typeof value.suggestion_id !== "string" ||
+    typeof value.thread_id !== "string" ||
+    typeof value.run_id !== "string"
+  ) {
+    throw new TypeError("invalid suggestion start response");
+  }
+  return {
+    suggestion_id: value.suggestion_id,
+    thread_id: value.thread_id,
+    run_id: value.run_id,
+  };
+}
+
 /** Read durable current state. Never starts work. */
-export function fetchSuggestions({ signal }: { signal?: AbortSignal } = {}): Promise<SuggestionsResponse> {
-  return apiFetch(SUGGESTIONS_BASE, { signal });
+export async function fetchSuggestions({
+  signal,
+}: { signal?: AbortSignal } = {}): Promise<SuggestionsResponse> {
+  return decodeSuggestionsResponse(await apiFetch(SUGGESTIONS_BASE, { signal }));
 }
 
 /** Claim or replay asynchronous generation. Replaying the same
  *  `client_action_id` returns the same generation rather than starting a
  *  competing run, so a double-click cannot fan out model work. */
-export function generateSuggestions({
+export async function generateSuggestions({
   clientActionId: clientId,
 }: { clientActionId?: string } = {}): Promise<SuggestionsResponse> {
-  return apiFetch(`${SUGGESTIONS_BASE}/generate`, {
+  return decodeSuggestionsResponse(await apiFetch(`${SUGGESTIONS_BASE}/generate`, {
     method: "POST",
     body: JSON.stringify({ client_action_id: clientId || clientActionId() }),
-  });
+  }));
 }
 
 /** Create (or replay) the thread/run bound to one suggestion. The backend
  *  submits the turn through the normal ProductSurface path — the browser does
  *  not inject the prompt itself. */
-export function startSuggestion(suggestionId: string): Promise<SuggestionStartResponse> {
-  return apiFetch(`${SUGGESTIONS_BASE}/${encodeURIComponent(suggestionId)}/start`, {
+export async function startSuggestion(suggestionId: string): Promise<SuggestionStartResponse> {
+  return decodeSuggestionStartResponse(await apiFetch(`${SUGGESTIONS_BASE}/${encodeURIComponent(suggestionId)}/start`, {
     method: "POST",
-  });
+  }));
 }
 
 /** Soft-dismiss the current card; future list responses omit it. */

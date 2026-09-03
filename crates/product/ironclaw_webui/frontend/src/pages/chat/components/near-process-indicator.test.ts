@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -12,7 +11,7 @@ const CLIP_ID = "near-clip-test";
 // `React.useId()` returns a deterministic clipPath id. The vm-tsx-setup shim
 // transpiles the JSX into inspectable `{ type, props, children }` nodes.
 function loadNearProcessIndicator() {
-  const context = {
+  const context: vm.Context = {
     React: { useId: () => CLIP_ID },
     globalThis: {},
   };

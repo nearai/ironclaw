@@ -15,7 +15,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::ProjectFilesystemReader;
 use crate::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryCoordinator, DeliveryIntent, ProductOutboundTargetResolver, ProductSurfaceFailure,
@@ -80,10 +79,6 @@ pub struct ModelChannelDeliveryDeps {
     /// target bound to the calling run's own thread is rejected as the
     /// origin conversation.
     pub binding_service: Arc<dyn ConversationBindingService>,
-    /// Canonical project-scoped reader the coordinator materializes
-    /// `/workspace/...` references through. Model deliveries carry no
-    /// attachments, so this is contract plumbing, not a data path.
-    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// Fallback agent used to derive the project-filesystem authority scope
     /// when the calling run's scope carries no agent id.
     pub fallback_agent_id: AgentId,
@@ -335,12 +330,10 @@ impl ModelChannelDelivery for CoordinatedModelChannelDelivery {
             .deliver(
                 &outbound_policy,
                 self.deps.target_resolver.as_ref(),
-                self.deps.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
                     intent: DeliveryIntent::ModelDelivery,
                     delivery,
                     parts: vec![OutboundPart::Text(request.content)],
-                    attachments: Vec::new(),
                     thread_anchor: None,
                     require_direct_message_target: false,
                     extension_id: entry.summary.channel.as_str(),
@@ -566,27 +559,6 @@ fn classify_delivery_outcome(
             durably_recorded: true,
             already_delivered: false,
         }),
-        // A stream reply is delivered by the projection pipeline, and the
-        // cursor is the durable proof the user can see it. There is no vendor
-        // message ref because no vendor was involved — reporting the cursor
-        // as a ref would fabricate a provider identifier, so the evidence is
-        // honestly ref-free. Reachable only if a model-requested delivery
-        // ever resolves to a stream channel; the coordinator routes model
-        // deliveries on the delivery axis, so today it does not.
-        CoordinatedDeliveryOutcome::StreamDelivered { .. } => Ok(ModelChannelDeliveryEvidence {
-            target,
-            provider_message_refs: Vec::new(),
-            durably_recorded: true,
-            already_delivered: false,
-        }),
-        CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed { .. } => {
-            Ok(ModelChannelDeliveryEvidence {
-                target,
-                provider_message_refs: Vec::new(),
-                durably_recorded: false,
-                already_delivered: false,
-            })
-        }
         // The send happened (the refs are real) but the durable confirmation
         // write failed. Success-shaped so the model never resends; the
         // evidence carries the honest weaker claim.

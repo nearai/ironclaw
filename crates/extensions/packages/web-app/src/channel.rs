@@ -2,20 +2,27 @@
 //! notification, encrypt it per enrolled client, and POST through restricted
 //! egress.
 //!
-//! **This channel implements exactly one of the three halves, and the two
-//! absences are the design rather than gaps.**
+//! **This package implements exactly one of the three halves, and that shape
+//! is the design rather than a gap.**
 //!
-//! - No [`ChannelIngress`](ironclaw_extension_contracts::channel_adapter::ChannelIngress):
-//!   input arrives on the authenticated session door, whose actor authority
-//!   is the authenticated caller — a thing an adapter may never mint from a
-//!   payload. There is no webhook mount and no vendor payload to parse.
-//! - No [`ChannelReply`](ironclaw_extension_contracts::channel_adapter::ChannelReply):
-//!   the manifest declares `[channel.reply] transport = "stream"`, so the
-//!   host publishes to the durable projection pipeline and an adapter is
-//!   never called. A stub here would be dead code that reads as live.
-//!
-//! `check_binding` proves both absences against the manifest at activation,
-//! so this comment cannot quietly become false.
+//! - No [`ChannelIngress`](ironclaw_extension_contracts::channel_adapter::ChannelIngress),
+//!   and that absence is *required*: input arrives on the authenticated
+//!   session door, whose actor authority is the authenticated caller — a
+//!   thing an adapter may never mint from a payload. There is no webhook
+//!   mount and no vendor payload to parse, and `check_binding` refuses an
+//!   ingress half for an `authenticated_session` channel.
+//! - The reply half is bound by composition, not by this package. The
+//!   manifest declares `[channel.reply] transport = "stream"`, and every
+//!   declared reply needs a
+//!   [`ReplySink`](ironclaw_extension_contracts::reply::ReplySink)
+//!   (`check_channel_halves` fails activation without one): composition
+//!   attaches the product projection sink — the durable SSE/WebSocket
+//!   projection the browser already renders from — to this binding's
+//!   ordinary `surfaces.reply` slot before that check runs
+//!   (`bind_session_reply_sink` in
+//!   `crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs`).
+//!   `stream` is cadence only — which revisions the sink hears — never who
+//!   binds it. A sink stub here would be dead code that reads as live.
 //!
 //! **The adapter holds no store.** Per-user delivery registrations are
 //! host-owned (design §8): the coordinator resolves them, hands them over on

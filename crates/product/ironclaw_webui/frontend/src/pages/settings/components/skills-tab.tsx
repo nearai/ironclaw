@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { Card } from "../../../design-system/card";
 import { Skeleton } from "../../../design-system/skeleton";

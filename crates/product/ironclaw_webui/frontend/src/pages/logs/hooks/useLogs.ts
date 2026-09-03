@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useLocation } from "react-router";
 import React from "react";
 import { queryLogs, queryOperatorLogs } from "../../../lib/api";
@@ -9,7 +8,30 @@ const LOG_LIMIT = 500;
 const MAX_RETAINED_LOG_ENTRIES = 2000;
 const HIDDEN_ENTRY_ID_CAP = 2000;
 const TERMINAL_UNSUPPORTED_STATUSES = new Set([403, 404]);
-const SCOPE_QUERY_PARAMS = [
+type LogScopeKey =
+  | "threadId"
+  | "runId"
+  | "turnId"
+  | "toolCallId"
+  | "toolName"
+  | "source";
+
+type LogScopeItem = {
+  key: LogScopeKey;
+  param: string;
+  labelKey: string;
+  value: string;
+};
+
+type LogScope = Record<LogScopeKey, string | null> & {
+  active: LogScopeItem[];
+};
+
+type SearchLocation = { search?: string };
+
+const SCOPE_QUERY_PARAMS: ReadonlyArray<
+  readonly [LogScopeKey, string, string]
+> = [
   ["threadId", "thread_id", "logs.scope.thread"],
   ["runId", "run_id", "logs.scope.run"],
   ["turnId", "turn_id", "logs.scope.turn"],
@@ -32,13 +54,24 @@ function mergeLogEntries(...pages) {
   return merged;
 }
 
-function effectiveLocationSearch(location = globalThis.location) {
+function effectiveLocationSearch(location: SearchLocation = globalThis.location) {
   return location?.search || globalThis.location?.search || "";
 }
 
-export function readLogScopeFromLocation(location = globalThis.location, defaultThreadId = null) {
+export function readLogScopeFromLocation(
+  location: SearchLocation = globalThis.location,
+  defaultThreadId: string | null = null,
+) {
   const params = new URLSearchParams(effectiveLocationSearch(location));
-  const scope = { active: [] };
+  const scope: LogScope = {
+    active: [],
+    threadId: null,
+    runId: null,
+    turnId: null,
+    toolCallId: null,
+    toolName: null,
+    source: null,
+  };
   for (const [key, param, labelKey] of SCOPE_QUERY_PARAMS) {
     const value = params.get(param)?.trim();
     if (value) {
@@ -56,7 +89,12 @@ export function readLogScopeFromLocation(location = globalThis.location, default
 
 // Fail closed to caller-scoped logs if layout context is missing. Operator logs
 // are an optimization for operator-capable sessions, not the default.
-export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
+export function useLogs(
+  {
+    isAdmin = false,
+    defaultThreadId = null,
+  }: { isAdmin?: boolean; defaultThreadId?: string | null } = {},
+) {
   const location = useLocation();
   const locationSearch = effectiveLocationSearch(location);
   const scope = React.useMemo(

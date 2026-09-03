@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import "../../../test/vm-tsx-setup";
 
 function approvalCardSourceForTest() {
@@ -33,14 +34,14 @@ function renderApprovalCard({
   onAlways,
   onApprove,
   onDeny,
-} = {}) {
+}: DynamicTestOptions = {}) {
   let stateCalls = 0;
   const effects = [];
   const alwaysUpdates = [];
   const expandedPayloadUpdates = [];
   const resolvingUpdates = [];
   const refs = [];
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     React: {

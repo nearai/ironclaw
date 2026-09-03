@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -23,7 +22,7 @@ function sourceForTest() {
 }
 
 function renderTab(overrides = {}) {
-  const context = {
+  const context: vm.Context = {
     ExtensionCard() {},
     Panel() {},
     RegistryCard() {},

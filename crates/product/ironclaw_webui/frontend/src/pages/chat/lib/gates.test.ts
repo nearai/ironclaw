@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -26,7 +25,7 @@ function loadGates() {
       new RegExp(`export function (${GATES_EXPORTS.join("|")})`, "g"),
       "function $1",
     );
-  const context = { globalThis: {}, deviceLinkFrameFromWire };
+  const context: vm.Context = { globalThis: {}, deviceLinkFrameFromWire };
   vm.runInNewContext(
     `${source}\nglobalThis.__testExports = { ${GATES_EXPORTS.join(", ")} };`,
     context,
