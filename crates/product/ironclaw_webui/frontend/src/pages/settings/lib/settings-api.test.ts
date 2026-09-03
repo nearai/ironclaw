@@ -2,16 +2,71 @@ import assert from "node:assert/strict";
 import { test, vi } from "vitest";
 
 import {
-  fetchUserModelCatalog,
-  fetchUserModelPreference,
-  setUserModelPolicy,
-  setUserModelPreference,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
   updateSetting,
   updateToolPermission,
-  upsertLlmProvider,
 } from "./settings-api";
+import { fetchTraceCredits } from "./trace-api";
+import {
+  fetchLlmProviders,
+  fetchUserModelCatalog,
+  fetchUserModelPreference,
+  setUserModelPolicy,
+  setUserModelPreference,
+  upsertLlmProvider,
+} from "./llm-api";
+
+test("fetchLlmProviders validates successful responses", async () => {
+  const validResponse = {
+    providers: [
+      {
+        id: "openai",
+        description: "OpenAI",
+        adapter: "open_ai_completions",
+        default_model: "gpt-5",
+        builtin: true,
+        active: true,
+        api_key_required: true,
+        accepts_api_key: true,
+        api_key_set: true,
+        can_list_models: true,
+      },
+    ],
+    active: { provider_id: "openai", model: "gpt-5" },
+    user_model_policy: null,
+  };
+  const responses = [
+    null,
+    {
+      providers: [{ description: "missing provider id" }],
+      active: null,
+      user_model_policy: null,
+    },
+    validResponse,
+  ];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+
+  try {
+    await assert.rejects(fetchLlmProviders(), /invalid LLM providers response/);
+    await assert.rejects(fetchLlmProviders(), /invalid LLM providers response/);
+    assert.deepEqual(await fetchLlmProviders(), validResponse);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 test("user model preference API uses caller-safe endpoints and reset payload", async () => {
   const requests = [];
@@ -169,6 +224,90 @@ test("updateSetting returns the backend-confirmed value", async () => {
     const result = await updateSetting("provider.default", " Requested Provider ");
     assert.equal(result.success, true);
     assert.equal(result.value, "normalized-provider");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("fetchTraceCredits normalizes omitted serde-default collections", async () => {
+  const responses = [
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      holds: [],
+    },
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      recent_explanations: [],
+    },
+  ];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+
+  try {
+    assert.deepEqual((await fetchTraceCredits()).recent_explanations, []);
+    assert.deepEqual((await fetchTraceCredits()).holds, []);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("fetchTraceCredits rejects present non-array collection fields", async () => {
+  const responses = [
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      recent_explanations: "not-an-array",
+      holds: [],
+    },
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      recent_explanations: [],
+      holds: "not-an-array",
+    },
+  ];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+
+  try {
+    await assert.rejects(fetchTraceCredits(), /invalid trace credits response/);
+    await assert.rejects(fetchTraceCredits(), /invalid trace credits response/);
   } finally {
     vi.unstubAllGlobals();
   }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // WebChat v2 ingress client.
 //
 // Every function in this module targets a `/api/webchat/v2/*` route
@@ -17,8 +16,48 @@
 const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
 
+export type ApiRecord = Record<string, unknown>;
+export type ApiDecoder<T> = (value: unknown) => T;
+
+function isApiRecord(value: unknown): value is ApiRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function missingRequired(name: string): Promise<never> {
+  return Promise.reject(new Error(`${name} is required`));
+}
+
+function requiredPath(value: string | null | undefined, name = "threadId") {
+  if (!value) throw new Error(`${name} is required`);
+  return encodeURIComponent(value);
+}
+
+type ApiErrorPayload = {
+  error?: unknown;
+  field?: unknown;
+  kind?: unknown;
+  validation_code?: unknown;
+};
+
+export interface ApiErrorOptions {
+  status?: number;
+  statusText?: string;
+  body?: string;
+  headers?: Headers;
+  payload?: unknown;
+}
+
 export class ApiError extends Error {
-  constructor(message, { status, statusText, body, headers, payload } = {}) {
+  status?: number;
+  statusText?: string;
+  body?: string;
+  headers?: Headers;
+  payload?: unknown;
+
+  constructor(
+    message: string,
+    { status, statusText, body, headers, payload }: ApiErrorOptions = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
@@ -35,7 +74,7 @@ export function readStoredToken() {
   return sessionStorage.getItem(TOKEN_KEY) || "";
 }
 
-export function storeToken(token) {
+export function storeToken(token: string) {
   if (token) {
     sessionStorage.setItem(TOKEN_KEY, token);
   } else {
@@ -64,7 +103,7 @@ export function clientActionId() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function parseErrorBody(response) {
+async function parseErrorBody(response: Response) {
   const text = await response.text().catch(() => "");
   if (!text) return { text: "", payload: undefined };
   const contentType = response.headers.get("content-type") || "";
@@ -80,7 +119,7 @@ async function parseErrorBody(response) {
 
 // Turn a snake_case / kebab-case wire token into a readable phrase, e.g.
 // `service_unavailable` -> "Service unavailable".
-function humanizeErrorToken(token) {
+function humanizeErrorToken(token: unknown) {
   return String(token)
     .replace(/[_-]+/g, " ")
     .trim()
@@ -96,16 +135,21 @@ function humanizeErrorToken(token) {
 // error message means a dialog shows `{"error":"...","kind":"..."}`, which reads
 // as "no error" to a user. Humanize the most specific token instead, and only
 // fall back to a non-JSON body when it is short enough to be a real message.
-export function describeApiError({ payload, body, statusText } = {}) {
+export function describeApiError({
+  payload,
+  body,
+  statusText,
+}: Pick<ApiErrorOptions, "payload" | "body" | "statusText"> = {}) {
   if (payload && typeof payload === "object") {
-    if (payload.validation_code) {
-      const base = humanizeErrorToken(payload.validation_code);
-      return payload.field ? `${base} (${payload.field})` : base;
+    const errorPayload = payload as ApiErrorPayload;
+    if (errorPayload.validation_code) {
+      const base = humanizeErrorToken(errorPayload.validation_code);
+      return errorPayload.field ? `${base} (${String(errorPayload.field)})` : base;
     }
-    const code = payload.kind || payload.error;
+    const code = errorPayload.kind || errorPayload.error;
     if (code) {
       const base = humanizeErrorToken(code);
-      return payload.field ? `${base} (${payload.field})` : base;
+      return errorPayload.field ? `${base} (${String(errorPayload.field)})` : base;
     }
   }
   const trimmed = (body || "").trim();
@@ -120,7 +164,11 @@ export function describeApiError({ payload, body, statusText } = {}) {
   return statusText || "Request failed";
 }
 
-export async function apiFetch(path, options = {}) {
+export async function apiFetch<T = ApiRecord>(
+  path: string | URL,
+  options: RequestInit = {},
+  decoder?: ApiDecoder<T>,
+): Promise<T> {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
@@ -152,9 +200,10 @@ export async function apiFetch(path, options = {}) {
   }
 
   const contentType = response.headers.get("content-type") || "";
-  return contentType.includes("application/json")
-    ? response.json()
-    : response.text();
+  const value: unknown = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
+  return decoder ? decoder(value) : value as T;
 }
 
 // --- Threads ---
@@ -166,7 +215,35 @@ export async function apiFetch(path, options = {}) {
 // clear error rather than guessing a channel.
 let sessionChannelExtensionId = "";
 
-export function setSessionChannelExtensionId(extensionId) {
+export interface SessionResponse extends ApiRecord {
+  tenant_id: string;
+  user_id: string;
+  capabilities: ApiRecord;
+  features: ApiRecord;
+  attachments: ApiRecord;
+  session_channel_extension_id?: string | null;
+}
+
+function decodeSessionResponse(value: unknown): SessionResponse {
+  if (
+    !isApiRecord(value) ||
+    typeof value.tenant_id !== "string" ||
+    value.tenant_id.length === 0 ||
+    typeof value.user_id !== "string" ||
+    value.user_id.length === 0 ||
+    !isApiRecord(value.capabilities) ||
+    !isApiRecord(value.features) ||
+    !isApiRecord(value.attachments) ||
+    (value.session_channel_extension_id !== undefined &&
+      value.session_channel_extension_id !== null &&
+      typeof value.session_channel_extension_id !== "string")
+  ) {
+    throw new TypeError("invalid session response");
+  }
+  return value as SessionResponse;
+}
+
+export function setSessionChannelExtensionId(extensionId: string | null | undefined) {
   sessionChannelExtensionId = extensionId || "";
 }
 
@@ -178,42 +255,81 @@ export function getSessionChannelExtensionId() {
   return sessionChannelExtensionId;
 }
 
-export async function fetchSession() {
-  const session = await apiFetch(`${V2_BASE}/session`);
-  setSessionChannelExtensionId(session?.session_channel_extension_id);
+export async function fetchSession(): Promise<SessionResponse> {
+  const session = await apiFetch(`${V2_BASE}/session`, {}, decodeSessionResponse);
+  setSessionChannelExtensionId(session.session_channel_extension_id);
   return session;
 }
 
-export function createThread({ clientActionId: clientId, requestedThreadId, projectId } = {}) {
-  const body = { client_action_id: clientId || clientActionId() };
+export interface CreateThreadOptions {
+  clientActionId?: string;
+  requestedThreadId?: string;
+  projectId?: string;
+}
+
+export interface ThreadRecord extends ApiRecord {
+  thread_id: string;
+}
+
+export interface ThreadListResponse extends ApiRecord {
+  threads: ThreadRecord[];
+  next_cursor?: string | null;
+}
+
+export interface CreateThreadResponse extends ApiRecord {
+  thread: ThreadRecord;
+}
+
+export async function createThread({
+  clientActionId: clientId,
+  requestedThreadId,
+  projectId,
+}: CreateThreadOptions = {}): Promise<CreateThreadResponse> {
+  const body: {
+    client_action_id: string;
+    requested_thread_id?: string;
+    project_id?: string;
+  } = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;
   // The backend authorizes the caller's access to this project before scoping
   // the new thread to it; the body only proposes it.
   if (projectId) body.project_id = projectId;
-  return apiFetch(`${V2_BASE}/threads`, {
+  return apiFetch<CreateThreadResponse>(`${V2_BASE}/threads`, {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
-export function listThreads({
+export interface ListThreadsOptions {
+  limit?: number;
+  cursor?: string;
+  projectId?: string;
+  candidateThreadId?: string;
+  signal?: AbortSignal;
+}
+
+export async function listThreads({
   limit,
   cursor,
   projectId,
   candidateThreadId,
   signal,
-} = {}) {
+}: ListThreadsOptions = {}): Promise<ThreadListResponse> {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   if (projectId) url.searchParams.set("project_id", projectId);
   if (candidateThreadId) url.searchParams.set("candidate_thread_id", candidateThreadId);
-  return apiFetch(url.pathname + url.search, { signal });
+  return apiFetch<ThreadListResponse>(url.pathname + url.search, { signal });
 }
 
-export function deleteThread({ threadId } = {}) {
+type ThreadOptions = { threadId?: string };
+type AutomationOptions = { automationId?: string };
+type ProjectOptions = { projectId?: string };
+
+export function deleteThread({ threadId }: ThreadOptions = {}) {
   if (!threadId) {
-    return Promise.reject(new Error("threadId is required"));
+    return missingRequired("threadId");
   }
   return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
     method: "DELETE",
@@ -222,15 +338,31 @@ export function deleteThread({ threadId } = {}) {
 
 // --- Notification inbox ---
 
-export function listNotifications({ limit, cursor, signal } = {}) {
+interface PaginatedRequestOptions {
+  limit?: number;
+  cursor?: string;
+  signal?: AbortSignal;
+}
+
+export interface NotificationListResponse extends ApiRecord {
+  notifications: ApiRecord[];
+  next_cursor?: string | null;
+  unread_count: number;
+}
+
+export async function listNotifications({
+  limit,
+  cursor,
+  signal,
+}: PaginatedRequestOptions = {}): Promise<NotificationListResponse> {
   const url = new URL(`${V2_BASE}/notifications`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
-  return apiFetch(url.pathname + url.search, { signal });
+  return apiFetch<NotificationListResponse>(url.pathname + url.search, { signal });
 }
 
-export function markNotificationRead(notificationId) {
-  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+export function markNotificationRead(notificationId: string) {
+  if (!notificationId) return missingRequired("notificationId");
   return apiFetch(
     `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/read`,
     { method: "POST" },
@@ -241,8 +373,8 @@ export function markAllNotificationsRead() {
   return apiFetch(`${V2_BASE}/notifications/read-all`, { method: "POST" });
 }
 
-export function archiveNotification(notificationId) {
-  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+export function archiveNotification(notificationId: string) {
+  if (!notificationId) return missingRequired("notificationId");
   return apiFetch(
     `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/archive`,
     { method: "POST" },
@@ -251,21 +383,25 @@ export function archiveNotification(notificationId) {
 
 // --- Project filesystem (download / navigation) ---
 
-function projectFilesBase(threadId) {
+function projectFilesBase(threadId: string) {
   return `${V2_BASE}/threads/${encodeURIComponent(threadId)}/files`;
 }
 
 // List a directory under the thread's project workspace. `path` defaults to the
 // workspace root server-side when omitted.
-export function listProjectFiles({ threadId, path } = {}) {
-  if (!threadId) return Promise.reject(new Error("threadId is required"));
+interface ProjectFileOptions extends ThreadOptions {
+  path?: string;
+}
+
+export function listProjectFiles({ threadId, path }: ProjectFileOptions = {}) {
+  if (!threadId) return missingRequired("threadId");
   const url = new URL(projectFilesBase(threadId), window.location.origin);
   if (path) url.searchParams.set("path", path);
   return apiFetch(url.pathname + url.search);
 }
 
 // Metadata for a single project path (used to show a chip's size/icon).
-export function statProjectFile({ threadId, path } = {}) {
+export function statProjectFile({ threadId, path }: ProjectFileOptions = {}) {
   if (!threadId || !path) {
     return Promise.reject(new Error("threadId and path are required"));
   }
@@ -277,7 +413,7 @@ export function statProjectFile({ threadId, path } = {}) {
 // Same-origin relative URL for a project file's bytes. Feeds the shared
 // `fetchAttachmentBlob` (which attaches the bearer) so the project workspace
 // browser can reuse the attachment preview modal.
-export function projectFileContentUrl({ threadId, path } = {}) {
+export function projectFileContentUrl({ threadId, path }: ProjectFileOptions = {}) {
   if (!threadId || !path) {
     throw new Error("projectFileContentUrl requires threadId and path");
   }
@@ -288,7 +424,17 @@ export function projectFileContentUrl({ threadId, path } = {}) {
 
 // --- Automations ---
 
-export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
+interface ListAutomationsOptions {
+  limit?: number;
+  runLimit?: number;
+  includeCompleted?: boolean;
+}
+
+export function listAutomations({
+  limit,
+  runLimit,
+  includeCompleted,
+}: ListAutomationsOptions = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
   if (runLimit != null) params.set("run_limit", String(runLimit));
@@ -297,39 +443,42 @@ export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }
 
-export function pauseAutomation({ automationId } = {}) {
+export function pauseAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/pause`, {
     method: "POST",
   });
 }
 
-export function runAutomation({ automationId } = {}) {
+export function runAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/run`, {
     method: "POST",
   });
 }
 
-export function resumeAutomation({ automationId } = {}) {
+export function resumeAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/resume`, {
     method: "POST",
   });
 }
 
-export function renameAutomation({ automationId, name } = {}) {
+export function renameAutomation({
+  automationId,
+  name,
+}: AutomationOptions & { name?: string } = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   if (!name) {
-    return Promise.reject(new Error("name is required"));
+    return missingRequired("name");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
     method: "POST",
@@ -337,9 +486,9 @@ export function renameAutomation({ automationId, name } = {}) {
   });
 }
 
-export function deleteAutomation({ automationId } = {}) {
+export function deleteAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
     method: "DELETE",
@@ -350,19 +499,34 @@ export function deleteAutomation({ automationId } = {}) {
 
 const PROJECTS_BASE = `${V2_BASE}/projects`;
 
-function projectPath(projectId) {
+function projectPath(projectId: string) {
   return `${PROJECTS_BASE}/${encodeURIComponent(projectId)}`;
 }
 
-export function listProjects({ limit } = {}) {
+export function listProjects({ limit }: { limit?: number } = {}) {
   const url = new URL(PROJECTS_BASE, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   return apiFetch(url.pathname + url.search);
 }
 
-export function createProject({ name, description, icon, color, metadata } = {}) {
-  if (!name) return Promise.reject(new Error("name is required"));
-  const body = { name };
+export interface ProjectMutationOptions extends ProjectOptions {
+  name?: string;
+  description?: string | null;
+  icon?: string | null;
+  color?: string | null;
+  metadata?: Record<string, unknown> | null;
+  state?: string | null;
+}
+
+export function createProject({
+  name,
+  description,
+  icon,
+  color,
+  metadata,
+}: ProjectMutationOptions = {}) {
+  if (!name) return missingRequired("name");
+  const body: Omit<ProjectMutationOptions, "projectId" | "state"> = { name };
   if (description != null) body.description = description;
   if (icon != null) body.icon = icon;
   if (color != null) body.color = color;
@@ -370,14 +534,22 @@ export function createProject({ name, description, icon, color, metadata } = {})
   return apiFetch(PROJECTS_BASE, { method: "POST", body: JSON.stringify(body) });
 }
 
-export function getProject({ projectId } = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+export function getProject({ projectId }: ProjectOptions = {}) {
+  if (!projectId) return missingRequired("projectId");
   return apiFetch(projectPath(projectId));
 }
 
-export function updateProject({ projectId, name, description, icon, color, metadata, state } = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
-  const body = {};
+export function updateProject({
+  projectId,
+  name,
+  description,
+  icon,
+  color,
+  metadata,
+  state,
+}: ProjectMutationOptions = {}) {
+  if (!projectId) return missingRequired("projectId");
+  const body: Omit<ProjectMutationOptions, "projectId"> = {};
   if (name != null) body.name = name;
   if (description != null) body.description = description;
   if (icon != null) body.icon = icon;
@@ -387,39 +559,52 @@ export function updateProject({ projectId, name, description, icon, color, metad
   return apiFetch(projectPath(projectId), { method: "POST", body: JSON.stringify(body) });
 }
 
-export function deleteProject({ projectId } = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+export function deleteProject({ projectId }: ProjectOptions = {}) {
+  if (!projectId) return missingRequired("projectId");
   return apiFetch(projectPath(projectId), { method: "DELETE" });
 }
 
-export function listProjectMembers({ projectId } = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+export function listProjectMembers({ projectId }: ProjectOptions = {}) {
+  if (!projectId) return missingRequired("projectId");
   return apiFetch(`${projectPath(projectId)}/members`);
 }
 
-export function addProjectMember({ projectId, userId, role } = {}) {
+interface ProjectMemberOptions extends ProjectOptions {
+  userId?: string;
+  role?: string;
+}
+
+export function addProjectMember({
+  projectId,
+  userId,
+  role,
+}: ProjectMemberOptions = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
-  if (!role) return Promise.reject(new Error("role is required"));
+  if (!role) return missingRequired("role");
   return apiFetch(`${projectPath(projectId)}/members`, {
     method: "POST",
     body: JSON.stringify({ user_id: userId, role }),
   });
 }
 
-export function updateProjectMemberRole({ projectId, userId, role } = {}) {
+export function updateProjectMemberRole({
+  projectId,
+  userId,
+  role,
+}: ProjectMemberOptions = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
-  if (!role) return Promise.reject(new Error("role is required"));
+  if (!role) return missingRequired("role");
   return apiFetch(`${projectPath(projectId)}/members/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify({ role }),
   });
 }
 
-export function removeProjectMember({ projectId, userId } = {}) {
+export function removeProjectMember({ projectId, userId }: ProjectMemberOptions = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
@@ -430,12 +615,39 @@ export function removeProjectMember({ projectId, userId } = {}) {
 
 // --- Outbound delivery targets + notification channels ---
 
-export function listOutboundDeliveryTargets() {
-  return apiFetch(`${V2_BASE}/outbound/targets`);
+export interface DeliveryTarget extends ApiRecord {
+  target_id: string;
+  display_name?: string;
+  description?: string;
+  channel?: string;
 }
 
-export function getNotificationChannels() {
-  return apiFetch(`${V2_BASE}/outbound/notification-channels`);
+export interface DeliveryTargetOption extends ApiRecord {
+  target?: DeliveryTarget;
+}
+
+export interface NotificationChannel extends ApiRecord {
+  target_id: string;
+  status: string;
+  option?: DeliveryTargetOption | null;
+}
+
+export interface OutboundDeliveryTargetsResponse extends ApiRecord {
+  targets: DeliveryTargetOption[];
+}
+
+export interface NotificationChannelsResponse extends ApiRecord {
+  channels: NotificationChannel[];
+}
+
+export function listOutboundDeliveryTargets(): Promise<OutboundDeliveryTargetsResponse> {
+  return apiFetch<OutboundDeliveryTargetsResponse>(`${V2_BASE}/outbound/targets`);
+}
+
+export function getNotificationChannels(): Promise<NotificationChannelsResponse> {
+  return apiFetch<NotificationChannelsResponse>(
+    `${V2_BASE}/outbound/notification-channels`,
+  );
 }
 
 // `target_ids` is the sole canonical wire name for this full-replace body —
@@ -448,60 +660,37 @@ export function getNotificationChannels() {
 // *intentional* full replace. A caller that forgot the argument would wipe
 // every stored notification channel. Fail fast instead, the way the other
 // mutations here reject a missing required argument.
-export function setNotificationChannels({ targetIds } = {}) {
+export function setNotificationChannels({
+  targetIds,
+}: { targetIds?: unknown } = {}): Promise<NotificationChannelsResponse> {
   if (!Array.isArray(targetIds)) {
     return Promise.reject(
       new TypeError("targetIds must be an array of target ids (pass [] to clear)"),
     );
   }
-  return apiFetch(`${V2_BASE}/outbound/notification-channels`, {
+  return apiFetch<NotificationChannelsResponse>(
+    `${V2_BASE}/outbound/notification-channels`,
+    {
     method: "POST",
     body: JSON.stringify({ target_ids: targetIds }),
-  });
-}
-
-// --- Notification setup (generic per-channel enrollment) ---
-//
-// One status/enable/disable surface for every channel, keyed by extension id.
-// The `payload` bodies and the status `detail` are channel-opaque documents
-// only the channel's own client interprets — nothing here names a channel.
-
-export function getNotificationSetupStatus({ extensionId } = {}) {
-  if (!extensionId) {
-    return Promise.reject(new Error("extensionId is required"));
-  }
-  return apiFetch(
-    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications`,
-  );
-}
-
-export function enableNotificationSetup({ extensionId, payload } = {}) {
-  if (!extensionId) {
-    return Promise.reject(new Error("extensionId is required"));
-  }
-  return apiFetch(
-    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/enable`,
-    {
-      method: "POST",
-      body: JSON.stringify({ payload }),
-    },
-  );
-}
-
-export function disableNotificationSetup({ extensionId, payload } = {}) {
-  if (!extensionId) {
-    return Promise.reject(new Error("extensionId is required"));
-  }
-  return apiFetch(
-    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/disable`,
-    {
-      method: "POST",
-      body: JSON.stringify({ payload }),
     },
   );
 }
 
 // --- Operator logs ---
+
+export interface LogQueryOptions extends PaginatedRequestOptions {
+  level?: string;
+  target?: string;
+  threadId?: string;
+  runId?: string;
+  turnId?: string;
+  toolCallId?: string;
+  toolName?: string;
+  source?: string;
+  tail?: boolean;
+  follow?: boolean;
+}
 
 export function queryLogs({
   limit,
@@ -517,7 +706,7 @@ export function queryLogs({
   tail,
   follow,
   signal,
-} = {}) {
+}: LogQueryOptions = {}) {
   const url = new URL(`${V2_BASE}/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
@@ -548,7 +737,7 @@ export function queryOperatorLogs({
   tail,
   follow,
   signal,
-} = {}) {
+}: LogQueryOptions = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
@@ -570,18 +759,45 @@ export function queryOperatorLogs({
 // `attachments` is an array of `ProductInboundAttachment`
 // (`{ mime_type, filename, data_base64 }`). Omitted from the body when
 // empty so a text-only send keeps the original wire shape.
+export interface ProductInboundAttachment {
+  mime_type: string;
+  filename?: string | null;
+  data_base64: string;
+}
+
+export interface SendMessageOptions {
+  threadId: string;
+  content: string;
+  attachments?: ProductInboundAttachment[];
+  clientActionId?: string;
+}
+
+export interface SendMessageResponse extends ApiRecord {
+  outcome: string;
+  thread_id?: string;
+  run_id?: string | null;
+  status?: string | null;
+  accepted_message_ref?: ApiRecord | string | null;
+  notice?: string | null;
+}
+
 export function sendMessage({
   threadId,
   content,
   attachments = [],
   clientActionId: clientId,
-}) {
+}: SendMessageOptions): Promise<SendMessageResponse> {
   if (!sessionChannelExtensionId) {
     return Promise.reject(
       new Error("no session channel is configured for this deployment"),
     );
   }
-  const body = {
+  const body: {
+    client_action_id: string;
+    thread_id: string;
+    content: string;
+    attachments?: ProductInboundAttachment[];
+  } = {
     client_action_id: clientId || clientActionId(),
     thread_id: threadId,
     content,
@@ -589,7 +805,7 @@ export function sendMessage({
   if (attachments.length > 0) {
     body.attachments = attachments;
   }
-  return apiFetch(
+  return apiFetch<SendMessageResponse>(
     `${V2_BASE}/channels/${encodeURIComponent(sessionChannelExtensionId)}/messages`,
     {
       method: "POST",
@@ -600,13 +816,27 @@ export function sendMessage({
 
 // --- Product commands ---
 
-export function listChatCommands() {
-  return apiFetch(`${V2_BASE}/commands`);
+export interface ChatCommandListResponse extends ApiRecord {
+  commands: ApiRecord[];
 }
 
-export function executeChatCommand({ threadId, text }) {
-  return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId ?? "")}/commands`,
+export interface ChatCommandResponse extends ApiRecord {
+  effect?: {
+    type?: string;
+    thread_id?: string;
+  } | null;
+}
+
+export function listChatCommands(): Promise<ChatCommandListResponse> {
+  return apiFetch<ChatCommandListResponse>(`${V2_BASE}/commands`);
+}
+
+export async function executeChatCommand({
+  threadId,
+  text,
+}: { threadId?: string | null; text: string }): Promise<ChatCommandResponse> {
+  return apiFetch<ChatCommandResponse>(
+    `${V2_BASE}/threads/${requiredPath(threadId)}/commands`,
     {
       method: "POST",
       body: JSON.stringify({ text }),
@@ -616,9 +846,13 @@ export function executeChatCommand({ threadId, text }) {
 
 // --- Timeline ---
 
-export function fetchTimeline({ threadId, limit, cursor } = {}) {
+export async function fetchTimeline({
+  threadId,
+  limit,
+  cursor,
+}: ThreadOptions & Omit<PaginatedRequestOptions, "signal"> = {}) {
   const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/timeline`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/timeline`,
     window.location.origin,
   );
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -626,7 +860,11 @@ export function fetchTimeline({ threadId, limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
-export function fetchRunArtifact({ threadId, runId } = {}) {
+interface RunOptions extends ThreadOptions {
+  runId?: string;
+}
+
+export function fetchRunArtifact({ threadId, runId }: RunOptions = {}) {
   if (!threadId || !runId) {
     return Promise.reject(new Error("threadId and runId are required"));
   }
@@ -635,9 +873,9 @@ export function fetchRunArtifact({ threadId, runId } = {}) {
   );
 }
 
-export function fetchThreadArtifact({ threadId } = {}) {
+export function fetchThreadArtifact({ threadId }: ThreadOptions = {}) {
   if (!threadId) {
-    return Promise.reject(new Error("threadId is required"));
+    return missingRequired("threadId");
   }
   return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}/artifact`);
 }
@@ -649,7 +887,16 @@ export function fetchThreadArtifact({ threadId } = {}) {
 // Fails fast on a missing part rather than building a path with the literal
 // "undefined" — this URL feeds `fetchAttachmentBlob`, which attaches the bearer,
 // so an unintended path must never be requested.
-export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
+interface AttachmentOptions extends ThreadOptions {
+  messageId?: string;
+  attachmentId?: string;
+}
+
+export function attachmentUrl({
+  threadId,
+  messageId,
+  attachmentId,
+}: AttachmentOptions = {}) {
   if (!threadId || !messageId || !attachmentId) {
     throw new Error("attachmentUrl requires threadId, messageId, and attachmentId");
   }
@@ -666,7 +913,7 @@ export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
 // caller picks the CSP-appropriate representation (data URL for images/media,
 // blob URL for PDF frames, text for text). Throws on a non-OK response so the
 // caller can fall back to a placeholder.
-export async function fetchAttachmentBlob(path) {
+export async function fetchAttachmentBlob(path: string | URL) {
   // The bearer is a critical sink: never attach it to an off-origin URL. The
   // caller always passes a relative same-origin path (`attachmentUrl(...)`);
   // reject anything that resolves cross-origin before sending the token.
@@ -699,10 +946,16 @@ export async function fetchAttachmentBlob(path) {
 // Read a `Blob` into a `data:` URL. Used for images and media, whose CSP
 // directives (`img-src`/`media-src 'self' data:`) allow data URLs but not
 // `blob:` — and a data URL needs no `revokeObjectURL` lifecycle.
-export function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
+export function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("attachment data URL was not a string"));
+      }
+    };
     reader.onerror = () => reject(reader.error || new Error("attachment read failed"));
     reader.readAsDataURL(blob);
   });
@@ -710,15 +963,18 @@ export function blobToDataUrl(blob) {
 
 // Convenience: fetch an attachment's bytes and return a `data:` URL for an
 // `<img>` thumbnail. CSP-safe (`img-src 'self' data:`); never a `blob:` URL.
-export async function fetchAttachmentDataUrl(path) {
+export async function fetchAttachmentDataUrl(path: string | URL) {
   return blobToDataUrl(await fetchAttachmentBlob(path));
 }
 
 // --- Streaming (SSE) ---
 
-export function eventStreamRequest({ threadId, connectionId } = {}) {
+export function eventStreamRequest({
+  threadId,
+  connectionId,
+}: ThreadOptions & { connectionId?: string } = {}) {
   const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/events`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/events`,
     window.location.origin,
   );
   if (connectionId) url.searchParams.set("connection_id", connectionId);
@@ -739,10 +995,11 @@ export function eventStreamRequest({ threadId, connectionId } = {}) {
 // browser sends Origin automatically; the bearer travels via the
 // `?token=` URL parameter (the WS handshake API in browsers has no
 // way to set a custom request header).
-export function openEventSocket({ threadId } = {}) {
+export function openEventSocket({ threadId }: ThreadOptions = {}) {
+  const encodedThreadId = requiredPath(threadId);
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/ws`,
+    `${V2_BASE}/threads/${encodedThreadId}/ws`,
     window.location.origin,
   );
   url.protocol = scheme;
@@ -753,16 +1010,18 @@ export function openEventSocket({ threadId } = {}) {
 
 // --- Run cancellation ---
 
-export function cancelRun({
+export async function cancelRun({
   threadId,
   runId,
   reason,
   clientActionId: clientId,
-} = {}) {
-  const body = { client_action_id: clientId || clientActionId() };
+}: RunOptions & { reason?: string; clientActionId?: string } = {}) {
+  const body: { client_action_id: string; reason?: string } = {
+    client_action_id: clientId || clientActionId(),
+  };
   if (reason) body.reason = reason;
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/runs/${requiredPath(runId, "runId")}/cancel`,
     {
       method: "POST",
       body: JSON.stringify(body),
@@ -775,7 +1034,7 @@ export function cancelRun({
 // `resolution` is one of "approved" | "declined" | "credential_provided".
 // `always` is only meaningful when `resolution === "approved"`.
 // `credentialRef` is only meaningful when `resolution === "credential_provided"`.
-export function resolveGate({
+export async function resolveGate({
   threadId,
   runId,
   gateRef,
@@ -784,15 +1043,27 @@ export function resolveGate({
   credentialRef,
   clientActionId: clientId,
   signal,
+}: RunOptions & {
+  gateRef?: string;
+  resolution?: "approved" | "declined" | "credential_provided";
+  always?: boolean;
+  credentialRef?: string;
+  clientActionId?: string;
+  signal?: AbortSignal;
 } = {}) {
-  const body = {
+  const body: {
+    client_action_id: string;
+    resolution?: "approved" | "declined" | "credential_provided";
+    always?: boolean;
+    credential_ref?: string;
+  } = {
     client_action_id: clientId || clientActionId(),
     resolution,
   };
   if (always != null) body.always = always;
   if (credentialRef) body.credential_ref = credentialRef;
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateRef)}/resolve`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/runs/${requiredPath(runId, "runId")}/gates/${requiredPath(gateRef, "gateRef")}/resolve`,
     {
       method: "POST",
       signal,
@@ -811,6 +1082,12 @@ export function submitManualToken({
   runId,
   gateRef,
   signal,
+}: RunOptions & {
+  provider?: string;
+  accountLabel?: string;
+  token?: string;
+  gateRef?: string;
+  signal?: AbortSignal;
 } = {}) {
   return apiFetch("/api/reborn/product-auth/manual-token/submit", {
     method: "POST",
@@ -828,14 +1105,22 @@ export function submitManualToken({
 
 // --- Extension setup ---
 
-export function setupExtension(
-  extensionName,
-  { action, payload, clientActionId: clientId } = {},
-) {
-  const body = { client_action_id: clientId || clientActionId() };
+export function setupExtension<T = ApiRecord>(
+  extensionName: string,
+  {
+    action,
+    payload,
+    clientActionId: clientId,
+  }: { action?: string; payload?: unknown; clientActionId?: string } = {},
+): Promise<T> {
+  const body: {
+    client_action_id: string;
+    action?: string;
+    payload?: unknown;
+  } = { client_action_id: clientId || clientActionId() };
   if (action) body.action = action;
   if (payload !== undefined) body.payload = payload;
-  return apiFetch(
+  return apiFetch<T>(
     `${V2_BASE}/extensions/${encodeURIComponent(extensionName)}/setup`,
     {
       method: "POST",
@@ -853,7 +1138,15 @@ export function setupExtension(
 // HTTP request. When a v2 equivalent lands, replace the stub body
 // with the real wire call.
 
-export function gatewayStatus() {
+export function gatewayStatus(): Promise<{
+  engine_v2_enabled: boolean;
+  restart_enabled: boolean;
+  total_connections: null;
+  llm_backend: null;
+  llm_model: null;
+  extensions?: ApiRecord[];
+  todo: boolean;
+}> {
   // TODO: requires v2 gateway-status endpoint. Returning a zeroed
   // shape so any consumer reading `data.engine_v2_enabled`,
   // `data.llm_backend`, etc. resolves cleanly to falsey values.
@@ -901,7 +1194,7 @@ export async function fetchAuthProviders() {
   }
 }
 
-export async function exchangeLoginTicket(ticket) {
+export async function exchangeLoginTicket(ticket: string) {
   const response = await fetch("/auth/session/exchange", {
     method: "POST",
     headers: {

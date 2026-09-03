@@ -1,4 +1,3 @@
-// @ts-nocheck
 /* Client-side pinned-thread store.
  *
  * There is no server-side pin concept yet, so pins live in the browser:
@@ -16,25 +15,26 @@ import { authScope } from "./auth-scope";
 
 const STORAGE_PREFIX = "ironclaw:v2-thread-pins:";
 
-const subscribers = new Set();
-/** @type {Set<string>} */
-const pinned = new Set();
+type PinSubscriber = (pins: Set<string>) => void;
+
+const subscribers = new Set<PinSubscriber>();
+const pinned = new Set<string>();
 // The scope the in-memory set was last loaded for. The set is reloaded from
 // the current scope's storage whenever the authenticated identity changes,
 // so a different user reads their own pins (and never the previous user's).
-let loadedScope = null;
+let loadedScope: string | null = null;
 
 function storageKey() {
   return `${STORAGE_PREFIX}${authScope()}`;
 }
 
-function readPersisted() {
+function readPersisted(): string[] {
   try {
     const raw = window.localStorage.getItem(storageKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((id) => typeof id === "string");
+    return parsed.filter((id): id is string => typeof id === "string");
   } catch (_) {
     return [];
   }
@@ -78,13 +78,13 @@ function emit() {
 }
 
 /** Is this thread currently pinned? */
-export function isPinned(threadId) {
+export function isPinned(threadId: string): boolean {
   ensureScope();
   return pinned.has(threadId);
 }
 
 /** Toggle a thread's pinned status, persisting and notifying subscribers. */
-export function togglePin(threadId) {
+export function togglePin(threadId: string): void {
   if (!threadId) return;
   ensureScope();
   if (pinned.has(threadId)) {
@@ -103,7 +103,7 @@ export function getPinnedIds() {
 }
 
 /** Subscribe to pin-set changes. Returns an unsubscribe fn. */
-export function subscribePins(listener) {
+export function subscribePins(listener: PinSubscriber): () => void {
   subscribers.add(listener);
   return () => {
     subscribers.delete(listener);

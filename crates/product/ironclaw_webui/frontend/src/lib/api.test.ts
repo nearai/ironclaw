@@ -22,12 +22,14 @@ import {
   renameAutomation,
   resumeAutomation,
   runAutomation,
-  getNotificationSetupStatus,
   setNotificationChannels,
   setupExtension,
-  enableNotificationSetup,
-  disableNotificationSetup,
 } from "./api";
+import {
+  disableNotificationSetup,
+  enableNotificationSetup,
+  getNotificationSetupStatus,
+} from "./notification-setup-api";
 
 const originalFetch = globalThis.fetch;
 const restoreBrowserGlobals: Array<() => void> = [];
@@ -602,6 +604,7 @@ test("getNotificationSetupStatus reads the channel's generic status route", asyn
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, "/api/webchat/v2/channels/some-channel/notifications");
+  assert.equal(calls[0].options.cache, "no-store");
   assert.equal(status.requires_setup, true);
   assert.equal(status.detail.bootstrap.vapid_public_key, "k");
   await assert.rejects(getNotificationSetupStatus(), /extensionId is required/);
@@ -613,7 +616,12 @@ test("enableNotificationSetup posts the channel-opaque payload to the enable rou
   installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ enabled: true }), {
+    return new Response(JSON.stringify({
+      extension_id: "some-channel",
+      requires_setup: true,
+      enabled: true,
+      detail: { registrations: [] },
+    }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -651,7 +659,12 @@ test("disableNotificationSetup posts the channel-opaque payload to the disable r
   installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ enabled: false }), {
+    return new Response(JSON.stringify({
+      extension_id: "some-channel",
+      requires_setup: true,
+      enabled: false,
+      detail: { registrations: [] },
+    }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });

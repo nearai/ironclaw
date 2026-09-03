@@ -7,7 +7,7 @@ import {
   fetchLlmProviders,
   startCodexLogin,
   startNearaiLogin,
-} from "../lib/settings-api";
+} from "../lib/llm-api";
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 

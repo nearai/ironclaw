@@ -11,7 +11,7 @@ import { ProviderLoginStatus } from "../settings/components/provider-login-statu
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions";
 import { useProviderLogin } from "../settings/hooks/useProviderLogin";
 import { isProviderConfigured } from "../settings/lib/llm-providers";
-import { setActiveLlm } from "../settings/lib/settings-api";
+import { setActiveLlm } from "../settings/lib/llm-api";
 import { ProviderLogo } from "./provider-logos";
 import type { GatewayOutletContext } from "../../layout/gateway-layout";
 

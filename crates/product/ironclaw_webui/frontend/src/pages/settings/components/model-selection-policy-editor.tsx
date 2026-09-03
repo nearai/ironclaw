@@ -6,7 +6,7 @@ import { Input } from "../../../design-system/input";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
-import { setUserModelPolicy } from "../lib/settings-api";
+import { setUserModelPolicy } from "../lib/llm-api";
 import {
   mergeModelEntries,
   modelEntriesForIds,
