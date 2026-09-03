@@ -1669,25 +1669,37 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             // First connection: the /models probe from `resolve_model`.
-            let (mut socket, _) = listener.accept().await.expect("accept models probe");
+            let (mut probe_socket, _) = listener.accept().await.expect("accept models probe");
             let mut probe_request = Vec::new();
             let mut buffer = [0_u8; 4096];
             loop {
-                let read = socket.read(&mut buffer).await.expect("read models probe");
+                let read = probe_socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("read models probe");
                 probe_request.extend_from_slice(&buffer[..read]);
                 if probe_request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
                     break;
                 }
             }
             let probe_body = r#"{"models":[]}"#;
+            // `connection: close` tells reqwest's pool not to keep this
+            // socket alive for reuse — without it, the completion request
+            // below can be sent on the reused probe connection instead of a
+            // fresh one, and the `accept()` for the second connection blocks
+            // forever.
             let probe_response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{probe_body}",
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{probe_body}",
                 probe_body.len()
             );
-            socket
+            probe_socket
                 .write_all(probe_response.as_bytes())
                 .await
                 .expect("write models probe response");
+            // Belt and braces: explicitly drop the probe socket rather than
+            // letting it be shadowed, so it cannot be reused for the second
+            // request even if the header above were ever missed.
+            drop(probe_socket);
 
             // Second connection: the actual completion request, whose body
             // this test captures.
