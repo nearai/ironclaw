@@ -3735,6 +3735,11 @@ mod tests {
     struct WindowReportingProvider {
         model_id: String,
         context_length: Option<u32>,
+        // Defaults to `false` at every existing call site (Rust has no
+        // `..Default::default()` shorthand for a plain struct literal, so
+        // each constructs it explicitly); only
+        // `gateway_reports_none_when_model_metadata_fails` sets it.
+        metadata_error: bool,
     }
 
     #[async_trait]
@@ -3748,6 +3753,12 @@ mod tests {
         }
 
         async fn model_metadata(&self) -> Result<ironclaw_llm::ModelMetadata, LlmError> {
+            if self.metadata_error {
+                return Err(LlmError::ModelNotAvailable {
+                    provider: "window-reporting-test-provider".to_string(),
+                    model: self.model_id.clone(),
+                });
+            }
             Ok(ironclaw_llm::ModelMetadata {
                 id: self.model_id.clone(),
                 context_length: self.context_length,
@@ -3778,6 +3789,7 @@ mod tests {
         let provider = Arc::new(WindowReportingProvider {
             model_id: "base-model".to_string(),
             context_length: Some(200_000),
+            metadata_error: false,
         });
         let policy =
             LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
@@ -3795,6 +3807,7 @@ mod tests {
         let provider = Arc::new(WindowReportingProvider {
             model_id: "base-model".to_string(),
             context_length: None,
+            metadata_error: false,
         });
         let policy =
             LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
@@ -3815,6 +3828,7 @@ mod tests {
         let provider = Arc::new(WindowReportingProvider {
             model_id: "base-model".to_string(),
             context_length: Some(200_000),
+            metadata_error: false,
         });
         let policy = LlmModelProfilePolicy::new()
             .allow_model_profile(window_test_profile_id(), Some("other-model".to_string()));
@@ -3827,6 +3841,75 @@ mod tests {
         assert_eq!(
             window, None,
             "a window for a different model must not be trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_reports_none_when_the_resolved_route_snapshot_names_another_model() {
+        // The policy route for this profile has no override, so the served
+        // model would be the provider's base model ("base-model") -- but the
+        // resolved route snapshot (the run's actual bound route) names a
+        // different model. The snapshot identity must win the same way the
+        // route-override case above does.
+        let provider = Arc::new(WindowReportingProvider {
+            model_id: "base-model".to_string(),
+            context_length: Some(200_000),
+            metadata_error: false,
+        });
+        let policy =
+            LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
+        let gateway = LlmProviderModelGateway::new(provider, policy);
+        let snapshot = HostManagedModelRouteSnapshot::advisory("other-model")
+            .expect("valid advisory model id");
+
+        let window = gateway
+            .advertised_context_window_tokens(&window_test_profile_id(), Some(&snapshot))
+            .await;
+
+        assert_eq!(
+            window, None,
+            "a window for a model other than the resolved route snapshot must not be trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_reports_the_window_when_the_resolved_route_snapshot_names_the_served_model() {
+        let provider = Arc::new(WindowReportingProvider {
+            model_id: "base-model".to_string(),
+            context_length: Some(200_000),
+            metadata_error: false,
+        });
+        let policy =
+            LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
+        let gateway = LlmProviderModelGateway::new(provider, policy);
+        let snapshot =
+            HostManagedModelRouteSnapshot::advisory("base-model").expect("valid advisory model id");
+
+        let window = gateway
+            .advertised_context_window_tokens(&window_test_profile_id(), Some(&snapshot))
+            .await;
+
+        assert_eq!(window, Some(200_000));
+    }
+
+    #[tokio::test]
+    async fn gateway_reports_none_when_model_metadata_fails() {
+        let provider = Arc::new(WindowReportingProvider {
+            model_id: "base-model".to_string(),
+            context_length: Some(200_000),
+            metadata_error: true,
+        });
+        let policy =
+            LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
+        let gateway = LlmProviderModelGateway::new(provider, policy);
+
+        let window = gateway
+            .advertised_context_window_tokens(&window_test_profile_id(), None)
+            .await;
+
+        assert_eq!(
+            window, None,
+            "a failed model_metadata() call must fall back to the compiled-in budget, not fail the run"
         );
     }
 }

@@ -2312,6 +2312,12 @@ pub trait HostManagedModelGateway: Send + Sync {
     /// Gateways that own provider selection should override this. The default
     /// returns `None`, which keeps the compiled-in budget — a gateway that
     /// knows nothing must not change how any run is budgeted.
+    ///
+    /// This is awaited on the turn-run host-build critical path, so an
+    /// implementation must be cheap and I/O-free — `ironclaw_llm`'s
+    /// `LlmProvider::model_metadata()` contract makes it a static description
+    /// for exactly this reason. A slow override stalls every run's
+    /// construction; return `None` rather than doing work.
     async fn advertised_context_window_tokens(
         &self,
         _model_profile_id: &ModelProfileId,
