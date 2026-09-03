@@ -272,7 +272,10 @@ fn redact_embedded_structured_text(text: &mut String, depth: usize) -> bool {
         };
         start..end
     };
-    let Ok(mut nested) = serde_json::from_str(&text[range.clone()]) else {
+    let Some(candidate) = text.get(range.clone()) else {
+        return redact_unparsed_credential_text(text);
+    };
+    let Ok(mut nested) = serde_json::from_str(candidate) else {
         return redact_unparsed_credential_text(text);
     };
     if !redact_structured_credential_values(&mut nested, depth) {
