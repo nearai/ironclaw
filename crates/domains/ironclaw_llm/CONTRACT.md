@@ -384,6 +384,42 @@ outbound request. The field is omitted, never backfilled from `run_id`, when
 no thread id is known (a per-run key would fragment the cache across a
 conversation's turns).
 
+**OpenAI-compatible Chat Completions `prompt_cache_key`**: the same
+metadata-sourced value also reaches the three OpenAI-compatible Chat
+Completions transports, so provider-side prefix caches route consistently
+regardless of which wire shape a turn happens to use:
+
+- `rig_adapter.rs` (`RigAdapter::prompt_cache_key`, called from all four
+  `LlmProvider` methods): merged into rig-core's `additional_params` via the
+  same `merge_additional_params` fill-missing-only helper used for provider
+  defaults, so it never clobbers an existing key. Gated on
+  `prompt_cache_key_supported`, a dedicated flag set `true` only by
+  `create_openai_compat_from_registry` (mirroring `json_object_supported`'s
+  existing scoping) — **never** for the Anthropic protocol, where
+  `prompt_cache_key` is meaningless and `additional_params` already carries
+  `cache_control`. DeepSeek, OpenRouter, Gemini, and Ollama (each routed
+  through their own dedicated rig-core client) do not receive it either;
+  only the generic OpenAI-compatible factory does.
+- `nearai_chat.rs` (`NearAiChatProvider::prompt_cache_key`): a
+  `#[serde(skip_serializing_if = "Option::is_none")] prompt_cache_key: Option<String>`
+  field on `ChatCompletionRequest`, populated from request metadata in all
+  four `LlmProvider` methods.
+- `github_copilot.rs` (`GithubCopilotProvider::prompt_cache_key`): same
+  field/gate shape on `OpenAiRequest`, populated in `complete()` and
+  `complete_with_tools()`.
+
+**Kill switch**: `RegistryProviderConfig`/`NearAiConfig.unsupported_params`
+accepts `"prompt_cache_key"` (validated against `registry.rs`'s
+`unsupported_params_de::VALID_PARAMS`) so an operator can suppress the field
+per provider when a server 400s on unknown fields — each of the three
+`prompt_cache_key` methods above checks its own `unsupported_params`
+before reading metadata. NEAR AI's `unsupported_params` is real and testable
+on `NearAiConfig`, but — unlike `RegistryProviderConfig`, which threads it
+from `providers.json` via `ProviderDefinition.unsupported_params` — it is not
+yet wired from the catalog for this dedicated-config backend
+(`resolution.rs::build_nearai_config` always passes `Vec::new()`); an
+operator cannot yet flip it without code changes.
+
 ## rig_adapter.rs Details
 
 `RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for all non-NEAR AI providers (OpenAI, Anthropic, Ollama, Tinfoil, OpenAI-compatible). Key behaviors:
