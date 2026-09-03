@@ -12,7 +12,8 @@ use ironclaw_host_api::ids::{
 };
 use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
-    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    LlmError, LlmProvider, OpenAiCodexConfig, OpenAiCodexProvider, OpenAiCodexSessionManager, Role,
+    TokenRefreshingProvider, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -5688,4 +5689,125 @@ impl LlmProvider for RecordingLlmProvider {
         })
     }
 }
+
+// Regression coverage for the gateway-level caller, not just the
+// `TokenRefreshingProvider::model_metadata()` leaf covered by
+// `ironclaw_llm::token_refreshing::model_metadata_does_not_refresh_the_token`.
+// The production caller is `advertised_context_window_tokens` (turn-run host
+// construction); a future decorator/gateway wiring change could reintroduce
+// the HTTP call while the leaf test alone stays green.
+
+/// Minimal local equivalent of `ironclaw_llm`'s private
+/// `codex_test_helpers::make_test_jwt` (`pub(crate)`, not reachable from this
+/// crate): an unsigned JWT-shaped string with the same three-segment
+/// header.payload.signature layout.
+fn probe_test_jwt(account_id: &str) -> String {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = engine.encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+    let payload_json = serde_json::json!({
+        "sub": "user123",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+        },
+    });
+    let payload = engine.encode(payload_json.to_string().as_bytes());
+    let sig = engine.encode(b"fake-signature");
+    format!("{header}.{payload}.{sig}")
+}
+
+/// Local equivalent of `ironclaw_llm::token_refreshing::tests::spawn_counting_auth_endpoint`
+/// (private to that crate): counts connection attempts against a local
+/// listener so the test can observe whether a token refresh was ever
+/// attempted, without a mock-HTTP dependency.
+fn probe_spawn_counting_auth_endpoint() -> (String, Arc<AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let connections_task = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            connections_task.fetch_add(1, Ordering::SeqCst);
+            use tokio::io::AsyncWriteExt;
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        }
+    });
+    (format!("http://{addr}"), connections)
+}
+
+#[tokio::test]
+async fn advertised_context_window_probe_does_not_refresh_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_path = dir.path().join("session.json");
+    let (auth_endpoint, connections) = probe_spawn_counting_auth_endpoint();
+
+    // A session that needs a refresh: expired, with a non-empty refresh
+    // token so `refresh_tokens()` would actually attempt the HTTP call rather
+    // than short-circuiting on a missing refresh token. Written directly to
+    // disk (rather than via a private session-mutation helper) because
+    // `OpenAiCodexSessionManager::new` loads synchronously from
+    // `config.session_path` during construction — see the read at
+    // `openai_codex_session.rs`'s `new()`:
+    // `if let Ok(data) = std::fs::read_to_string(&mgr.config.session_path)
+    //   && let Ok(session) = serde_json::from_str::<OpenAiCodexSession>(&data)`
+    // — and `OpenAiCodexSession`'s fields are `pub(crate)` to `ironclaw_llm`,
+    // so this crate cannot construct one directly; it can write the same
+    // shape (`#[derive(Serialize, Deserialize)]`, plain field names, chrono's
+    // default RFC3339 date serialization) as JSON instead.
+    let session_json = serde_json::json!({
+        "access_token": probe_test_jwt("acct_test"),
+        "refresh_token": "refresh-token",
+        "expires_at": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+        "created_at": (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+    });
+    std::fs::write(&session_path, session_json.to_string()).unwrap();
+
+    let config = OpenAiCodexConfig {
+        model: "gpt-5.3-codex".to_string(),
+        auth_endpoint,
+        api_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+        client_id: "test_client_id".to_string(),
+        session_path,
+        token_refresh_margin_secs: 300,
+    };
+
+    let jwt = probe_test_jwt("acct_test");
+    let inner = Arc::new(
+        OpenAiCodexProvider::new(&config.model, &config.api_base_url, &jwt, 300)
+            .expect("provider creation should succeed"),
+    );
+    let session = Arc::new(
+        OpenAiCodexSessionManager::new(config).expect("session manager creation should succeed"),
+    );
+    assert!(
+        session.needs_refresh().await,
+        "session loaded from disk must report it needs a refresh"
+    );
+
+    let provider = Arc::new(TokenRefreshingProvider::new(inner.clone(), session));
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(interactive_model(), None);
+    let gateway = LlmProviderModelGateway::new(provider, policy);
+
+    let window = gateway
+        .advertised_context_window_tokens(&interactive_model(), None)
+        .await;
+
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        0,
+        "advertised_context_window_tokens() must not perform a token refresh"
+    );
+    assert_eq!(
+        window, None,
+        "the codex provider reports context_length: None"
+    );
+}
+
 // arch-exempt: large_file, LLM gateway contract coverage remains centralized, plan #6175
