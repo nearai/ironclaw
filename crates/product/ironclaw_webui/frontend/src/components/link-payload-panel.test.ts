@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -32,7 +31,7 @@ function createHarness({ qrResults = [] } = {}) {
     return queue.length > 1 ? queue.shift() : queue[0];
   };
 
-  const context = {
+  const context: vm.Context = {
     Button: "button",
     globalThis: {},
     Date: { now: () => nowMs, parse: (value) => Date.parse(value) },

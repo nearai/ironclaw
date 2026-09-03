@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -133,7 +132,7 @@ function deferred() {
 test("useHistory records a load error when timeline fetch fails", async () => {
   const setCalls = [];
   const consoleErrors = [];
-  const context = {
+  const context: vm.Context = {
     console: {
       error: (...args) => consoleErrors.push(args),
     },
@@ -164,7 +163,7 @@ test("useHistory starts an older-page load while latest refresh is in flight", a
   const latestPage = deferred();
   const olderPage = deferred();
   const fetchCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: ({ cursor }) => {
       fetchCalls.push(cursor || null);
@@ -213,7 +212,7 @@ test("useHistory discards stale cursor pages after a refresh changes cursor wind
   const fetchCalls = [];
   const setCalls = [];
   let latestCalls = 0;
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: ({ cursor }) => {
       fetchCalls.push(cursor || null);
@@ -291,7 +290,7 @@ test("useHistory discards stale cursor pages after a refresh changes cursor wind
 test("useHistory merges cursor pages connected by raw filtered boundary records", async () => {
   const setCalls = [];
   const fetchCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async ({ cursor }) => {
       fetchCalls.push(cursor || null);
@@ -356,7 +355,7 @@ test("useHistory merges cursor pages connected by raw filtered boundary records"
 });
 
 test("cursor page merge guard requires the current cursor or a connected page", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { cursorPageCanMerge } = context.globalThis.__testExports;
 
@@ -409,7 +408,7 @@ test("useHistory full refresh preserves older rows and cursor across raw filtere
   const setCalls = [];
   const fetchCalls = [];
   let latestCalls = 0;
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async ({ cursor }) => {
       fetchCalls.push(cursor || null);
@@ -481,7 +480,7 @@ test("useHistory tags messages with the thread they belong to (messagesThreadId)
   // navigation. Pin that the tag is set from the first render and after a load.
   const threadId = "thread-tagged";
   const setCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => ({
       messages: [{ message_id: "m1", kind: "user", status: "accepted", content: "hi" }],
@@ -515,7 +514,7 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
   const threadId = "thread-activity";
   const runId = "run-activity";
   const setCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => ({
       messages: [
@@ -575,7 +574,7 @@ test("useHistory background refresh preserves a live partial assistant reply", a
   const threadId = "thread-streaming";
   const runId = "run-streaming";
   const setCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => ({ messages: [], next_cursor: null }),
     globalThis: {},
@@ -616,7 +615,7 @@ test("useHistory background refresh preserves a live partial assistant reply", a
 
 test("useHistory can seed a newly-created thread before navigation", async () => {
   const setCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => ({ messages: [], next_cursor: null }),
     globalThis: {},
@@ -664,7 +663,7 @@ test("useHistory can seed a newly-created thread before navigation", async () =>
 
 test("useHistory clears visible messages immediately when switching to an uncached thread", () => {
   const ReactStub = createPersistentReactStub();
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => {
       throw new Error("render reset should not need timeline fetch");
@@ -702,7 +701,7 @@ test("useHistory clears visible messages immediately when switching to an uncach
 });
 
 test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => new Promise(() => {}),
     globalThis: {},
@@ -737,7 +736,7 @@ test("useHistory seedThreadMessages updates an accepted first message by timelin
 
 test("useHistory seedThreadMessages updates the mounted target thread", async () => {
   const setCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => new Promise(() => {}),
     globalThis: {},
@@ -774,7 +773,7 @@ test("useHistory seedThreadMessages updates the mounted target thread", async ()
 
 test("useHistory setMessages restamps messages onto the active thread", async () => {
   const setCalls = [];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => new Promise(() => {}),
     globalThis: {},
@@ -801,7 +800,7 @@ test("useHistory setMessages restamps messages onto the active thread", async ()
 test("useHistory stamps messagesThreadId during synchronous thread switches", async () => {
   const setCalls = [];
   const React = createPersistentReactStub({ setCalls });
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => new Promise(() => {}),
     globalThis: {},
@@ -846,7 +845,7 @@ test("useHistory full refresh preserves unnumbered live gate activity after time
       activityOrder: 3,
     },
   ];
-  const context = {
+  const context: vm.Context = {
     console,
     fetchTimeline: async () => ({
       messages: [],
@@ -891,7 +890,7 @@ test("useHistory full refresh preserves unnumbered live gate activity after time
 });
 
 test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline win otherwise", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -923,7 +922,7 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
 });
 
 test("mergeFullRefresh keeps run failures beside the prompt that failed", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -958,7 +957,7 @@ test("mergeFullRefresh keeps run failures beside the prompt that failed", () => 
 });
 
 test("mergeFullRefresh keeps a stopped notice when the durable timeline refreshes", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -988,7 +987,7 @@ test("mergeFullRefresh keeps a stopped notice when the durable timeline refreshe
 });
 
 test("mergeFullRefresh keeps a failed request with its client-only prompt", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1053,7 +1052,7 @@ test("mergeFullRefresh keeps a failed request with its client-only prompt", () =
 });
 
 test("mergeFullRefresh keeps stream failures at their original boundary", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1085,7 +1084,7 @@ test("mergeFullRefresh keeps stream failures at their original boundary", () => 
 });
 
 test("mergeFullRefresh preserves paginated older timeline messages", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1109,7 +1108,7 @@ test("mergeFullRefresh preserves paginated older timeline messages", () => {
 });
 
 test("mergeFullRefresh sorts preserved older timeline messages before pending rows", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1132,7 +1131,7 @@ test("mergeFullRefresh sorts preserved older timeline messages before pending ro
 });
 
 test("mergeFullRefresh drops older timeline messages when the fresh page skipped ahead", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1155,7 +1154,7 @@ test("mergeFullRefresh drops older timeline messages when the fresh page skipped
 });
 
 test("nextCursorAfterFullRefresh does not rewind past loaded older pages", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { nextCursorAfterFullRefresh } = context.globalThis.__testExports;
 
@@ -1184,7 +1183,7 @@ test("nextCursorAfterFullRefresh does not rewind past loaded older pages", () =>
 });
 
 test("nextCursorAfterFullRefresh uses the fresh cursor after a non-overlapping refresh", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { nextCursorAfterFullRefresh } = context.globalThis.__testExports;
 
@@ -1216,7 +1215,7 @@ test("nextCursorAfterFullRefresh uses the fresh cursor after a non-overlapping r
 });
 
 test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1246,7 +1245,7 @@ test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", (
 });
 
 test("mergeFullRefresh carries live assistant timestamps onto confirmed replies", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -1278,7 +1277,7 @@ test("mergeFullRefresh carries live assistant timestamps onto confirmed replies"
 });
 
 test("mergeFullRefresh keeps same-run activity before confirmed assistant replies", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     React: createReactStub(),
     carryFinalAssistantOrderFlags,
@@ -1339,7 +1338,7 @@ test("mergeFullRefresh keeps same-run activity before confirmed assistant replie
 });
 
 test("mergeFullRefresh preserves completed intermediate assistant phases", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     React: createReactStub(),
     carryFinalAssistantOrderFlags,
@@ -1407,7 +1406,7 @@ test("mergeFullRefresh preserves completed intermediate assistant phases", () =>
 });
 
 test("mergeFullRefresh preserves final assistant activity-order flag by run", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     React: createReactStub(),
     carryFinalAssistantOrderFlags,
@@ -1456,7 +1455,7 @@ test("mergeFullRefresh preserves final assistant activity-order flag by run", ()
 });
 
 test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 

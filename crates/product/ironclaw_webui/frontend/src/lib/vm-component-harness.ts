@@ -15,7 +15,15 @@
 // Not a test file itself (no `.test.` in the name) so the test runner skips
 // it.
 import { readFileSync } from "node:fs";
+import type { VmComponentProps } from "../test-support/dynamic-test-types";
 
+export type { VmComponentProps } from "../test-support/dynamic-test-types";
+
+/**
+ * Synthetic component props are assembled from transpiled source at runtime,
+ * so their keys and values are intentionally dynamic. Centralizing that seam
+ * keeps individual tests free of repeated broad casts.
+ */
 export function componentSourceForTest(fileUrl: URL, exportName: string): string {
   const source = readFileSync(fileUrl, "utf8");
   const lines: string[] = [];
@@ -53,8 +61,8 @@ export function findComponent(node, component) {
 // HTML attribute names may contain hyphens (for example, data-testid).
 export const HTML_ATTRIBUTE_PATTERN = /([A-Za-z][A-Za-z0-9-]*)=\s*$/;
 
-export function componentProps(node, component) {
-  const props: Record<string, unknown> = {};
+export function componentProps(node, component): VmComponentProps {
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(HTML_ATTRIBUTE_PATTERN)?.[1];

@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { VmComponentProps } from "../../../lib/vm-component-harness";
 
 function sourceForTest() {
   const source = readFileSync(
@@ -41,7 +42,7 @@ function findComponent(node, component) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
@@ -53,7 +54,7 @@ function componentProps(node, component) {
 test("device-link onboarding resolves the declared provider and resumes chat on completion", async () => {
   const notifications = [];
   function DeviceLinkPanel() {}
-  const context = {
+  const context: vm.Context = {
     DeviceLinkPanel,
     deviceLinkSetupSecret: (secrets) =>
       secrets.find((secret) => secret?.setup?.kind === "device_link") || null,

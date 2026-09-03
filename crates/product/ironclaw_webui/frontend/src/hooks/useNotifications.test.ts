@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../test-support/dynamic-test-types";
 
 function sourceForTest() {
   const source = readFileSync(new URL("./useNotifications.ts", import.meta.url), "utf8");
@@ -88,7 +89,7 @@ function instantiate({
   inboxError = null,
   mutationsPending = false,
   archiveError = null,
-} = {}) {
+}: DynamicTestOptions = {}) {
   let queryOptions;
   const readCalls = [];
   const allReadCalls = [];
@@ -116,7 +117,7 @@ function instantiate({
     invalidateQueries: () => {},
   };
   let mutationIndex = 0;
-  const context = {
+  const context: vm.Context = {
     React: react,
     Promise,
     useI18n: () => ({ t: (key) => key }),

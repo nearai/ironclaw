@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import { mergeNotificationChannelRows } from "../hooks/useNotificationChannels";
 
@@ -135,7 +136,10 @@ function t(key, params = {}) {
   );
 }
 
-function channel(targetId, { displayName, description, status = "available" } = {}) {
+function channel(
+  targetId,
+  { displayName, description, status = "available" }: DynamicTestOptions = {},
+) {
   const isAvailable = status === "available";
   return {
     target_id: targetId,
@@ -154,7 +158,10 @@ function channel(targetId, { displayName, description, status = "available" } = 
   };
 }
 
-function target(targetId, { displayName, description } = {}) {
+function target(
+  targetId,
+  { displayName, description }: DynamicTestOptions = {},
+) {
   return {
     target: {
       target_id: targetId,
@@ -176,7 +183,16 @@ function mergeRows(targets, channels) {
   return { rows, selected };
 }
 
-function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, error = null, saveError = null, devicePush = null } = {}) {
+function createHarness(
+  {
+    saveNotificationChannels = async () => {},
+    isLoading = false,
+    isSaving = false,
+    error = null,
+    saveError = null,
+    devicePush = null,
+  }: DynamicTestOptions = {},
+) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -239,7 +255,7 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
     },
   };
 
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     Badge,
     Button,
@@ -880,7 +896,7 @@ test("SessionChannelRow keeps the checkbox disabled while editing is locked, eve
 test("DevicePushBlock distinguishes unsupported, denied, not-enrolled, and enrolled browsers", () => {
   const harness = createHarness();
   const block = harness.exports.DevicePushBlock;
-  const cases = [
+  const cases: Array<[DynamicTestOptions, string]> = [
     [
       { state: "unsupported" },
       "Push notifications aren't available in this browser.",

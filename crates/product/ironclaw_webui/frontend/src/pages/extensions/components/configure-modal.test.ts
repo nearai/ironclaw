@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import {
   channelConnection,
@@ -78,7 +79,7 @@ function renderModal({
   runEffects = false,
   blockPopup = false,
   initialConnection = null,
-} = {}) {
+}: DynamicTestOptions = {}) {
   const calls = [];
   const invalidations = [];
   const stateSets = [];
@@ -89,7 +90,7 @@ function renderModal({
   const openedPopups = [];
   const notifications = [];
   let stateIndex = 0;
-  const context = {
+  const context: vm.Context = {
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
     }),

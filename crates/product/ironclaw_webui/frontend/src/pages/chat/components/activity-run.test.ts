@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -23,7 +22,7 @@ function activityRunSourceForTest() {
 }
 
 test("ActivityRun keeps running tool activity collapsed by default", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     Icon() {},
@@ -57,7 +56,7 @@ test("ActivityRun keeps running tool activity collapsed by default", () => {
 });
 
 test("ActivityRun keeps declined tool activity collapsed", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     Icon() {},
@@ -92,7 +91,7 @@ test("ActivityRun keeps declined tool activity collapsed", () => {
 });
 
 test("ActivityRun keeps failed nested tool activity collapsed", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     Icon() {},
@@ -131,7 +130,7 @@ test("ActivityRun keeps failed nested tool activity collapsed", () => {
 });
 
 test("ActivityRun keeps reasoning activity collapsed", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     Icon() {},
@@ -183,7 +182,7 @@ function containsScalar(node, expected) {
 
 test("ActivityRun renders a narration phase as a settled note inside the run", () => {
   const rendered = [];
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     Icon(props) {

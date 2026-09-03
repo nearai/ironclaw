@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -30,7 +29,7 @@ function useChannelsForTest({ extensions, registry }) {
     ["extensions", { extensions }],
     ["extension-registry", { entries: registry }],
   ]);
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     gatewayStatus: () => {},
     fetchExtensions: () => {},

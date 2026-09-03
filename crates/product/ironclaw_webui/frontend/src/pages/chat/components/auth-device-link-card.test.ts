@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -7,7 +6,7 @@ import { componentProps, findComponent } from "../../../lib/vm-component-harness
 import { sourceForVmTest } from "../../../test-support/vm-module-harness";
 
 function renderCard({ gate, onCancel = () => {} }) {
-  const context = {
+  const context: vm.Context = {
     AuthGateShell() {},
     Button: "button",
     DeviceLinkPanel() {},

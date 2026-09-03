@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 // Load useThreads.ts into a fresh VM context with its imports stripped, the
 // same harness pattern useHistory.test.ts uses. The hook's collaborators
@@ -30,7 +31,7 @@ function createReactStub({
   effectCleanups = [],
   initialStateByIndex = {},
   onStateChange,
-} = {}) {
+}: DynamicTestOptions = {}) {
   let stateIndex = 0;
   return {
     useCallback: (fn) => fn,
@@ -75,7 +76,7 @@ function makeDeferredCreate() {
 }
 
 function instantiate(createThreadRequest, overrides = {}) {
-  const context = {
+  const context: vm.Context = {
     AbortController,
     console,
     useQuery: () => ({ data: { threads: [] }, isLoading: false }),

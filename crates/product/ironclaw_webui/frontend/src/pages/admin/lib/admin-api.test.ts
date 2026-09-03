@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Unit tests for the WebChat v2 admin user-management API client.
 //
 // Run with the frontend test runner:
@@ -16,6 +15,7 @@
 
 import assert from "node:assert/strict";
 import { test, beforeEach, afterEach } from "vitest";
+import { createMemoryStorage } from "../../../test-support/browser-mocks";
 import {
   fetchAdminUsers,
   fetchAdminUser,
@@ -38,18 +38,7 @@ import {
 // `api.ts` reads a bearer via `sessionStorage.getItem`, which does not
 // exist in Node. A minimal in-memory stub keeps `apiFetch` running; an
 // empty token simply omits the Authorization header.
-globalThis.sessionStorage = {
-  store: new Map(),
-  getItem(key) {
-    return this.store.has(key) ? this.store.get(key) : null;
-  },
-  setItem(key, value) {
-    this.store.set(key, String(value));
-  },
-  removeItem(key) {
-    this.store.delete(key);
-  },
-};
+globalThis.sessionStorage = createMemoryStorage();
 
 const originalFetch = globalThis.fetch;
 let calls;
@@ -62,14 +51,11 @@ function stubFetch(responder) {
   globalThis.fetch = async (path, init) => {
     calls.push({ path, init });
     const body = responder(path, init);
-    return {
-      ok: true,
+    return new Response(JSON.stringify(body), {
       status: 200,
       statusText: "OK",
       headers: new Headers({ "content-type": "application/json" }),
-      json: async () => body,
-      text: async () => JSON.stringify(body),
-    };
+    });
   };
 }
 
@@ -103,7 +89,7 @@ test("fetchAdminUsers GETs the users route and normalizes id === user_id", async
     ],
   }));
 
-  const result = await fetchAdminUsers();
+  const result = await fetchAdminUsers(undefined);
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, "/api/webchat/v2/admin/users");
@@ -154,7 +140,7 @@ test("replaceExtensionAdminConfiguration preserves optimistic revision and clien
 
 test("fetchAdminUsers returns an empty list when the response has no users array", async () => {
   stubFetch(() => ({}));
-  const result = await fetchAdminUsers();
+  const result = await fetchAdminUsers(undefined);
   assert.deepEqual(result, { users: [], total: 0, nextCursor: null });
 });
 
@@ -217,8 +203,8 @@ test("thread scraping clients preserve target, thread, run, and pagination scope
     cursor: "next",
     signal: controller.signal,
   });
-  await fetchThreadScrapeArtifact("user a/b", "thread a/b");
-  await fetchThreadScrapeRunArtifact("user a/b", "thread a/b", "run a/b");
+  await fetchThreadScrapeArtifact("user a/b", "thread a/b", undefined);
+  await fetchThreadScrapeRunArtifact("user a/b", "thread a/b", "run a/b", undefined);
 
   assert.equal(calls[0].init.signal, controller.signal);
   assert.deepEqual(calls.map((call) => call.path), [

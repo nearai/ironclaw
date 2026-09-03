@@ -1,8 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 import { hasChannelSurface } from "../lib/extensions-schema";
 
@@ -53,7 +53,7 @@ function contextFor(mutationState, queryCalls) {
       return { data: { requests: [] }, isLoading: false };
     },
     useQueryClient: () => ({ invalidateQueries: () => {} }),
-    useT: () => (key, params = {}) =>
+    useT: () => (key, params: DynamicTestOptions = {}) =>
       `${key}${params.name ? `:${params.name}` : ""}`,
   };
 }
@@ -61,7 +61,7 @@ function contextFor(mutationState, queryCalls) {
 test("useExtensions preserves the server install result message", async () => {
   const mutationConfigs = [];
   const actionResults = [];
-  const context = {
+  const context: vm.Context = {
     ...contextFor(
       { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
       []
@@ -115,7 +115,7 @@ test("useExtensions preserves the server install result message", async () => {
 test("useExtensions hands setup the authoritative installed channel projection", async () => {
   const mutationConfigs = [];
   const needsSetupPayloads = [];
-  const context = {
+  const context: vm.Context = {
     ...contextFor(
       { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
       []
@@ -182,7 +182,7 @@ test("useExtensions hands setup the authoritative installed channel projection",
 });
 
 test("useExtensions places uninstalled wasm channel-surface registry entry in channelRegistry not toolRegistry", () => {
-  const context = {
+  const context: vm.Context = {
     ...contextFor(
       { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
       []
@@ -232,7 +232,7 @@ test("useExtensions places uninstalled wasm channel-surface registry entry in ch
 });
 
 test("useExtensions groups manifest-backed channels with channel entries", () => {
-  const context = {
+  const context: vm.Context = {
     ...contextFor(
       { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
       []

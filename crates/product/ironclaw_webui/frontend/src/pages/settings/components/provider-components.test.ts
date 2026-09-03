@@ -1,9 +1,13 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
+
 import { groupProvidersByStatus } from "../lib/llm-providers";
-import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import {
+  runVmModuleForTest,
+  type VmComponentProps,
+} from "../../../test-support/vm-module-harness";
 
 const PROVIDER_GROUP_LABELS = [
   "llm.groupActive",
@@ -36,7 +40,7 @@ function findComponentNodes(root, component) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
@@ -119,7 +123,7 @@ function useProviderManagementActionsStub({
   activeProviderId,
   providerToDelete = null,
   userModelPolicy = null,
-}) {
+}: DynamicTestOptions) {
   return () => ({
     allProviderIds: providers.map((provider) => provider.id),
     cancelDelete: () => {},
@@ -153,7 +157,7 @@ function renderProviderManagement({
   providerToDelete = null,
   userModelPolicy = null,
   t = (key) => key,
-}) {
+}: DynamicTestOptions) {
   const ProviderCard = "ProviderCard";
   const ConfirmDialog = "ConfirmDialog";
   const context = {
@@ -208,8 +212,8 @@ function renderProviderManagement({
   return { ConfirmDialog, rendered, cardProps };
 }
 
-function evalIsLoopbackBrowserOrigin({ hostname }) {
-  const context = {};
+function evalIsLoopbackBrowserOrigin({ hostname }: DynamicTestOptions) {
+  const context: DynamicTestOptions = {};
   if (hostname !== undefined) {
     context.window = { location: { hostname } };
   }
@@ -280,7 +284,7 @@ function createReactMenuStateStub(state) {
 }
 
 function createProviderCardHarness() {
-  const state = {};
+  const state: DynamicTestOptions = {};
   const context = {
     Badge: "Badge",
     Button: "Button",
@@ -327,7 +331,7 @@ function createProviderCardHarness() {
 }
 
 function createNearAiSetupMenuHarness() {
-  const state = {};
+  const state: DynamicTestOptions = {};
   const calls = [];
   const context = {
     Button: "Button",
@@ -810,7 +814,9 @@ test("isLoopbackBrowserOrigin detects loopback origins so NEAR AI SSO fails fast
 // Caller"): isLoopbackBrowserOrigin gates the NEAR AI login HTTP call, not just a
 // helper return value. setTimeout fires synchronously so the remote-origin
 // control path's poll resolves immediately.
-function runProviderLogin({ hostname, activeProviderId = null, popupClosed = false }) {
+function runProviderLogin(
+  { hostname, activeProviderId = null, popupClosed = false }: DynamicTestOptions,
+) {
   const stateLog = [];
   const httpCalls = [];
   // Capture every window.open URL and the popup handles so tests can assert the

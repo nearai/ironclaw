@@ -1,11 +1,11 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
+import type vm from "node:vm";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../test-support/vm-module-harness";
 
 function setupModalContext(translate = (key) => key) {
-  const context = {
+  const context: vm.Context = {
     React: {
       useEffect: () => {},
     },
