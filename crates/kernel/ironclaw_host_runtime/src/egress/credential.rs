@@ -380,7 +380,8 @@ fn sanitized_secret_error(error: &SecretStoreError) -> String {
         SecretStoreError::BackendMisconfigured { .. } => {
             "credential store is misconfigured".to_string()
         }
-        SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
+        SecretStoreError::SecretMaterialUnreadable { .. }
+        | SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
     }
 }
 
@@ -801,6 +802,12 @@ mod tests {
                 "credential expired",
             ),
             (SecretStoreError::SecretExpired, "credential expired"),
+            (
+                SecretStoreError::SecretMaterialUnreadable {
+                    reason: "wrong key".to_string(),
+                },
+                "credential store unavailable",
+            ),
             (
                 SecretStoreError::BackendMisconfigured {
                     reason: "raw backend detail".to_string(),

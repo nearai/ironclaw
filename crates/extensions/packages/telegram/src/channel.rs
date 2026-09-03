@@ -14,15 +14,23 @@
 //! egress with the same host-side credential injection. Two method bodies
 //! became zero lines, and a manifest field can no longer drift from an
 //! implementation because there is no implementation.
+//!
+//! The reply half — the `message`-cadence `ReplySink` that materializes a
+//! run's terminal document through the same send path `deliver` uses — lives
+//! in `crate::reply`.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport, InboundOutcome,
+    ChannelDelivery, ChannelError, ChannelIngress, DeliveryReport, InboundOutcome,
     NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
     RunReaction, VerifiedInbound,
 };
-use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_host_api::{action::NetworkMethod, ids::SecretHandle};
 
@@ -192,22 +200,79 @@ async fn complete_message(
     Ok(message)
 }
 
+/// One Bot API call's outcome plus the pacing hint its response carried.
+pub(crate) struct TelegramCallOutcome {
+    pub(crate) outcome: PartDeliveryOutcome,
+    /// The provider's `Retry-After` hint (host-parsed and bounded), when the
+    /// response carried one. Meaningful beside a `Retryable` outcome: the
+    /// reply sink hands it to the host so a rate-limited terminal render is
+    /// retried when Telegram said, not when a generic backoff guessed.
+    pub(crate) retry_after: Option<Duration>,
+}
+
+impl TelegramCallOutcome {
+    /// An outcome decided before or without a vendor response.
+    pub(crate) fn without_hint(outcome: PartDeliveryOutcome) -> Self {
+        Self {
+            outcome,
+            retry_after: None,
+        }
+    }
+
+    /// Classify a `sendMessage`/`sendDocument` response, keeping its hint.
+    pub(crate) fn from_message_response(method: &str, response: &RestrictedEgressResponse) -> Self {
+        Self {
+            outcome: telegram_message_response_outcome(method, response.status, &response.body),
+            retry_after: response.retry_after,
+        }
+    }
+
+    pub(crate) fn from_egress_error(error: &RestrictedEgressError) -> Self {
+        Self::without_hint(telegram_outcome_for_egress_error(error))
+    }
+}
+
+/// Everything one [`TelegramChannelAdapter::send`] learned from the vendor:
+/// per-part outcomes in send order, stopping at the first part Telegram did
+/// not accept, plus the pacing hint of the call that stopped it.
+pub(crate) struct TelegramSendReport {
+    pub(crate) parts: Vec<PartDeliveryOutcome>,
+    pub(crate) retry_after: Option<Duration>,
+}
+
+impl TelegramSendReport {
+    /// Record one vendor call; returns whether sending may continue. The
+    /// report describes what the vendor accepted — retry semantics belong to
+    /// the caller (the coordinator for deliveries, the reply sink's outcome
+    /// mapping for the terminal reply).
+    fn record(&mut self, call: TelegramCallOutcome) -> bool {
+        let sent = matches!(call.outcome, PartDeliveryOutcome::Sent { .. });
+        if !sent {
+            self.retry_after = call.retry_after;
+        }
+        self.parts.push(call.outcome);
+        sent
+    }
+}
+
 /// One vendor mechanism serves both output axes here, as it does for every
 /// conversational vendor — which is exactly why the reply/delivery
 /// distinction stayed invisible until a streaming channel existed. The halves
-/// stay separate because the coordinator picks one by route; the sharing is
-/// an implementation fact, recorded here rather than folded into the contract.
+/// stay separate because the coordinator picks one by route (`deliver` for
+/// notices, the `ReplySink` in `crate::reply` for the run's answer); the
+/// sharing is an implementation fact, recorded here rather than folded into
+/// the contract.
 impl TelegramChannelAdapter {
-    /// Render one coordinator envelope as Bot API `sendMessage` calls: plain
-    /// text split at the vendor's 4096-char limit, `chat_id` from the
+    /// Render one envelope as Bot API calls: plain text split at the
+    /// vendor's 4096-unit limit, files as `sendDocument`, `chat_id` from the
     /// conversation ref, forum-topic threading when the anchor is numeric.
     /// The bot token rides the declared path placeholder — injected
     /// host-side, never adapter-visible.
-    async fn send(
+    pub(crate) async fn send(
         &self,
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
+    ) -> Result<TelegramSendReport, ChannelError> {
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -229,31 +294,33 @@ impl TelegramChannelAdapter {
             .map_err(|_| ChannelError::Render {
                 reason: "telegram reply target is not a numeric message id".to_string(),
             })?;
+        let message_body = |chunk: &str| {
+            let mut body = serde_json::json!({ "chat_id": chat_id, "text": chunk });
+            if let Some(thread_id) = message_thread_id {
+                body["message_thread_id"] = thread_id.into();
+            }
+            if let Some(reply_to) = reply_to_message_id {
+                body["reply_to_message_id"] = reply_to.into();
+            }
+            body
+        };
 
-        let mut parts = Vec::new();
+        let mut report = TelegramSendReport {
+            parts: Vec::new(),
+            retry_after: None,
+        };
         'parts: for part in &envelope.parts {
             match part {
                 OutboundPart::Text(text) => {
                     for chunk in telegram_text_chunks(text) {
-                        let mut body = serde_json::json!({ "chat_id": chat_id, "text": chunk });
-                        if let Some(thread_id) = message_thread_id {
-                            body["message_thread_id"] = thread_id.into();
-                        }
-                        if let Some(reply_to) = reply_to_message_id {
-                            body["reply_to_message_id"] = reply_to.into();
-                        }
-                        let outcome = send_telegram_message(egress, body).await;
-                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                        parts.push(outcome);
-                        if !sent {
-                            // The report describes what the vendor accepted;
-                            // the coordinator owns retry semantics.
+                        let call = send_telegram_message(egress, message_body(&chunk)).await;
+                        if !report.record(call) {
                             break 'parts;
                         }
                     }
                 }
                 OutboundPart::File(file) => {
-                    let outcome = crate::attachment_transfer::send_document(
+                    let call = crate::attachment_transfer::send_document(
                         egress,
                         &chat_id,
                         message_thread_id,
@@ -261,9 +328,7 @@ impl TelegramChannelAdapter {
                         file,
                     )
                     .await;
-                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                    parts.push(outcome);
-                    if !sent {
+                    if !report.record(call) {
                         break 'parts;
                     }
                 }
@@ -273,22 +338,15 @@ impl TelegramChannelAdapter {
                 } => {
                     let text = render_channel_auth_prompt(view, *direct_message);
                     for chunk in telegram_text_chunks(&text) {
-                        let mut body = serde_json::json!({ "chat_id": chat_id, "text": chunk });
-                        if let Some(thread_id) = message_thread_id {
-                            body["message_thread_id"] = thread_id.into();
-                        }
-                        if let Some(reply_to) = reply_to_message_id {
-                            body["reply_to_message_id"] = reply_to.into();
-                        }
-                        let outcome = send_telegram_message(egress, body).await;
-                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                        parts.push(outcome);
-                        if !sent {
+                        let call = send_telegram_message(egress, message_body(&chunk)).await;
+                        if !report.record(call) {
                             break 'parts;
                         }
                     }
                 }
                 OutboundPart::Retract { vendor_message_ref } => {
+                    // Best-effort housekeeping: carries no pacing hint
+                    // because nothing retries it.
                     let outcome = match vendor_message_ref.parse::<i64>() {
                         Ok(message_id) => {
                             delete_telegram_message(
@@ -306,9 +364,7 @@ impl TelegramChannelAdapter {
                             ),
                         },
                     };
-                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                    parts.push(outcome);
-                    if !sent {
+                    if !report.record(TelegramCallOutcome::without_hint(outcome)) {
                         break 'parts;
                     }
                 }
@@ -345,26 +401,13 @@ impl TelegramChannelAdapter {
                             ),
                         },
                     };
-                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                    parts.push(outcome);
-                    if !sent {
+                    if !report.record(TelegramCallOutcome::without_hint(outcome)) {
                         break 'parts;
                     }
                 }
             }
         }
-        Ok(DeliveryReport::from_parts(parts))
-    }
-}
-
-#[async_trait]
-impl ChannelReply for TelegramChannelAdapter {
-    async fn send_reply(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        self.send(envelope, egress).await
+        Ok(report)
     }
 }
 
@@ -375,7 +418,8 @@ impl ChannelDelivery for TelegramChannelAdapter {
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
-        self.send(envelope, egress).await
+        let report = self.send(envelope, egress).await?;
+        Ok(DeliveryReport::from_parts(report.parts))
     }
 }
 
@@ -394,12 +438,11 @@ struct TelegramSentMessage {
 async fn send_telegram_message(
     egress: &dyn RestrictedEgress,
     body: serde_json::Value,
-) -> PartDeliveryOutcome {
-    let response = match egress.send(bot_api_request("sendMessage", body)).await {
-        Ok(response) => response,
-        Err(error) => return telegram_outcome_for_egress_error(&error),
-    };
-    telegram_message_response_outcome("sendMessage", response.status, &response.body)
+) -> TelegramCallOutcome {
+    match egress.send(bot_api_request("sendMessage", body)).await {
+        Ok(response) => TelegramCallOutcome::from_message_response("sendMessage", &response),
+        Err(error) => TelegramCallOutcome::from_egress_error(&error),
+    }
 }
 
 /// Telegram allowed-reaction emoji for a neutral run reaction. `setMessageReaction`
@@ -612,4 +655,4 @@ mod fetch_tests;
 
 #[cfg(test)]
 #[path = "tests/channel_deliver.rs"]
-mod deliver_tests;
+pub(crate) mod deliver_tests;

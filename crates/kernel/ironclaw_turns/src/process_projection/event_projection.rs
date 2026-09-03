@@ -65,7 +65,10 @@ impl TurnEventProjectionSource for TurnEventProjectionFromProcessJournal {
     }
 }
 
-pub(super) fn turn_scope_from_process_scope(scope: ResourceScope) -> Result<TurnScope, TurnError> {
+/// The `TurnScope` a process-journal `ResourceScope` names — the run's
+/// owner slot included. Publication recovery rebuilds run keys from journal
+/// commits with this, so a run's rows are read from the mount they live in.
+pub fn turn_scope_from_process_scope(scope: ResourceScope) -> Result<TurnScope, TurnError> {
     let Some(thread_id) = scope.thread_id else {
         return Err(TurnError::InvalidRequest {
             reason: "process scope filter for agent turns requires thread_id".to_string(),

@@ -18,7 +18,10 @@ import {
   onboardingBelongsToThread,
   useChannelOnboarding,
 } from "./useChannelOnboarding";
-import { useChatEvents } from "../lib/useChatEvents";
+import {
+  appendRunStoppedMessage,
+  useChatEvents,
+} from "../lib/useChatEvents";
 import { touchThreadInCache } from "../lib/thread-cache";
 import {
   addPending,
@@ -1007,6 +1010,8 @@ export function useChat(threadId) {
       ) {
         return;
       }
+      runTrackingRef.current.locallyStoppedRuns.current.add(runId);
+      appendRunStoppedMessage(setMessages, { runId, t });
       setPendingGate(null);
       // Cancelling abandons any pairing panel for this thread: forget its waiter
       // and remember the dismissal so a later channel connect can't blast a
@@ -1027,7 +1032,7 @@ export function useChat(threadId) {
       connectionInterruptedRunIdsRef.current.delete(runId);
       connectionInterruptedUnknownRef.current = false;
     },
-    [activeRun, threadId, dismissOnboardingPairing],
+    [activeRun, threadId, dismissOnboardingPairing, setMessages, t],
   );
 
   const loadMore = React.useCallback(() => {

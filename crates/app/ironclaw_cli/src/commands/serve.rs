@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -17,10 +18,10 @@ use ironclaw_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_extension_host::channel_identity_binding::channel_identity_binding_hook_factory;
 use ironclaw_extension_host::extension_ingress::extension_ingress_route_mount;
 use ironclaw_webui::{
-    DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
+    BoundWebuiListener, DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
     RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
-    deferred_webui_v2_startup_router, product_auth_route_mount, serve_webui_v2,
-    webui_v2_app_with_lifecycle,
+    bind_webui_v2, deferred_webui_v2_startup_router, product_auth_route_mount,
+    serve_bound_webui_v2, serve_webui_v2, webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -257,22 +258,21 @@ impl ServeCommand {
                 anyhow!("DEFAULT_SERVE_HOST `{DEFAULT_SERVE_HOST}` invalid: {err}")
             })?
         };
-        // `port = 0` would tell the OS to pick a free port — useful
-        // when invoked from a test harness with `--port 0`, but in a
-        // config file it produces a running server whose real bound
-        // port is never reported back to the operator (the banner
-        // prints `:0`). Allow `--port 0` from the CLI flag, reject
-        // `0` from `[webui].listen_port`.
+        // `port = 0` tells the OS to pick a free port — useful when a
+        // test harness passes `--port 0` and reads the port the banner
+        // reports, but wrong in a config file, where a fixed, documented
+        // port is what an operator and every client of it need. Allow
+        // `--port 0` from the CLI flag, reject `0` from
+        // `[webui].listen_port`.
         let port: u16 = if let Some(value) = self.port {
             value
         } else if let Some(value) = webui_section.and_then(|s| s.listen_port) {
             if value == 0 {
                 anyhow::bail!(
                     "[webui].listen_port = 0 from config is not supported: the OS would pick \
-                     an ephemeral port and the startup banner cannot report it. Set a fixed \
+                     an ephemeral port that no client of this config can know. Set a fixed \
                      port in config, or pass `--port 0` on the CLI when you genuinely want \
-                     an ephemeral port (the banner output is still :0 in that case — the \
-                     bound address is only useful when consumed through a test harness)."
+                     an ephemeral port (the startup banner then reports the port the OS chose)."
                 );
             }
             value
@@ -550,8 +550,21 @@ impl ServeCommand {
                 ))
             };
 
+            // Bind before announcing: the banner's `listener` line is the
+            // readiness signal operators and the smoke harness wait on, so it
+            // prints only once connections are accepted — and with `--port 0`
+            // it can then name the port the OS chose. The hosted profile bound
+            // its listener at startup, ahead of the runtime build.
+            let listener = match startup_serve {
+                Some(startup) => ListenerPlan::Hosted(startup),
+                None => ListenerPlan::Bound(
+                    bind_webui_v2(listen_addr)
+                        .await
+                        .context("failed to bind WebChat v2 listener")?,
+                ),
+            };
             print_serve_banner(
-                listen_addr,
+                listener.announced_addr(listen_addr),
                 env_token_var,
                 env_user_id_var,
                 &allowed_origins_raw,
@@ -649,23 +662,19 @@ impl ServeCommand {
                 .context("failed to compose v2 Router")?;
             let (router, public_route_drains) = webui_app.into_parts();
 
-            let serve_result = if let Some(startup_serve) = startup_serve {
-                startup_serve
-                    .ready_handle
-                    .publish_ready_router(router)
-                    .context("failed to publish ready WebChat v2 router")?;
-                startup_serve
-                    .serve_task
-                    .await
-                    .context("hosted single-tenant startup WebChat v2 serve task failed to join")?
-            } else {
-                serve_webui_v2(RebornWebuiServeOptions {
-                    addr: listen_addr,
-                    router,
-                    shutdown: webui_shutdown_signal(),
-                    bound_addr_tx: None,
-                })
-                .await
+            let serve_result = match listener {
+                ListenerPlan::Hosted(startup_serve) => {
+                    startup_serve
+                        .ready_handle
+                        .publish_ready_router(router)
+                        .context("failed to publish ready WebChat v2 router")?;
+                    startup_serve.serve_task.await.context(
+                        "hosted single-tenant startup WebChat v2 serve task failed to join",
+                    )?
+                }
+                ListenerPlan::Bound(bound) => {
+                    serve_bound_webui_v2(bound, router, webui_shutdown_signal()).await
+                }
             };
 
             // Always drain public route mounts before shutting down the
@@ -684,6 +693,26 @@ impl ServeCommand {
         })?;
 
         Ok(())
+    }
+}
+
+/// Who holds the WebChat v2 listener when the banner prints: the hosted
+/// profile's startup task (bound ahead of the runtime build) or a listener
+/// this command bound itself immediately before announcing it.
+enum ListenerPlan {
+    Hosted(StartupServe),
+    Bound(BoundWebuiListener),
+}
+
+impl ListenerPlan {
+    /// The address the banner names: the bound address when this command
+    /// bound it (the real port for `--port 0`), else the address the hosted
+    /// startup listener was asked for.
+    fn announced_addr(&self, requested: SocketAddr) -> SocketAddr {
+        match self {
+            ListenerPlan::Hosted(_) => requested,
+            ListenerPlan::Bound(bound) => bound.local_addr(),
+        }
     }
 }
 
@@ -1034,22 +1063,33 @@ fn print_serve_banner(
     allowed_origins: &[String],
     readiness: &RebornReadiness,
 ) {
-    eprintln!("ironclaw: WebChat v2 listener");
-    eprintln!("  binary    : ironclaw");
-    eprintln!("  version   : {}", env!("CARGO_PKG_VERSION"));
-    eprintln!("  listen    : http://{listen_addr}");
-    eprintln!("  auth      : env-bearer (token ${env_token_var}, user ${env_user_id_var})");
+    // The banner is informational: a consumer that closed our stderr (a
+    // harness that stopped reading, a detached terminal) must not take the
+    // listener down with a broken-pipe panic, so every write is best effort.
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "ironclaw: WebChat v2 listener");
+    let _ = writeln!(stderr, "  binary    : ironclaw");
+    let _ = writeln!(stderr, "  version   : {}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(stderr, "  listen    : http://{listen_addr}");
+    let _ = writeln!(
+        stderr,
+        "  auth      : env-bearer (token ${env_token_var}, user ${env_user_id_var})"
+    );
     if allowed_origins.is_empty() {
-        eprintln!("  cors      : fail-closed (no allowed origins configured)");
+        let _ = writeln!(
+            stderr,
+            "  cors      : fail-closed (no allowed origins configured)"
+        );
     } else {
-        eprintln!(
+        let _ = writeln!(
+            stderr,
             "  cors      : {} origin(s) ({})",
             allowed_origins.len(),
             allowed_origins.join(", "),
         );
     }
-    eprintln!("  readiness : {readiness:?}");
-    eprintln!();
+    let _ = writeln!(stderr, "  readiness : {readiness:?}");
+    let _ = writeln!(stderr);
 }
 
 /// Parse `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs from an

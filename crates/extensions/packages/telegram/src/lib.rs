@@ -10,10 +10,12 @@
 //!   [`TelegramInboundEvent`]) plus [`render`] (opaque reply-target encoding
 //!   and Telegram UTF-16 message chunking);
 //! * the channel capabilities — complete inbound (including the two-hop file
-//!   exchange), reply, and delivery — which stay free of raw token bytes:
-//!   hosts run the manifest-declared `shared_secret_header` verification and
-//!   inject credentials on mediated egress. Webhook registration is manifest
-//!   data executed by the generic host.
+//!   exchange) in [`channel`], the `message`-cadence reply sink that
+//!   materializes a run's terminal document in [`reply`], and out-of-band
+//!   delivery in [`channel`] — which stay free of raw token bytes: hosts run
+//!   the manifest-declared `shared_secret_header` verification and inject
+//!   credentials on mediated egress. Webhook registration is manifest data
+//!   executed by the generic host.
 //!
 //! The protocol engine shipped as its own crate
 //! (`ironclaw_telegram_v2_adapter`) until the Wave 2 package colocation
@@ -28,6 +30,7 @@ mod linked;
 mod payload;
 mod preference_targets;
 mod render;
+mod reply;
 
 pub use channel::{
     TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_BOT_USERNAME_CONFIG, TELEGRAM_WEBHOOK_SECRET_HANDLE,

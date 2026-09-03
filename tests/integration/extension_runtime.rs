@@ -66,6 +66,10 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
                 .with_reply(adapter.clone())
                 .with_delivery(adapter)
         },
+        // The fixture manifest's `[channel.reply] transport = "message"`: the
+        // sink is driven through the terminal materialization plus an
+        // idempotent repeat with the checkpoint it minted.
+        reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         extension_id: "acme-messenger".to_string(),
         installation_id: "acme-install-1".to_string(),
         message_inbound: Some(ConformanceInbound {
@@ -99,6 +103,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
         },
         vendor_responses: Arc::new(|_request| {
             ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: br#"{"ok":true}"#.to_vec(),
             }

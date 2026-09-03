@@ -6,6 +6,7 @@ import {
   REQUEST_FAILURE_ID_PREFIX,
   STREAM_FAILURE_ID_PREFIX,
   isRunFailureMessageId,
+  isRunStoppedMessageId,
 } from "../lib/message-types";
 import {
   carryFinalAssistantOrderFlags,
@@ -538,6 +539,7 @@ function mergeFullRefresh(
     if (isRunActivityMessage(message) && timelineSequence(message) === null) {
       return true;
     }
+    if (isRunStoppedMessage(message)) return true;
     if (
       typeof message.timelineMessageId === "string" &&
       ids.has(`msg-${message.timelineMessageId}`)
@@ -758,6 +760,7 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
     const isBoundaryFailure =
       isRunFailureMessageId(message?.id) ||
       isStreamFailureMessageId(message?.id) ||
+      isRunStoppedMessage(message) ||
       isRequestFailurePairMember;
     if (
       !isRunActivityMessage(message) &&
@@ -839,6 +842,14 @@ function isClientOnlyFailureMessage(message) {
     isRunFailureMessageId(id) ||
     requestFailureTargetId(message) !== null ||
     isStreamFailureMessageId(id)
+  );
+}
+
+function isRunStoppedMessage(message) {
+  return (
+    message?.role === "system" &&
+    message?.runStatus === "cancelled" &&
+    isRunStoppedMessageId(message?.id)
   );
 }
 

@@ -16,9 +16,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
-use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelReply, DeliveryRegistration,
-};
+use ironclaw_extension_contracts::channel_adapter::{ChannelDelivery, DeliveryRegistration};
+use ironclaw_extension_contracts::reply::ReplySink;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::ids::{TenantId, UserId};
@@ -41,8 +40,10 @@ pub struct ResolvedChannelDelivery {
     pub installation_id: AdapterInstallationId,
     /// The outbound halves this channel implements. Ingress is deliberately
     /// absent from this product-side resolver: outbound orchestration has no
-    /// reason to hold or inspect an inbound adapter.
-    pub reply: Option<Arc<dyn ChannelReply>>,
+    /// reason to hold or inspect an inbound adapter. The reply slot holds the
+    /// one sink a declared `[channel.reply]` requires; `reply_transport`
+    /// decides whether it is reconciled progressively or at terminal only.
+    pub reply: Option<Arc<dyn ReplySink>>,
     pub delivery: Option<Arc<dyn ChannelDelivery>>,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
@@ -50,12 +51,19 @@ pub struct ResolvedChannelDelivery {
     /// means the channel has no reply half at all — it can be an out-of-band
     /// delivery target but cannot answer a run's input.
     ///
-    /// A `Stream` reply rides the durable projection pipeline and must never
-    /// be sent through the coordinator's adapter path. That is a property of
-    /// the **route**, not of the content: a delivery to this channel flows
-    /// regardless, which is why the gate keys on `OutboundRoute` rather than
-    /// on what is being said.
+    /// Activation proved `reply` matches this declaration, so a coordinator
+    /// deciding the reply **route** may key on either. A delivery to this
+    /// channel flows regardless of the reply transport, which is why the
+    /// coordinator's gate keys on `OutboundRoute` rather than on what is
+    /// being said.
     pub reply_transport: Option<ReplyTransport>,
+    /// The extension generation these halves were resolved from. A
+    /// deployment-bound channel (linked into the binary, immutable for the
+    /// process lifetime) reports `0`; an installed extension reports the
+    /// active-snapshot generation. Progressive reply publication pins the
+    /// value it started under and hands it back to the sink with its
+    /// checkpoint, so a sink can tell a resumed reply from a re-bound one.
+    pub generation: u64,
     /// The delivery enrollment requirement from the same resolved manifest
     /// generation as the surfaces and egress authority above.
     pub requires_enrollment: bool,

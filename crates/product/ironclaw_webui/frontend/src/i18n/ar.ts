@@ -205,7 +205,6 @@ registerPack("ar", {
   "activity.separator": "، ",
   "tool.tabDetails": "التفاصيل",
   "tool.tabParameters": "المعلمات",
-  "tool.tabResult": "النتيجة",
   "tool.tabError": "خطأ",
   "tool.tabDeclined": "مرفوض",
   "tool.noDetail": "لا توجد تفاصيل إضافية.",
@@ -1194,6 +1193,7 @@ registerPack("ar", {
   "common.deleteChat": "حذف الدردشة",
   "chat.deleteFailed": "تعذّر حذف هذه المحادثة.",
   "chat.cancelFailed": "تعذّر إيقاف هذا التشغيل. قد يظل قيد التشغيل. حاول مرة أخرى.",
+  "chat.runStopped": "تم الإيقاف",
   "chat.deleteBusy": "لا يمكن حذف محادثة أثناء تشغيلها. أوقفها أولاً ثم حاول مرة أخرى.",
   "command.placeholder": "اكتب أمرًا أو بحث...",
   "routine.searchPlaceholder": "اسم روتين البحث أو المشغل أو الإجراء",
@@ -1403,7 +1403,6 @@ registerPack("ar", {
   "common.file": "ملف",
   "chat.previewAttachment": "معاينة {name}",
   "chat.downloadAttachment": "تنزيل {name}",
-  "tool.resultAlt": "نتيجة الأداة"
 });
 
 registerPack("ar", {

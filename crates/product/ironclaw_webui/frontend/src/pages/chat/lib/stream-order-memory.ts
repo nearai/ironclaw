@@ -21,7 +21,11 @@ export function isFinalAssistantForRun(message, runId) {
 }
 
 export function isRunActivityMessage(message) {
-  return message?.role === "tool_activity" || message?.role === "thinking";
+  return (
+    message?.role === "tool_activity" ||
+    message?.role === "thinking" ||
+    message?.role === "narration"
+  );
 }
 
 export function carryFinalAssistantOrderFlags(fresh, current) {
@@ -55,6 +59,8 @@ export function replaceAssistantReplyForRun(messages, replyMessage, runId) {
       isFinalAssistantMessage(message) && message.turnRunId === runId,
   );
   if (replacementIndex < 0) {
+    // The streaming answer is the run's last live phase; narration (its
+    // own role) is activity and never the answer.
     for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
       const message = currentMessages[index];
       if (
@@ -76,6 +82,9 @@ export function replaceAssistantReplyForRun(messages, replyMessage, runId) {
     currentMessages[replacementIndex],
     replyMessage,
   );
+  // Earlier phases collapse into the final reply; narration is not an
+  // assistant message and stays with the run's activity, the way reasoning
+  // and tool cards do.
   return next.filter(
     (message, index) =>
       index === replacementIndex ||

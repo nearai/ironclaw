@@ -362,7 +362,8 @@ fn map_secret_error(error: SecretStoreError) -> AdminUserError {
         SecretStoreError::UnknownSecret { .. } | SecretStoreError::UnknownLease { .. } => {
             AdminUserError::NotFound
         }
-        SecretStoreError::StoreUnavailable { .. } => AdminUserError::Unavailable,
+        SecretStoreError::SecretMaterialUnreadable { .. }
+        | SecretStoreError::StoreUnavailable { .. } => AdminUserError::Unavailable,
         _ => AdminUserError::Internal,
     }
 }

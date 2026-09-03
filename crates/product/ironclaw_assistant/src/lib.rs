@@ -245,6 +245,12 @@ pub use delivery_coordinator::{
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoDeliveryRegistrations,
     NoReplyContext, NoticeDeliveryRequest,
 };
+// Reply publication rides the same coordinator: composition wires it through
+// these, and integration harnesses register their own reply targets.
+pub use delivery_coordinator::publication::{
+    ReplyPublicationError, ReplyPublicationSettings, ReplyPublicationWiring,
+    ReplyTargetRegistration,
+};
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
 // the coordinator; vendor residue enters only through the ports.

@@ -164,7 +164,10 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::DeliveryNotFound
-        | OutboundError::ReplyAttachmentIntentLimitExceeded => ProductSurfaceError {
+        | OutboundError::ReplyAttachmentIntentLimitExceeded
+        | OutboundError::ReplyPublicationNotFound
+        | OutboundError::ReplyPublicationNotTerminal
+        | OutboundError::ReplyPublicationLeaseRequired => ProductSurfaceError {
             code: ProductSurfaceErrorCode::InvalidRequest,
             kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
@@ -182,7 +185,11 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
         },
         OutboundError::CasConflict
         | OutboundError::ReplyAttachmentIntentsSealed
-        | OutboundError::ReplyAttachmentIntentConflict => ProductSurfaceError {
+        | OutboundError::ReplyAttachmentIntentConflict
+        | OutboundError::StaleReplyPublisher { .. }
+        | OutboundError::ReplyPublicationSettled
+        | OutboundError::ReplyPublicationRevisionRegressed { .. }
+        | OutboundError::ReplyPublicationTargetMismatch => ProductSurfaceError {
             code: ProductSurfaceErrorCode::Conflict,
             kind: ProductSurfaceErrorKind::Conflict,
             status_code: 409,

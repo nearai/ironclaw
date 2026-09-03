@@ -404,6 +404,7 @@ mod tests {
         ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
             self.approved.lock().unwrap().push(approved);
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"{}".to_vec(),
             })
@@ -647,6 +648,7 @@ mod tests {
                 _approved: ApprovedChannelEgress,
             ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
                 Ok(RestrictedEgressResponse {
+                    retry_after: None,
                     status: 200,
                     body: vec![0u8; (CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES + 1) as usize],
                 })

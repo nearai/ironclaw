@@ -1618,6 +1618,7 @@ impl ironclaw_extension_host::egress::ChannelEgressTransport for GenerationTrans
             .push(approved.url);
         Ok(
             ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: Vec::new(),
             },
