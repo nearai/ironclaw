@@ -1,8 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../test-support/vm-module-harness";
+import type { DynamicTestValue } from "../test-support/dynamic-test-types";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -129,6 +129,7 @@ const defaultOptions = [
 ];
 
 function createHarness() {
+  const listeners: Record<string, DynamicTestValue> = {};
   const state = {
     effectCursor: 0,
     effects: [],
@@ -136,7 +137,7 @@ function createHarness() {
     hooks: [],
     listenerAdds: 0,
     listenerRemoves: 0,
-    listeners: {},
+    listeners,
     refCursor: 0,
     refs: [],
   };

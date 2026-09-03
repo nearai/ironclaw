@@ -211,6 +211,40 @@ async fn deferred_webui_handler(
         .unwrap_or_else(|err: Infallible| match err {})
 }
 
+/// A WebChat v2 listener that is bound but not yet served. Connections queue
+/// in the accept backlog until [`serve_bound_webui_v2`] runs, so a host may
+/// announce the address — and a probe may connect — before the router exists.
+pub struct BoundWebuiListener {
+    listener: TcpListener,
+    addr: SocketAddr,
+}
+
+impl BoundWebuiListener {
+    /// The address the OS bound: the real port when the request asked for `:0`.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+/// Bind the WebChat v2 `TcpListener` at `addr` without serving yet.
+pub async fn bind_webui_v2(addr: SocketAddr) -> Result<BoundWebuiListener, RebornWebuiServeError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| RebornWebuiServeError::Bind { addr, source })?;
+    let bound = listener
+        .local_addr()
+        .map_err(RebornWebuiServeError::LocalAddr)?;
+    tracing::info!(
+        target: "ironclaw::reborn::webui_ingress",
+        %bound,
+        "WebChat v2 listener bound",
+    );
+    Ok(BoundWebuiListener {
+        listener,
+        addr: bound,
+    })
+}
+
 /// Bind a `TcpListener` at `opts.addr`, run the axum serve loop with
 /// the composed `Router`, and wait for `opts.shutdown` to fire before
 /// returning. Graceful shutdown gives in-flight requests a chance to
@@ -222,27 +256,25 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         shutdown,
         bound_addr_tx,
     } = opts;
-
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|source| RebornWebuiServeError::Bind { addr, source })?;
-
-    let bound = listener
-        .local_addr()
-        .map_err(RebornWebuiServeError::LocalAddr)?;
-    tracing::info!(
-        target: "ironclaw::reborn::webui_ingress",
-        %bound,
-        "WebChat v2 listener bound",
-    );
+    let bound = bind_webui_v2(addr).await?;
     if let Some(tx) = bound_addr_tx {
         // Receiver may have been dropped (test exited early). Ignore
         // — that's a test bug, not a serve-loop concern.
-        let _ = tx.send(bound);
+        let _ = tx.send(bound.local_addr());
     }
+    serve_bound_webui_v2(bound, router, shutdown).await
+}
 
+/// Run the axum serve loop on an already-bound listener and wait for
+/// `shutdown` to fire before returning. Graceful shutdown gives in-flight
+/// requests a chance to complete before the listener closes.
+pub async fn serve_bound_webui_v2(
+    bound: BoundWebuiListener,
+    router: Router,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), RebornWebuiServeError> {
     axum::serve(
-        listener,
+        bound.listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {

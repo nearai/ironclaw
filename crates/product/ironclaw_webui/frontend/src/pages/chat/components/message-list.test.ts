@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -54,7 +53,7 @@ globalThis.__testExports = {
 }
 
 function loadHelpers() {
-  const context = { globalThis: {}, Number };
+  const context: vm.Context = { globalThis: {}, Number };
   vm.runInNewContext(messageListSourceForTest(), context);
   return context.globalThis.__testExports;
 }

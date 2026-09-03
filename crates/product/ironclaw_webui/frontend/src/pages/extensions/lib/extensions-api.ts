@@ -3,7 +3,7 @@
 // - The v2 backend owns the registry/list/install/remove/setup
 //   projection and maps those operations to the extension registry.
 
-import { apiFetch, clientActionId, setupExtension } from "../../../lib/api";
+import { apiFetch, clientActionId, setupExtension, type ApiRecord } from "../../../lib/api";
 
 const OAUTH_START_TTL_MS = 5 * 60 * 1000;
 type ExtensionMutationOptions = { clientActionId?: string };
@@ -11,13 +11,61 @@ type HostedMcpAuthSelection = {
   kind: "bearer" | "oauth" | "no_auth";
 };
 
-export function fetchExtensions() {
+type ExtensionPackageRef = { id?: string };
+type ExtensionRecord = ApiRecord & {
+  package_ref?: ExtensionPackageRef;
+  display_name?: string;
+  installed?: boolean;
+  installation_state?: string;
+  surfaces?: unknown[];
+  channel?: unknown;
+};
+type SetupBlocker = ApiRecord & { kind?: string; ref_id?: string };
+type SetupSecret = ApiRecord & {
+  name?: string;
+  prompt?: string;
+  optional?: boolean;
+  provided?: boolean;
+  setup?: { invocation_id?: string; kind?: string };
+};
+type SetupOnboarding = ApiRecord & {
+  setup_url?: string;
+  credential_instructions?: string;
+  credential_next_step?: string;
+};
+type ExtensionSetupResponse = ApiRecord & {
+  phase?: string;
+  blockers?: SetupBlocker[];
+  secrets?: SetupSecret[];
+  fields?: ApiRecord[];
+  onboarding?: SetupOnboarding | null;
+};
+type ExtensionMutationResponse = ApiRecord & {
+  success?: boolean;
+  message?: string;
+  blockers?: SetupBlocker[];
+  authorization_url?: string;
+  flow_id?: string;
+  flowId?: string;
+  callback_scope?: { invocation_id?: string; invocationId?: string };
+  callbackScope?: { invocation_id?: string; invocationId?: string };
+};
+type OauthFlowStatusResponse = ApiRecord & { status?: string };
+
+export function fetchExtensions(): Promise<
+  ApiRecord & { extensions?: ExtensionRecord[] }
+> {
   return apiFetch("/api/webchat/v2/extensions");
 }
-export function fetchExtensionRegistry() {
+export function fetchExtensionRegistry(): Promise<
+  ApiRecord & { entries?: ExtensionRecord[] }
+> {
   return apiFetch("/api/webchat/v2/extensions/registry");
 }
-export function installExtension(packageRef, options: ExtensionMutationOptions = {}) {
+export function installExtension(
+  packageRef,
+  options: ExtensionMutationOptions = {},
+): Promise<ExtensionMutationResponse> {
   const clientId = options?.clientActionId;
   return apiFetch("/api/webchat/v2/extensions/install", {
     method: "POST",
@@ -28,8 +76,10 @@ export function installExtension(packageRef, options: ExtensionMutationOptions =
   });
 }
 // Admission only: identity, manifests, tools, and credentials are server-owned.
-export function registerCustomMcp(payload) {
-  return apiFetch("/api/webchat/v2/extensions/register-hosted-mcp", {
+export function registerCustomMcp(payload): Promise<ExtensionMutationResponse> {
+  return apiFetch<ExtensionMutationResponse>(
+    "/api/webchat/v2/extensions/register-hosted-mcp",
+    {
     method: "POST",
     body: JSON.stringify({
       desired_id: payload.desiredId,
@@ -37,9 +87,13 @@ export function registerCustomMcp(payload) {
       endpoint: payload.endpoint,
       auth_selection: payload.authSelection,
     }),
-  });
+    },
+  );
 }
-export function removeExtension(packageRef, options: ExtensionMutationOptions = {}) {
+export function removeExtension(
+  packageRef,
+  options: ExtensionMutationOptions = {},
+): Promise<ExtensionMutationResponse> {
   const clientId = options?.clientActionId;
   return apiFetch(
     `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/remove`,
@@ -49,16 +103,20 @@ export function removeExtension(packageRef, options: ExtensionMutationOptions = 
     }
   );
 }
-export function fetchExtensionSetup(packageRef) {
-  return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup`);
+export function fetchExtensionSetup(
+  packageRef,
+): Promise<ExtensionSetupResponse> {
+  return apiFetch<ExtensionSetupResponse>(
+    `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup`,
+  );
 }
 export function submitExtensionSetup(
   packageRef,
   secrets,
   options: ExtensionMutationOptions = {},
-) {
+): Promise<ExtensionMutationResponse> {
   const clientId = options?.clientActionId;
-  return setupExtension(packageId(packageRef), {
+  return setupExtension<ExtensionMutationResponse>(packageId(packageRef), {
     action: "submit",
     payload: { secrets },
     clientActionId: clientId,
@@ -68,18 +126,21 @@ export function selectHostedMcpAuth(
   packageRef,
   authSelection: HostedMcpAuthSelection,
   options: ExtensionMutationOptions = {},
-) {
+): Promise<ExtensionMutationResponse> {
   const clientId = options?.clientActionId;
-  return setupExtension(packageId(packageRef), {
+  return setupExtension<ExtensionMutationResponse>(packageId(packageRef), {
     action: "select_auth",
     payload: { auth_selection: authSelection },
     clientActionId: clientId,
   });
 }
-export function startExtensionOauth(packageRef, secret) {
+export function startExtensionOauth(
+  packageRef,
+  secret,
+): Promise<ExtensionMutationResponse> {
   const setup = secret?.setup || {};
   const expiresAt = new Date(Date.now() + OAUTH_START_TTL_MS).toISOString();
-  return apiFetch(
+  return apiFetch<ExtensionMutationResponse>(
     `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup/oauth/start`,
     {
       method: "POST",
@@ -102,18 +163,21 @@ export function startExtensionOauth(packageRef, secret) {
 // while this command may retry only the completed flow's unfenced internal
 // continuation. It never repeats provider exchange or performs cleanup.
 // Non-OK responses resolve to null so the watcher never throws.
-export function fetchOauthFlowStatus(flowId, invocationId) {
+export function fetchOauthFlowStatus(
+  flowId,
+  invocationId,
+): Promise<OauthFlowStatusResponse | null> {
   const query = invocationId
     ? `?invocation_id=${encodeURIComponent(invocationId)}`
     : "";
-  return apiFetch(
+  return apiFetch<OauthFlowStatusResponse>(
     `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/reconcile${query}`,
     { method: "POST" },
   ).catch(() => null);
 }
 
-export function importExtension(file) {
-  return apiFetch("/api/webchat/v2/extensions/import", {
+export function importExtension(file): Promise<ExtensionMutationResponse> {
+  return apiFetch<ExtensionMutationResponse>("/api/webchat/v2/extensions/import", {
     method: "POST",
     headers: { "Content-Type": "application/zip" },
     body: file,

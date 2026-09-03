@@ -1,4 +1,3 @@
-// @ts-nocheck
 // One normalizer for the device-link frame, shared by every surface that
 // renders one.
 //
@@ -46,12 +45,73 @@ export const DEVICE_LINK_DISPLAY_KINDS = Object.freeze({
   link: "link",
 });
 
+export type DeviceLinkStep = (typeof DEVICE_LINK_STEPS)[keyof typeof DEVICE_LINK_STEPS];
+export type DeviceLinkInputKind =
+  (typeof DEVICE_LINK_INPUT_KINDS)[keyof typeof DEVICE_LINK_INPUT_KINDS];
+export type DeviceLinkMode = (typeof DEVICE_LINK_MODES)[keyof typeof DEVICE_LINK_MODES];
+export type DeviceLinkDisplayKind =
+  (typeof DEVICE_LINK_DISPLAY_KINDS)[keyof typeof DEVICE_LINK_DISPLAY_KINDS];
+
+export interface DeviceLinkPromptWire {
+  provider: string;
+  display_name: string;
+  step: DeviceLinkStep;
+  instructions: string;
+  expires_at: string;
+  revision: number;
+  poll_interval_ms: number;
+  qr_payload?: string | null;
+  code?: string | null;
+  vendor_user_ref?: string | null;
+  secret_label?: string | null;
+  retry_after_ms?: number | null;
+  error_code?: string | null;
+  flow_id?: string | null;
+  input_kind?: DeviceLinkInputKind | null;
+  mode?: DeviceLinkMode | null;
+  alternate_available?: boolean | null;
+  default_mode_label?: string | null;
+  alternate_mode_label?: string | null;
+  display_kind?: DeviceLinkDisplayKind | null;
+  extension_id?: string | null;
+  restartable?: boolean | null;
+}
+
+export interface DeviceLinkFrame {
+  flowId: string | null;
+  provider: string;
+  extensionId: string | null;
+  displayName: string;
+  step: string;
+  instructions: string;
+  qrPayload: string | null;
+  displayKind: DeviceLinkDisplayKind | null;
+  code: string | null;
+  vendorUserRef: string | null;
+  secretLabel: string | null;
+  inputKind: string;
+  mode: string;
+  alternateAvailable: boolean;
+  defaultModeLabel: string | null;
+  alternateModeLabel: string | null;
+  expiresAtMs: number;
+  revision: number;
+  pollIntervalMs: number;
+  retryAfterMs: number;
+  errorCode: string | null;
+  restartable: boolean;
+  terminal: boolean;
+}
+
 // The pace a card polls at when the frame declares none.
 export const DEVICE_LINK_DEFAULT_POLL_MS = 3000;
 
 // A step that will never advance again: nothing left to poll for. A card left
 // open on one of these must hold no timer.
-const TERMINAL_STEPS = Object.freeze([DEVICE_LINK_STEPS.completed, DEVICE_LINK_STEPS.failed]);
+const TERMINAL_STEPS: readonly string[] = Object.freeze([
+  DEVICE_LINK_STEPS.completed,
+  DEVICE_LINK_STEPS.failed,
+]);
 
 // `DeviceLinkErrorCode` — the closed failure vocabulary the host publishes. A
 // code outside this list is a newer host talking to an older browser: render
@@ -75,21 +135,21 @@ export const DEVICE_LINK_ERROR_CODES = Object.freeze([
 // `DeviceLinkDriverError::restartable` in `ironclaw_auth`: the account is
 // ineligible, or host-side custody failed. Every other code is worth another
 // attempt. Used only as the fallback when the frame does not state it.
-const NON_RESTARTABLE_ERROR_CODES = Object.freeze([
+const NON_RESTARTABLE_ERROR_CODES: readonly string[] = Object.freeze([
   "account_unavailable",
   "identity_conflict",
   "custody_failed",
 ]);
 
-export function deviceLinkStepIsTerminal(step) {
-  return TERMINAL_STEPS.includes(step);
+export function deviceLinkStepIsTerminal(step: unknown): boolean {
+  return typeof step === "string" && TERMINAL_STEPS.includes(step);
 }
 
-function optionalText(value) {
+function optionalText(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
-function boundedNumber(value) {
+function boundedNumber(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
@@ -98,9 +158,12 @@ function boundedNumber(value) {
 // browser. It normalizes to "unstated" — both affordances — because a card
 // matching on an unknown string would render NEITHER, which is a display step
 // with nothing on it.
-function knownDisplayKind(value) {
+function knownDisplayKind(value: unknown): DeviceLinkDisplayKind | null {
   const kind = optionalText(value);
-  return Object.values(DEVICE_LINK_DISPLAY_KINDS).includes(kind) ? kind : null;
+  return kind === DEVICE_LINK_DISPLAY_KINDS.link ||
+    kind === DEVICE_LINK_DISPLAY_KINDS.qrCode
+    ? kind
+    : null;
 }
 
 // `input_kind`, `mode`, `restartable`, and `flow_id` are PROPOSAL §8.12's
@@ -128,53 +191,60 @@ function knownDisplayKind(value) {
 //     issued for the user to read",
 //   - `extension_id` -> absent; `provider` is the credential authority, not the
 //     installed extension, so neither substitutes for the other.
-export function deviceLinkFrameFromWire(wire) {
+export function deviceLinkFrameFromWire(wire: unknown): DeviceLinkFrame | null {
   if (!wire || typeof wire !== "object") return null;
-  const step = optionalText(wire.step);
+  const record = wire as Record<string, unknown>;
+  const step = optionalText(record.step);
   if (!step) return null;
-  const expiresAt = Date.parse(wire.expires_at || "");
-  const errorCode = optionalText(wire.error_code);
+  const expiresAt = Date.parse(optionalText(record.expires_at) || "");
+  const errorCode = optionalText(record.error_code);
   return {
-    flowId: optionalText(wire.flow_id),
-    provider: String(wire.provider || ""),
-    extensionId: optionalText(wire.extension_id),
-    displayName: String(wire.display_name || ""),
+    flowId: optionalText(record.flow_id),
+    provider: String(record.provider || ""),
+    extensionId: optionalText(record.extension_id),
+    displayName: String(record.display_name || ""),
     step,
-    instructions: String(wire.instructions || ""),
-    qrPayload: optionalText(wire.qr_payload),
-    displayKind: knownDisplayKind(wire.display_kind),
-    code: optionalText(wire.code),
-    vendorUserRef: optionalText(wire.vendor_user_ref),
-    secretLabel: optionalText(wire.secret_label),
-    inputKind: optionalText(wire.input_kind) || DEVICE_LINK_INPUT_KINDS.code,
-    mode: optionalText(wire.mode) || DEVICE_LINK_MODES.default,
-    alternateAvailable: wire.alternate_available === true,
-    defaultModeLabel: optionalText(wire.default_mode_label),
-    alternateModeLabel: optionalText(wire.alternate_mode_label),
+    instructions: String(record.instructions || ""),
+    qrPayload: optionalText(record.qr_payload),
+    displayKind: knownDisplayKind(record.display_kind),
+    code: optionalText(record.code),
+    vendorUserRef: optionalText(record.vendor_user_ref),
+    secretLabel: optionalText(record.secret_label),
+    inputKind: optionalText(record.input_kind) || DEVICE_LINK_INPUT_KINDS.code,
+    mode: optionalText(record.mode) || DEVICE_LINK_MODES.default,
+    alternateAvailable: record.alternate_available === true,
+    defaultModeLabel: optionalText(record.default_mode_label),
+    alternateModeLabel: optionalText(record.alternate_mode_label),
     expiresAtMs: Number.isFinite(expiresAt) ? expiresAt : 0,
-    revision: boundedNumber(wire.revision),
-    pollIntervalMs: boundedNumber(wire.poll_interval_ms) || DEVICE_LINK_DEFAULT_POLL_MS,
+    revision: boundedNumber(record.revision),
+    pollIntervalMs:
+      boundedNumber(record.poll_interval_ms) || DEVICE_LINK_DEFAULT_POLL_MS,
     // A vendor back-off overrides the pace for the next poll only, so it stays
     // a distinct field rather than being folded into `pollIntervalMs`.
-    retryAfterMs: boundedNumber(wire.retry_after_ms) || 0,
+    retryAfterMs: boundedNumber(record.retry_after_ms) || 0,
     errorCode,
     restartable:
-      typeof wire.restartable === "boolean"
-        ? wire.restartable
-        : !NON_RESTARTABLE_ERROR_CODES.includes(errorCode),
+      typeof record.restartable === "boolean"
+        ? record.restartable
+        : !errorCode || !NON_RESTARTABLE_ERROR_CODES.includes(errorCode),
     terminal: deviceLinkStepIsTerminal(step),
   };
 }
 
 // The delay before the next poll: a vendor-requested back-off wins, otherwise
 // the frame's own pace.
-export function deviceLinkPollDelayMs(frame) {
+export function deviceLinkPollDelayMs(
+  frame:
+    | Pick<DeviceLinkFrame, "pollIntervalMs" | "retryAfterMs">
+    | null
+    | undefined,
+): number {
   if (!frame) return DEVICE_LINK_DEFAULT_POLL_MS;
   return frame.retryAfterMs || frame.pollIntervalMs || DEVICE_LINK_DEFAULT_POLL_MS;
 }
 
 // The mode a "use the other path instead" affordance switches to.
-export function deviceLinkAlternateMode(mode) {
+export function deviceLinkAlternateMode(mode: unknown): DeviceLinkMode {
   return mode === DEVICE_LINK_MODES.alternate
     ? DEVICE_LINK_MODES.default
     : DEVICE_LINK_MODES.alternate;
@@ -186,7 +256,10 @@ export function deviceLinkAlternateMode(mode) {
 // extension, so this is what a switch is labelled with; the null return is the
 // signal to fall back to generic host copy. Which label goes with which mode is
 // decided here, once, rather than at each surface that renders a switch.
-export function deviceLinkModeLabel(frame, mode) {
+export function deviceLinkModeLabel(
+  frame: DeviceLinkFrame | null | undefined,
+  mode: unknown,
+): string | null {
   if (!frame) return null;
   return mode === DEVICE_LINK_MODES.alternate
     ? frame.alternateModeLabel || null

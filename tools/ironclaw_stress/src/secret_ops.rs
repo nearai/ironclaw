@@ -267,10 +267,29 @@ fn secret_failure(stage: &'static str, error: SecretStoreError) -> FailureCause 
         SecretStoreError::LeaseExpired { .. } | SecretStoreError::SecretExpired => "secret_expired",
         SecretStoreError::BackendMisconfigured { .. } => "secret_backend_misconfigured",
         SecretStoreError::StoreUnavailable { .. } => "secret_store_unavailable",
+        SecretStoreError::SecretMaterialUnreadable { .. } => "secret_material_unreadable",
     };
     FailureCause::new(bucket, stage, error)
 }
 
 fn secret_crypto_error(error: SecretError) -> String {
     format!("secret crypto setup failed: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_secret_material_has_a_distinct_failure_bucket() {
+        let failure = secret_failure(
+            "consume",
+            SecretStoreError::SecretMaterialUnreadable {
+                reason: "legacy ciphertext".to_string(),
+            },
+        );
+
+        assert_eq!(failure.bucket, "secret_material_unreadable");
+        assert_eq!(failure.stage, "consume");
+    }
 }

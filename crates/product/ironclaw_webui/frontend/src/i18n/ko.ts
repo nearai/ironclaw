@@ -205,7 +205,6 @@ registerPack("ko", {
   "activity.separator": ", ",
   "tool.tabDetails": "세부 정보",
   "tool.tabParameters": "매개 변수",
-  "tool.tabResult": "결과",
   "tool.tabError": "Error",
   "tool.tabDeclined": "거부됨",
   "tool.noDetail": "추가 세부 정보가 없습니다.",
@@ -1194,6 +1193,7 @@ registerPack("ko", {
   "common.deleteChat": "채팅 삭제",
   "chat.deleteFailed": "이 대화를 삭제하지 못했습니다.",
   "chat.cancelFailed": "이 실행을 중지하지 못했습니다. 아직 실행 중일 수 있습니다. 다시 시도하세요.",
+  "chat.runStopped": "중지됨",
   "chat.deleteBusy": "실행 중인 대화는 삭제할 수 없습니다. 먼저 중지한 후 다시 시도하세요.",
   "command.placeholder": "명령 입력 또는 검색...",
   "routine.searchPlaceholder": "루틴 이름, 트리거 또는 작업 검색",
@@ -1403,7 +1403,6 @@ registerPack("ko", {
   "common.file": "파일",
   "chat.previewAttachment": "{name} 미리보기",
   "chat.downloadAttachment": "{name} 다운로드",
-  "tool.resultAlt": "도구 결과"
 });
 
 registerPack("ko", {

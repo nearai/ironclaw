@@ -1,7 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import {
   componentProps,
   componentSourceForTest,
@@ -33,9 +34,11 @@ const SUGGESTION = {
   suggested_prompt: "Triage my inbox.",
 };
 
-function renderCard({ suggestion = SUGGESTION, ...props } = {}) {
+function renderCard(
+  { suggestion = SUGGESTION, ...props }: DynamicTestOptions = {},
+) {
   const components = { Button() {}, Icon() {}, SuggestionIcon() {} };
-  const context = {
+  const context: vm.Context = {
     ...components,
     globalThis: {},
     // Echo the key, and append interpolation values so provenance assertions

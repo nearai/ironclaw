@@ -273,6 +273,12 @@ Rules:
   response bodies must not be serialized or projected. The raw PKCE verifier is
   durable only in the host-owned encrypted `SecretStore` copy used by callback
   completion.
+- A dynamically registered OAuth client is renewable, machine-generated
+  registration metadata. Flow preparation re-registers it when that dedicated
+  record is unreadable or names a callback URI other than the deployment's
+  current callback; callback exchange and refresh never register a client.
+  This recovery is specific to the DCR record and must not turn an unreadable
+  user credential into an automatic replacement.
 - `RebornProductAuthServices::start_setup_oauth_flow` stores the raw PKCE
   verifier in `SecretStore` before creating the OAuth flow, while the durable
   flow record stores only the verifier hash. Multi-replica or restart-surviving

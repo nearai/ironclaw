@@ -1,7 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import {
   componentProps,
   componentSourceForTest,
@@ -35,12 +36,12 @@ function renderSurface({
   renderRunningIndicator,
   hidden = false,
   onClose,
-} = {}) {
+}: DynamicTestOptions = {}) {
   const generateCalls = [];
   const startCalls = [];
   const dismissCalls = [];
   const components = { SuggestedTaskCard() {}, Button() {}, Icon() {}, Link() {} };
-  const context = {
+  const context: vm.Context = {
     ...components,
     globalThis: {},
     React: {},
@@ -57,7 +58,7 @@ function renderSurface({
     }),
   };
   vm.runInNewContext(surfaceSourceForTest(), context);
-  const props = { hidden };
+  const props: DynamicTestOptions = { hidden };
   if (onOpenThread) props.onOpenThread = onOpenThread;
   if (renderRunningIndicator) props.renderRunningIndicator = renderRunningIndicator;
   if (onClose) props.onClose = onClose;

@@ -78,6 +78,7 @@ impl RestrictedEgress for RecordingEgress {
         Ok(RestrictedEgressResponse {
             status,
             body: Vec::new(),
+            retry_after: None,
         })
     }
 }

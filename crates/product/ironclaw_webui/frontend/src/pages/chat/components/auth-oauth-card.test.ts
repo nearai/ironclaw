@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 function authOauthCardSourceForTest() {
   const source = readFileSync(new URL("./auth-oauth-card.tsx", import.meta.url), "utf8");
@@ -22,11 +23,11 @@ function authOauthCardSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { AuthOauthCard };`;
 }
 
-function renderCard({ gate, blockPopup = false } = {}) {
+function renderCard({ gate, blockPopup = false }: DynamicTestOptions = {}) {
   const stateSets = [];
   const openCalls = [];
   const openAuthPopupCalls = [];
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     React: {
@@ -85,7 +86,7 @@ function renderCard({ gate, blockPopup = false } = {}) {
   return { rendered, stateSets, openCalls, openAuthPopupCalls };
 }
 
-function defaultGate(overrides = {}) {
+function defaultGate(overrides: DynamicTestOptions = {}) {
   return {
     provider: "slack",
     authorizationUrl: "https://slack.com/oauth/v2/authorize?client_id=abc",
@@ -204,7 +205,7 @@ test("AuthOauthCard refuses non-HTTPS authorization urls before any window.open"
 // states the no-op-setter default stub can't reach.
 function renderCardWithStates(states, gate = defaultGate()) {
   let stateIndex = 0;
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     React: {

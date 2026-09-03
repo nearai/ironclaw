@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useLocation, useNavigate } from "react-router";
 import { useT } from "../../../lib/i18n";

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Navigate, useNavigate, useOutletContext } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
@@ -12,8 +11,9 @@ import { ProviderLoginStatus } from "../settings/components/provider-login-statu
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions";
 import { useProviderLogin } from "../settings/hooks/useProviderLogin";
 import { isProviderConfigured } from "../settings/lib/llm-providers";
-import { setActiveLlm } from "../settings/lib/settings-api";
+import { setActiveLlm } from "../settings/lib/llm-api";
 import { ProviderLogo } from "./provider-logos";
+import type { GatewayOutletContext } from "../../layout/gateway-layout";
 
 // First-run "choose your provider" list. Curated providers are surfaced in this
 // order; everything else stays reachable via Settings → Inference. `auth` is the
@@ -180,7 +180,8 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
 }
 
 export function OnboardingPage() {
-  const { isAdmin = false, isChecking = false } = useOutletContext();
+  const { isAdmin = false, isChecking = false } =
+    useOutletContext<GatewayOutletContext>();
   if (isChecking) return null;
   if (!isAdmin) {
     return (<Navigate to="/chat" replace />);
@@ -192,7 +193,7 @@ function OperatorOnboardingPage() {
   const t = useT();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { gatewayStatus } = useOutletContext();
+  const { gatewayStatus } = useOutletContext<GatewayOutletContext>();
   const actions = useProviderManagementActions({
     settings: {},
     gatewayStatus,

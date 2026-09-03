@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Unit tests for the client-side pinned-thread store.
 //
 // Run with Node's built-in test runner (no extra deps):
@@ -8,7 +7,11 @@
 // asset bundle, so this file is never served to the browser.
 
 import assert from "node:assert/strict";
-import { beforeEach, test } from "vitest";
+import { afterEach, beforeEach, test } from "vitest";
+import {
+  createMemoryStorage,
+  replaceBrowserGlobal,
+} from "../test-support/browser-mocks";
 import { setAuthScope } from "./auth-scope";
 import {
   clearAllPins,
@@ -20,20 +23,12 @@ import {
 
 // Minimal localStorage stub. The store reads `window.localStorage` lazily, so
 // installing it on the global before the calls is enough.
+let restoreWindow: (() => void) | null = null;
+
 function installStorage() {
-  const map = new Map();
-  globalThis.window = {
-    localStorage: {
-      getItem: (k) => (map.has(k) ? map.get(k) : null),
-      setItem: (k, v) => map.set(k, String(v)),
-      removeItem: (k) => map.delete(k),
-      get length() {
-        return map.size;
-      },
-      key: (i) => [...map.keys()][i] ?? null,
-    },
-  };
-  return map;
+  const storage = createMemoryStorage();
+  restoreWindow = replaceBrowserGlobal("window", { localStorage: storage });
+  return storage;
 }
 
 beforeEach(() => {
@@ -41,6 +36,11 @@ beforeEach(() => {
   setAuthScope(null);
   // Reset module state between tests (the in-memory Set persists per process).
   clearAllPins();
+});
+
+afterEach(() => {
+  restoreWindow?.();
+  restoreWindow = null;
 });
 
 test("togglePin round-trips with isPinned", () => {
@@ -103,7 +103,8 @@ test("clearAllPins resets the set and removes pin keys but leaves others", () =>
 });
 
 test("storage failures are swallowed (in-memory still works)", () => {
-  globalThis.window = {
+  restoreWindow?.();
+  restoreWindow = replaceBrowserGlobal("window", {
     localStorage: {
       getItem: () => {
         throw new Error("quota / private mode");
@@ -114,14 +115,17 @@ test("storage failures are swallowed (in-memory still works)", () => {
       removeItem: () => {
         throw new Error("quota / private mode");
       },
-      get length() {
+      clear: () => {
+        throw new Error("quota / private mode");
+      },
+      get length(): number {
         throw new Error("quota / private mode");
       },
       key: () => {
         throw new Error("quota / private mode");
       },
-    },
-  };
+    } satisfies Storage,
+  });
   assert.doesNotThrow(() => togglePin("t1"));
   assert.equal(isPinned("t1"), true, "in-memory pin works without storage");
 });

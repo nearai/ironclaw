@@ -1207,6 +1207,49 @@ impl RebornIntegrationHarness {
         Arc::clone(&self.coordinator)
     }
 
+    /// The reply projection the group's planned runtime composes every run's
+    /// document into (see `GroupSharedStorage::reply_projection`).
+    pub(crate) fn reply_projection_for_test(
+        &self,
+    ) -> Arc<ironclaw_assistant::projection::reply::ReplyProjection> {
+        Arc::clone(&self._shared.reply_projection)
+    }
+
+    /// Start the composed coordinator's reply publication over the group's
+    /// REAL kernel handles (the turn coordinator and thread service the
+    /// caller's runs actually live in). A test that wires its own
+    /// `RunDeliveryObserver` without starting the production channel-host
+    /// assembly calls this so the one publication owner reads the group's
+    /// runs; when the assembly already started publication (with the same
+    /// group handles), this is a no-op.
+    pub(crate) fn start_reply_publication_for_test(
+        &self,
+        services: &ironclaw_composition::RebornRuntime,
+    ) {
+        use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
+        let coordinator = services
+            .delivery_coordinator()
+            .expect("composition built the delivery coordinator");
+        let thread_service = self
+            .thread_service_for_test()
+            .expect("group thread service");
+        let started = coordinator.start_reply_publication(ReplyPublicationWiring {
+            projection: self.reply_projection_for_test(),
+            turn_coordinator: self.turn_coordinator_for_test(),
+            thread_service,
+            approval_context: None,
+            blocked_auth_prompts: None,
+            project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+            session_channel: None,
+            settings: ReplyPublicationSettings::default(),
+        });
+        if !started {
+            tracing::debug!(
+                "reply publication was already started on the composed coordinator; keeping it"
+            );
+        }
+    }
+
     /// The group-shared turn-state store paired with
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the

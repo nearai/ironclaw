@@ -217,11 +217,17 @@ pub struct RestrictedEgressRequest {
 }
 
 /// Status and size-capped body; response headers are deliberately not
-/// exposed to adapters.
+/// exposed to adapters. The one typed exception is `retry_after`: the host
+/// parses a delta-seconds `Retry-After` header (bounded, so a hostile
+/// provider cannot park a publisher for a day) because rate-limit pacing is
+/// something every progressive reply sink must honor and none may read
+/// headers to learn.
 #[derive(Debug, Clone)]
 pub struct RestrictedEgressResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// The provider's `Retry-After` hint, when it sent a delta-seconds value.
+    pub retry_after: Option<std::time::Duration>,
 }
 
 /// Typed restricted-egress failures, all raised before or at the network

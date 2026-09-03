@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 const COPY = {
   "automations.detail.currentRun": "Current run",
@@ -125,7 +126,7 @@ function automation() {
   };
 }
 
-function createHarness({ onRenameAutomation = () => {} } = {}) {
+function createHarness({ onRenameAutomation = () => {} }: DynamicTestOptions = {}) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -170,7 +171,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     },
   };
 
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     Button,
     ConfirmDialog,

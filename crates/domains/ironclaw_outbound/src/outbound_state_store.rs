@@ -26,7 +26,9 @@
 //! - `/outbound/deliveries/<delivery_id>.json` — delivery attempt keyed by
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
-//!   subtree without materializing every row.
+//!   subtree without materializing every row. A progressively published reply
+//!   carries an additional serde-defaulted `publication` substate on the same
+//!   row ([`DeliveryAttemptRow`]); rows without it are one-shot sends.
 //! - `/outbound/communication-preferences/<sha256(v2-scoped-key)>.json` —
 //!   scoped communication preference row keyed by a hashed
 //!   `CommunicationPreferenceKey`. Reply-target refs remain candidates and do
@@ -58,7 +60,7 @@ use ironclaw_filesystem::{
     Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RootFilesystem,
     ScopedFilesystem, VersionedEntry, cas_update,
 };
-use ironclaw_host_api::turn::{TurnActor, TurnScope};
+use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     ids::{RunId, TenantId, ThreadId, UserId},
     path::ScopedPath,
@@ -68,19 +70,24 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::reply_attachment_intents::validate_reply_attachment_intents;
+use crate::reply_publication::lease_expires_at;
 use crate::validation::{
     validate_communication_preference, validate_delivery_attempt, validate_delivery_identity,
     validate_delivery_status_request, validate_policy, validate_subscription_identity,
     validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    AdvanceReplyPublicationRequest, ClaimReplyPublicationLeaseRequest, CommunicationPreferenceKey,
+    CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveredGateRouteRecord, DeliveredGateRouteStore,
     DeliveryDefaultScope, LoadSubscriptionCursorRequest, MAX_RUN_DELIVERY_CLEANUP_RECORDS,
-    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus, OutboundError,
-    OutboundStateStorePort, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
-    ReplyAttachmentIntent, ReplyAttachmentIntentPort, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
+    OpenReplyPublicationRequest, OutboundDeliveryAttempt, OutboundDeliveryId,
+    OutboundDeliveryStatus, OutboundError, OutboundStateStorePort, ProjectionSubscriptionId,
+    ProjectionSubscriptionRecord, ReleaseReplyPublicationLeaseRequest, ReplyAttachmentIntent,
+    ReplyAttachmentIntentPort, ReplyPublicationClaim, ReplyPublicationLease,
+    ReplyPublicationRecord, ReplyPublicationSettlement, ReplyPublicationState,
+    ReplyPublicationStatus, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    SettleReplyPublicationRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
     TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
@@ -170,6 +177,44 @@ struct ReplyAttachmentIntentEnvelope {
     sealed: bool,
 }
 
+/// The durable shape of one `/outbound/deliveries/<delivery_id>.json` row.
+///
+/// The public [`OutboundDeliveryAttempt`] is flattened in place, so a row
+/// written before the publication substate existed decodes unchanged and a
+/// row without a substate still serializes byte-for-byte as the attempt
+/// alone (older readers keep decoding new rows). Every read-modify-write on
+/// the row goes through this type so the substate is never dropped by an
+/// attempt-only rewrite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DeliveryAttemptRow {
+    #[serde(flatten)]
+    attempt: OutboundDeliveryAttempt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication: Option<ReplyPublicationState>,
+}
+
+impl DeliveryAttemptRow {
+    fn plain(attempt: OutboundDeliveryAttempt) -> Self {
+        Self {
+            attempt,
+            publication: None,
+        }
+    }
+
+    fn publication_record(&self) -> Option<ReplyPublicationRecord> {
+        self.publication
+            .as_ref()
+            .map(|publication| publication_record(&self.attempt, publication))
+    }
+}
+
+/// What a guarded publication mutation decided: write the row back, or keep
+/// it as read (the outcome is returned either way).
+enum RowUpdate<T> {
+    Write(T),
+    Keep(T),
+}
+
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
 /// HSM-decorated, …) — the store doesn't care which. Tenant isolation is
@@ -215,10 +260,10 @@ where
         &self,
         scope: &ResourceScope,
         path: &ScopedPath,
-        attempt: &OutboundDeliveryAttempt,
+        row: &DeliveryAttemptRow,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
-        let entry = delivery_attempt_entry(attempt)?;
+        let entry = delivery_attempt_row_entry(row)?;
         self.put_with_byte_fallback(scope, path, entry, cas).await
     }
 
@@ -305,6 +350,137 @@ where
             .get_versioned_json::<T>(scope, path)
             .await?
             .map(|(value, _)| value))
+    }
+
+    async fn ensure_delivery_indexes(&self, scope: &ResourceScope) -> Result<(), OutboundError> {
+        self.ensure_delivery_scope_index(scope).await?;
+        self.ensure_tenant_id_index(scope, &deliveries_root()?)
+            .await
+    }
+
+    /// Every delivery row in `scope`, ordered by `(attempted_at, delivery_id)`.
+    async fn list_delivery_rows(
+        &self,
+        scope: &TurnScope,
+    ) -> Result<Vec<DeliveryAttemptRow>, OutboundError> {
+        let resource_scope = scope.to_resource_scope();
+        self.ensure_delivery_scope_index(&resource_scope).await?;
+        let root = deliveries_root()?;
+        let filter = Filter::Eq {
+            key: delivery_scope_index_key(),
+            value: delivery_scope_index_value(scope),
+        };
+        let mut rows: Vec<DeliveryAttemptRow> = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let page = Page::new(offset, Page::MAX_LIMIT);
+            let entries = match self
+                .filesystem
+                .query(&resource_scope, &root, &filter, page)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => break,
+                Err(error) => return Err(map_fs_error(error)),
+            };
+            let received = entries.len();
+            for versioned in entries {
+                let row = decode_delivery_attempt_row(&versioned.entry.body)?;
+                // Defence-in-depth: the index value is a hash, so distinct
+                // scopes hashing to the same bucket is collision-resistant
+                // but not impossible. Drop any row whose persisted scope
+                // doesn't exactly match the query scope.
+                if scope_matches(&row.attempt.scope, scope) {
+                    rows.push(row);
+                }
+            }
+            if received < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(received as u64);
+        }
+        rows.sort_by_key(|row| {
+            (
+                row.attempt.attempted_at,
+                row.attempt.delivery_id.to_string(),
+            )
+        });
+        Ok(rows)
+    }
+
+    /// Point read of one delivery row under the exact caller scope; `None`
+    /// for a missing row and for a row outside the scope alike.
+    async fn load_delivery_row(
+        &self,
+        scope: &TurnScope,
+        delivery_id: OutboundDeliveryId,
+    ) -> Result<Option<DeliveryAttemptRow>, OutboundError> {
+        let resource_scope = scope.to_resource_scope();
+        let path = delivery_path(&delivery_id)?;
+        let Some(row) = self
+            .get_json::<DeliveryAttemptRow>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !scope_matches(&row.attempt.scope, scope) || row.attempt.delivery_id != delivery_id {
+            return Ok(None);
+        }
+        Ok(Some(row))
+    }
+
+    /// One guarded compare-and-swap over a publication row. `apply` sees the
+    /// attempt and its publication substate and decides whether the row is
+    /// written back ([`RowUpdate::Write`]) or left as read
+    /// ([`RowUpdate::Keep`]). A missing row or a row without a substate is
+    /// [`OutboundError::ReplyPublicationNotFound`]; a row outside `scope` is
+    /// [`OutboundError::SubscriptionScopeMismatch`]. Never falls back to a
+    /// byte-only write: a backend without versioned CAS cannot prove
+    /// publication ownership and fails closed.
+    async fn update_reply_publication<T, A>(
+        &self,
+        scope: &TurnScope,
+        delivery_id: OutboundDeliveryId,
+        apply: A,
+    ) -> Result<T, OutboundError>
+    where
+        T: Send,
+        A: Fn(
+                &mut OutboundDeliveryAttempt,
+                &mut ReplyPublicationState,
+            ) -> Result<RowUpdate<T>, OutboundError>
+            + Send
+            + Sync,
+    {
+        let path = delivery_path(&delivery_id)?;
+        let resource_scope = scope.to_resource_scope();
+        let apply = &apply;
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            decode_delivery_attempt_row,
+            delivery_attempt_row_entry,
+            move |current: Option<DeliveryAttemptRow>| async move {
+                let Some(mut row) = current else {
+                    return Err(OutboundError::ReplyPublicationNotFound);
+                };
+                if row.attempt.scope != *scope {
+                    return Err(OutboundError::SubscriptionScopeMismatch);
+                }
+                let Some(mut publication) = row.publication.take() else {
+                    return Err(OutboundError::ReplyPublicationNotFound);
+                };
+                let update = apply(&mut row.attempt, &mut publication);
+                row.publication = Some(publication);
+                match update? {
+                    RowUpdate::Write(outcome) => Ok(CasApply::new(row, outcome)),
+                    RowUpdate::Keep(outcome) => Ok(CasApply::no_op(row, outcome)),
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
     }
 
     async fn write_delivered_gate_route_conversation_indexes(
@@ -615,7 +791,7 @@ where
             },
         )
         .await
-        .map_err(map_reply_attachment_intent_cas_error)
+        .map_err(map_cas_error)
     }
 
     async fn seal(
@@ -656,7 +832,7 @@ where
             },
         )
         .await
-        .map_err(map_reply_attachment_intent_cas_error)
+        .map_err(map_cas_error)
     }
 }
 
@@ -706,7 +882,7 @@ where
             },
         )
         .await
-        .map_err(map_cleanup_cas_error)
+        .map_err(map_cas_error)
     }
 
     async fn load_run_delivery_cleanup(
@@ -773,7 +949,7 @@ where
             },
         )
         .await
-        .map_err(map_cleanup_cas_error)
+        .map_err(map_cas_error)
     }
 
     async fn put_thread_notification_policy(
@@ -886,25 +1062,19 @@ where
     ) -> Result<(), OutboundError> {
         validate_delivery_attempt(&attempt)?;
         let resource_scope = attempt.scope.to_resource_scope();
-        self.ensure_delivery_scope_index(&resource_scope).await?;
-        self.ensure_tenant_id_index(&resource_scope, &deliveries_root()?)
-            .await?;
+        self.ensure_delivery_indexes(&resource_scope).await?;
         let path = delivery_path(&attempt.delivery_id)?;
+        let row = DeliveryAttemptRow::plain(attempt);
         for _ in 0..MAX_CAS_RETRIES {
             if let Some(existing) = self
-                .get_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+                .get_json::<DeliveryAttemptRow>(&resource_scope, &path)
                 .await?
             {
-                validate_delivery_identity(&existing, &attempt)?;
+                validate_delivery_identity(&existing.attempt, &row.attempt)?;
                 return Ok(());
             }
             match self
-                .put_delivery_attempt_indexed(
-                    &resource_scope,
-                    &path,
-                    &attempt,
-                    CasExpectation::Absent,
-                )
+                .put_delivery_attempt_indexed(&resource_scope, &path, &row, CasExpectation::Absent)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -922,21 +1092,21 @@ where
         let path = delivery_path(&request.delivery_id)?;
         let resource_scope = request.scope.to_resource_scope();
         for _ in 0..MAX_CAS_RETRIES {
-            let Some((mut attempt, versioned)) = self
-                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+            let Some((mut row, versioned)) = self
+                .get_versioned_json::<DeliveryAttemptRow>(&resource_scope, &path)
                 .await?
             else {
                 return Err(OutboundError::DeliveryNotFound);
             };
-            if attempt.scope != request.scope {
+            if row.attempt.scope != request.scope {
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
-            if attempt.status != OutboundDeliveryStatus::Prepared {
+            if row.attempt.status != OutboundDeliveryStatus::Prepared {
                 return Ok(false);
             }
-            attempt.status = OutboundDeliveryStatus::Sending;
-            attempt.failure_kind = None;
-            let entry = delivery_attempt_entry(&attempt)?;
+            row.attempt.status = OutboundDeliveryStatus::Sending;
+            row.attempt.failure_kind = None;
+            let entry = delivery_attempt_row_entry(&row)?;
             // This ownership transition must never use the byte-only
             // last-write-wins fallback: a backend without versioned CAS is
             // incapable of proving sole vendor-egress ownership and must
@@ -967,26 +1137,33 @@ where
         let path = delivery_path(&request.delivery_id)?;
         let resource_scope = request.scope.to_resource_scope();
         for _ in 0..MAX_CAS_RETRIES {
-            let Some((mut attempt, versioned)) = self
-                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+            let Some((mut row, versioned)) = self
+                .get_versioned_json::<DeliveryAttemptRow>(&resource_scope, &path)
                 .await?
             else {
                 return Err(OutboundError::DeliveryNotFound);
             };
-            if attempt.scope != request.scope {
+            if row.attempt.scope != request.scope {
                 return Err(OutboundError::SubscriptionScopeMismatch);
+            }
+            // A progressively published reply is never an interrupted
+            // one-shot send: its `Sending` attempt stays owned by the
+            // publication lease and recovers through lease expiry and
+            // takeover, never by being marked `Unknown` (design 2026-08-31 §5).
+            if row.publication.is_some() {
+                return Ok(false);
             }
             // Re-verify `Sending` inside the same CAS read the write commits
             // against. A stale recovery list snapshot must never overwrite a
             // terminal result (`Delivered`/`Failed`) that a different worker
             // wrote after completing egress, so recovery no-ops for any attempt
             // that already advanced past `Sending`.
-            if attempt.status != OutboundDeliveryStatus::Sending {
+            if row.attempt.status != OutboundDeliveryStatus::Sending {
                 return Ok(false);
             }
-            attempt.status = OutboundDeliveryStatus::Unknown;
-            attempt.failure_kind = None;
-            let entry = delivery_attempt_entry(&attempt)?;
+            row.attempt.status = OutboundDeliveryStatus::Unknown;
+            row.attempt.failure_kind = None;
+            let entry = delivery_attempt_row_entry(&row)?;
             match self
                 .filesystem
                 .put(
@@ -1014,22 +1191,22 @@ where
         let path = delivery_path(&request.delivery_id)?;
         let resource_scope = request.scope.to_resource_scope();
         for _ in 0..MAX_CAS_RETRIES {
-            let Some((mut attempt, versioned)) = self
-                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+            let Some((mut row, versioned)) = self
+                .get_versioned_json::<DeliveryAttemptRow>(&resource_scope, &path)
                 .await?
             else {
                 return Err(OutboundError::DeliveryNotFound);
             };
-            if attempt.scope != request.scope {
+            if row.attempt.scope != request.scope {
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
-            attempt.status = request.status;
-            attempt.failure_kind = request.failure_kind;
+            row.attempt.status = request.status;
+            row.attempt.failure_kind = request.failure_kind;
             match self
                 .put_delivery_attempt_indexed(
                     &resource_scope,
                     &path,
-                    &attempt,
+                    &row,
                     CasExpectation::Version(versioned.version),
                 )
                 .await
@@ -1047,32 +1224,309 @@ where
         scope: TurnScope,
         delivery_id: OutboundDeliveryId,
     ) -> Result<Option<OutboundDeliveryAttempt>, OutboundError> {
-        let resource_scope = scope.to_resource_scope();
-        let path = delivery_path(&delivery_id)?;
-        let Some(attempt) = self
-            .get_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+        Ok(self
+            .load_delivery_row(&scope, delivery_id)
             .await?
-        else {
-            return Ok(None);
-        };
-        if !scope_matches(&attempt.scope, &scope) || attempt.delivery_id != delivery_id {
-            return Ok(None);
-        }
-        Ok(Some(attempt))
+            .map(|row| row.attempt))
     }
 
     async fn list_delivery_attempts(
         &self,
         scope: TurnScope,
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        Ok(self
+            .list_delivery_rows(&scope)
+            .await?
+            .into_iter()
+            .map(|row| row.attempt)
+            .collect())
+    }
+
+    async fn open_reply_publication(
+        &self,
+        request: OpenReplyPublicationRequest,
+    ) -> Result<ReplyPublicationRecord, OutboundError> {
+        let OpenReplyPublicationRequest {
+            attempt,
+            target,
+            descriptor,
+            now,
+        } = request;
+        validate_delivery_attempt(&attempt)?;
+        if attempt.status != OutboundDeliveryStatus::Prepared {
+            return Err(OutboundError::InvalidRequest {
+                reason: "reply publication requires a prepared delivery attempt",
+            });
+        }
+        let resource_scope = attempt.scope.to_resource_scope();
+        self.ensure_delivery_indexes(&resource_scope).await?;
+        let path = delivery_path(&attempt.delivery_id)?;
+        let attempt = &attempt;
+        let target = &target;
+        let descriptor = &descriptor;
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            decode_delivery_attempt_row,
+            delivery_attempt_row_entry,
+            move |current: Option<DeliveryAttemptRow>| async move {
+                let Some(row) = current else {
+                    let mut publication = ReplyPublicationState::opened(target.clone(), now);
+                    publication.descriptor = descriptor.clone();
+                    let record = publication_record(attempt, &publication);
+                    return Ok(CasApply::new(
+                        DeliveryAttemptRow {
+                            attempt: attempt.clone(),
+                            publication: Some(publication),
+                        },
+                        record,
+                    ));
+                };
+                if row.attempt.scope != attempt.scope {
+                    return Err(OutboundError::SubscriptionScopeMismatch);
+                }
+                // A plain one-shot attempt under this id is never adopted
+                // into a publication; the same target replays idempotently.
+                let Some(publication) = row.publication.as_ref() else {
+                    return Err(OutboundError::ReplyPublicationTargetMismatch);
+                };
+                if publication.target != *target {
+                    return Err(OutboundError::ReplyPublicationTargetMismatch);
+                }
+                validate_delivery_identity(&row.attempt, attempt)?;
+                let record = publication_record(&row.attempt, publication);
+                Ok(CasApply::no_op(row, record))
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn claim_reply_publication_lease(
+        &self,
+        request: ClaimReplyPublicationLeaseRequest,
+    ) -> Result<ReplyPublicationClaim, OutboundError> {
+        let ClaimReplyPublicationLeaseRequest {
+            delivery_id,
+            scope,
+            owner,
+            ttl,
+            now,
+        } = request;
+        let expires_at = lease_expires_at(now, ttl)?;
+        self.update_reply_publication(&scope, delivery_id, |attempt, publication| {
+            if !publication.status.is_active() {
+                return Ok(RowUpdate::Keep(ReplyPublicationClaim::Settled(
+                    publication_record(attempt, publication),
+                )));
+            }
+            if let Some(live) = publication.live_lease(now).cloned() {
+                if live.owner != owner {
+                    return Ok(RowUpdate::Keep(ReplyPublicationClaim::Held {
+                        owner: live.owner,
+                        expires_at: live.expires_at,
+                    }));
+                }
+                // Same-owner re-entry: same fence, expiry only ever extends.
+                publication.lease = Some(ReplyPublicationLease {
+                    owner: owner.clone(),
+                    expires_at: live.expires_at.max(expires_at),
+                });
+                publication.updated_at = now;
+                return Ok(RowUpdate::Write(ReplyPublicationClaim::Acquired(
+                    publication_record(attempt, publication),
+                )));
+            }
+            // Unleased or expired: a new ownership epoch.
+            publication.fence =
+                publication
+                    .fence
+                    .checked_add(1)
+                    .ok_or(OutboundError::InvalidRequest {
+                        reason: "reply publication fence exhausted",
+                    })?;
+            publication.lease = Some(ReplyPublicationLease {
+                owner: owner.clone(),
+                expires_at,
+            });
+            publication.updated_at = now;
+            if attempt.status == OutboundDeliveryStatus::Prepared {
+                attempt.status = OutboundDeliveryStatus::Sending;
+                attempt.failure_kind = None;
+            }
+            Ok(RowUpdate::Write(ReplyPublicationClaim::Acquired(
+                publication_record(attempt, publication),
+            )))
+        })
+        .await
+    }
+
+    async fn advance_reply_publication(
+        &self,
+        request: AdvanceReplyPublicationRequest,
+    ) -> Result<ReplyPublicationRecord, OutboundError> {
+        let AdvanceReplyPublicationRequest {
+            delivery_id,
+            scope,
+            fence,
+            desired_revision,
+            published_revision,
+            terminal_revision,
+            generation,
+            checkpoint,
+            evidence,
+            now,
+        } = request;
+        if published_revision > desired_revision {
+            return Err(OutboundError::ReplyPublicationRevisionRegressed {
+                published: published_revision,
+                requested: desired_revision,
+            });
+        }
+        if let Some(terminal) = terminal_revision {
+            if terminal > desired_revision {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "reply publication terminal revision exceeds the desired revision",
+                });
+            }
+            if terminal < published_revision {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "reply publication terminal revision is below the published revision",
+                });
+            }
+        }
+        self.update_reply_publication(&scope, delivery_id, |attempt, publication| {
+            ensure_active(publication)?;
+            ensure_fence(publication, fence)?;
+            if publication.lease.is_none() {
+                return Err(OutboundError::ReplyPublicationLeaseRequired);
+            }
+            if desired_revision < publication.desired_revision {
+                return Err(OutboundError::ReplyPublicationRevisionRegressed {
+                    published: publication.desired_revision,
+                    requested: desired_revision,
+                });
+            }
+            if published_revision < publication.published_revision {
+                return Err(OutboundError::ReplyPublicationRevisionRegressed {
+                    published: publication.published_revision,
+                    requested: published_revision,
+                });
+            }
+            if let Some(existing) = publication.terminal_revision
+                && terminal_revision != Some(existing)
+            {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "reply publication terminal revision is already set",
+                });
+            }
+            publication.desired_revision = desired_revision;
+            publication.published_revision = published_revision;
+            if terminal_revision.is_some() {
+                publication.terminal_revision = terminal_revision;
+            }
+            publication.generation = generation;
+            if let Some(checkpoint) = checkpoint.as_ref() {
+                publication.checkpoint = Some(checkpoint.clone());
+            }
+            publication.evidence = evidence.clone();
+            publication.updated_at = now;
+            Ok(RowUpdate::Write(publication_record(attempt, publication)))
+        })
+        .await
+    }
+
+    async fn settle_reply_publication(
+        &self,
+        request: SettleReplyPublicationRequest,
+    ) -> Result<ReplyPublicationRecord, OutboundError> {
+        let SettleReplyPublicationRequest {
+            delivery_id,
+            scope,
+            fence,
+            settlement,
+            now,
+        } = request;
+        self.update_reply_publication(&scope, delivery_id, |attempt, publication| {
+            ensure_active(publication)?;
+            ensure_fence(publication, fence)?;
+            if settlement == ReplyPublicationSettlement::Delivered
+                && !publication.terminal_applied()
+            {
+                return Err(OutboundError::ReplyPublicationNotTerminal);
+            }
+            publication.status = ReplyPublicationStatus::Settled(settlement);
+            publication.lease = None;
+            publication.updated_at = now;
+            attempt.status = settlement.attempt_status();
+            attempt.failure_kind = settlement.failure_kind();
+            Ok(RowUpdate::Write(publication_record(attempt, publication)))
+        })
+        .await
+    }
+
+    async fn release_reply_publication_lease(
+        &self,
+        request: ReleaseReplyPublicationLeaseRequest,
+    ) -> Result<(), OutboundError> {
+        let ReleaseReplyPublicationLeaseRequest {
+            delivery_id,
+            scope,
+            fence,
+        } = request;
+        self.update_reply_publication(&scope, delivery_id, |_attempt, publication| {
+            ensure_fence(publication, fence)?;
+            if publication.lease.is_none() {
+                return Ok(RowUpdate::Keep(()));
+            }
+            publication.lease = None;
+            Ok(RowUpdate::Write(()))
+        })
+        .await
+    }
+
+    async fn load_reply_publication(
+        &self,
+        scope: TurnScope,
+        delivery_id: OutboundDeliveryId,
+    ) -> Result<Option<ReplyPublicationRecord>, OutboundError> {
+        Ok(self
+            .load_delivery_row(&scope, delivery_id)
+            .await?
+            .and_then(|row| row.publication_record()))
+    }
+
+    async fn list_reply_publications(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<ReplyPublicationRecord>, OutboundError> {
+        Ok(self
+            .list_delivery_rows(&scope)
+            .await?
+            .iter()
+            .filter(|row| {
+                row.publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.target.run_id == run_id)
+            })
+            .filter_map(DeliveryAttemptRow::publication_record)
+            .collect())
+    }
+
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ReplyPublicationRecord>, OutboundError> {
         let resource_scope = scope.to_resource_scope();
-        self.ensure_delivery_scope_index(&resource_scope).await?;
         let root = deliveries_root()?;
+        self.ensure_tenant_id_index(&resource_scope, &root).await?;
         let filter = Filter::Eq {
-            key: delivery_scope_index_key(),
-            value: delivery_scope_index_value(&scope),
+            key: tenant_id_index_key(),
+            value: tenant_id_index_value(&scope.tenant_id),
         };
-        let mut deliveries: Vec<OutboundDeliveryAttempt> = Vec::new();
+        let mut rows: Vec<DeliveryAttemptRow> = Vec::new();
         let mut offset: u64 = 0;
         loop {
             let page = Page::new(offset, Page::MAX_LIMIT);
@@ -1087,15 +1541,18 @@ where
             };
             let received = entries.len();
             for versioned in entries {
-                let attempt: OutboundDeliveryAttempt =
-                    serde_json::from_slice(&versioned.entry.body)
-                        .map_err(|_| OutboundError::Serialization)?;
-                // Defence-in-depth: the index value is a hash, so distinct
-                // scopes hashing to the same bucket is collision-resistant
-                // but not impossible. Drop any row whose persisted scope
-                // doesn't exactly match the query scope.
-                if scope_matches(&attempt.scope, &scope) {
-                    deliveries.push(attempt);
+                let row = decode_delivery_attempt_row(&versioned.entry.body)?;
+                // Defence-in-depth beyond the mount prefix: keep only rows
+                // whose persisted scope names the caller's tenant — and only
+                // those still carrying an `Active` publication. Settled
+                // publications and plain one-shot rows are dropped page by
+                // page here rather than retained until the sort.
+                let active_publication = row
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.status.is_active());
+                if row.attempt.scope.tenant_id == scope.tenant_id && active_publication {
+                    rows.push(row);
                 }
             }
             if received < Page::MAX_LIMIT as usize {
@@ -1103,8 +1560,16 @@ where
             }
             offset = offset.saturating_add(received as u64);
         }
-        deliveries.sort_by_key(|attempt| (attempt.attempted_at, attempt.delivery_id.to_string()));
-        Ok(deliveries)
+        rows.sort_by_key(|row| {
+            (
+                row.attempt.attempted_at,
+                row.attempt.delivery_id.to_string(),
+            )
+        });
+        Ok(rows
+            .iter()
+            .filter_map(DeliveryAttemptRow::publication_record)
+            .collect())
     }
 }
 
@@ -1171,13 +1636,17 @@ fn validate_reply_attachment_intent_envelope(
     Ok(())
 }
 
-fn map_reply_attachment_intent_cas_error(error: CasUpdateError<OutboundError>) -> OutboundError {
+/// `Apply` carries the caller's own [`OutboundError`] straight through; every
+/// other outcome (timeout, retries exhausted, no CAS capability, backend
+/// fault) collapses to [`OutboundError::Backend`] per the crate's no-leak
+/// contract, with the cause logged at debug level.
+fn map_cas_error(error: CasUpdateError<OutboundError>) -> OutboundError {
     match error {
         CasUpdateError::Apply(error) => error,
-        CasUpdateError::Timeout
-        | CasUpdateError::RetriesExhausted
-        | CasUpdateError::CasUnsupported
-        | CasUpdateError::Backend(_) => OutboundError::Backend,
+        other => {
+            tracing::debug!(error = %other, "outbound state compare-and-swap update failed");
+            OutboundError::Backend
+        }
     }
 }
 
@@ -1230,16 +1699,6 @@ fn encode_run_delivery_cleanup_snapshot(
         ))
 }
 
-fn map_cleanup_cas_error(error: CasUpdateError<OutboundError>) -> OutboundError {
-    match error {
-        CasUpdateError::Apply(error) => error,
-        CasUpdateError::Timeout
-        | CasUpdateError::RetriesExhausted
-        | CasUpdateError::CasUnsupported
-        | CasUpdateError::Backend(_) => OutboundError::Backend,
-    }
-}
-
 fn subscription_path(
     subscription_id: &ProjectionSubscriptionId,
     actor: &TurnActor,
@@ -1272,18 +1731,58 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
         .map_err(|_| OutboundError::Backend)
 }
 
-fn delivery_attempt_entry(attempt: &OutboundDeliveryAttempt) -> Result<Entry, OutboundError> {
-    let body = serde_json::to_vec(attempt).map_err(|_| OutboundError::Serialization)?;
+fn delivery_attempt_row_entry(row: &DeliveryAttemptRow) -> Result<Entry, OutboundError> {
+    let body = serde_json::to_vec(row).map_err(serialization_error)?;
     Ok(Entry::bytes(body)
         .with_content_type(ContentType::json())
         .with_indexed(
             delivery_scope_index_key(),
-            delivery_scope_index_value(&attempt.scope),
+            delivery_scope_index_value(&row.attempt.scope),
         )
         .with_indexed(
             tenant_id_index_key(),
-            tenant_id_index_value(&attempt.scope.tenant_id),
+            tenant_id_index_value(&row.attempt.scope.tenant_id),
         ))
+}
+
+fn decode_delivery_attempt_row(bytes: &[u8]) -> Result<DeliveryAttemptRow, OutboundError> {
+    serde_json::from_slice(bytes).map_err(serialization_error)
+}
+
+fn publication_record(
+    attempt: &OutboundDeliveryAttempt,
+    publication: &ReplyPublicationState,
+) -> ReplyPublicationRecord {
+    ReplyPublicationRecord {
+        attempt: attempt.clone(),
+        publication: publication.clone(),
+    }
+}
+
+fn ensure_active(publication: &ReplyPublicationState) -> Result<(), OutboundError> {
+    if publication.status.is_active() {
+        Ok(())
+    } else {
+        Err(OutboundError::ReplyPublicationSettled)
+    }
+}
+
+fn ensure_fence(publication: &ReplyPublicationState, fence: u64) -> Result<(), OutboundError> {
+    if publication.fence == fence {
+        Ok(())
+    } else {
+        Err(OutboundError::StaleReplyPublisher {
+            expected_fence: fence,
+            actual_fence: publication.fence,
+        })
+    }
+}
+
+/// The crate contract keeps backend and codec detail out of returned errors;
+/// the cause is logged at debug level so it is not lost.
+fn serialization_error(error: serde_json::Error) -> OutboundError {
+    tracing::debug!(error = %error, "outbound delivery row (de)serialization failed");
+    OutboundError::Serialization
 }
 
 fn delivered_gate_route_path(

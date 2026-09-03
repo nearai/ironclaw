@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -103,7 +102,7 @@ function loadComponents() {
     const suffix = params.toString();
     return `/logs${suffix ? `?${suffix}` : ""}`;
   }
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     Button,
     Icon,

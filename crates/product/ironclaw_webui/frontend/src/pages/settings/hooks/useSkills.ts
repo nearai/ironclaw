@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchSkillContent,
@@ -10,6 +9,15 @@ import {
   updateSkill as updateSkillRequest,
 } from "../lib/settings-api";
 
+type SkillMutationResult = { success?: boolean; message?: string };
+type SkillInstallVariables = { name: string; content?: string };
+type SkillUpdateVariables = { name: string; content: string };
+type SkillAutoActivateVariables = { name: string; enabled: boolean };
+type SkillsSnapshot = {
+  auto_activate_learned?: boolean;
+  [key: string]: unknown;
+};
+
 export function useSkills() {
   const queryClient = useQueryClient();
   const query = useQuery({
@@ -17,38 +25,54 @@ export function useSkills() {
     queryFn: fetchSkills,
   });
 
-  const installMutation = useMutation({
+  const installMutation = useMutation<
+    SkillMutationResult,
+    Error,
+    SkillInstallVariables
+  >({
     mutationFn: installSkillRequest,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills"] });
     },
   });
 
-  const removeMutation = useMutation({
+  const removeMutation = useMutation<SkillMutationResult, Error, string>({
     mutationFn: removeSkillRequest,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills"] });
     },
   });
 
-  const updateMutation = useMutation({
+  const updateMutation = useMutation<
+    SkillMutationResult,
+    Error,
+    SkillUpdateVariables
+  >({
     mutationFn: ({ name, content }) => updateSkillRequest(name, { content }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills"] });
     },
   });
 
-  const autoActivateMutation = useMutation({
+  const autoActivateMutation = useMutation<
+    SkillMutationResult,
+    Error,
+    SkillAutoActivateVariables
+  >({
     mutationFn: ({ name, enabled }) => setSkillAutoActivateRequest(name, enabled),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills"] });
     },
   });
 
-  const learnedAutoActivateMutation = useMutation({
+  const learnedAutoActivateMutation = useMutation<
+    SkillMutationResult,
+    Error,
+    boolean
+  >({
     mutationFn: (enabled) => setAutoActivateLearnedRequest(enabled),
     onSuccess: (_response, enabled) => {
-      queryClient.setQueryData(["skills"], (current) => {
+      queryClient.setQueryData<SkillsSnapshot>(["skills"], (current) => {
         if (!current) return current;
         return {
           ...current,

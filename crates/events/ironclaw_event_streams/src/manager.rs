@@ -791,6 +791,13 @@ fn map_outbound_error(error: OutboundError) -> ProjectionStreamError {
         | OutboundError::DeliveryNotFound
         | OutboundError::ReplyAttachmentIntentsSealed
         | OutboundError::ReplyAttachmentIntentConflict
-        | OutboundError::ReplyAttachmentIntentLimitExceeded => ProjectionStreamError::Outbound,
+        | OutboundError::ReplyAttachmentIntentLimitExceeded
+        | OutboundError::StaleReplyPublisher { .. }
+        | OutboundError::ReplyPublicationSettled
+        | OutboundError::ReplyPublicationRevisionRegressed { .. }
+        | OutboundError::ReplyPublicationNotFound
+        | OutboundError::ReplyPublicationTargetMismatch
+        | OutboundError::ReplyPublicationNotTerminal
+        | OutboundError::ReplyPublicationLeaseRequired => ProjectionStreamError::Outbound,
     }
 }

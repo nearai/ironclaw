@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -18,7 +17,7 @@ function loadConnectionStatusForTest({ expanded = false } = {}) {
     .filter((line) => !line.startsWith("import "))
     .join("\n")
     .replace("export function ConnectionStatus", "function ConnectionStatus");
-  const context = {
+  const context: vm.Context = {
     CONNECTION_STATUS,
     React: {
       useEffect: (effect) => effect(),

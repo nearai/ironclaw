@@ -1,8 +1,13 @@
-// @ts-nocheck
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { useInterfaceTheme } from "../design-system/theme";
+import {
+  useInterfaceTheme,
+  type InterfaceTheme,
+} from "../design-system/theme";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
-import { useNotifications } from "../hooks/useNotifications";
+import {
+  useNotifications,
+  type NotificationProfile,
+} from "../hooks/useNotifications";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
 import { shouldRouteToOnboarding } from "../lib/onboarding-gate";
 import {
@@ -29,6 +34,39 @@ const CommandPalette = React.lazy(() =>
   }))
 );
 
+export type GatewayOutletContext = {
+  gatewayStatus: ReturnType<typeof useGatewayStatus>["data"];
+  gatewayStatusQuery: ReturnType<typeof useGatewayStatus>;
+  currentUser: NotificationProfile | null;
+  workspaceRequiresScopedProjection: boolean;
+  isChecking: boolean;
+  isAdmin: boolean;
+  regressionArtifactExportEnabled: boolean;
+  globalAutoApproveEnabled: boolean;
+  threadsState: ReturnType<typeof useThreads>;
+  pendingRenderedNotification: ReturnType<
+    typeof useNotifications
+  >["pendingRenderedNotification"];
+  onNotificationRendered: ReturnType<
+    typeof useNotifications
+  >["acknowledgeRenderedNotification"];
+  setHeaderStatus: React.Dispatch<React.SetStateAction<React.ReactNode>>;
+  theme: InterfaceTheme;
+  setTheme: (theme: InterfaceTheme) => void;
+};
+
+type GatewayLayoutProps = {
+  token: string;
+  profile: NotificationProfile | null;
+  isChecking?: boolean;
+  isAdmin: boolean;
+  rebornProjectsEnabled?: boolean;
+  workspaceRequiresScopedProjection?: boolean;
+  regressionArtifactExportEnabled?: boolean;
+  globalAutoApproveEnabled?: boolean;
+  onSignOut: () => void;
+};
+
 export function GatewayLayout({
   token,
   profile,
@@ -39,7 +77,7 @@ export function GatewayLayout({
   regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
   onSignOut,
-}) {
+}: GatewayLayoutProps) {
   const t = useT();
   const { theme, setTheme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
@@ -61,7 +99,7 @@ export function GatewayLayout({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
   const status = statusQuery.data;
-  const [headerStatus, setHeaderStatus] = React.useState(null);
+  const [headerStatus, setHeaderStatus] = React.useState<React.ReactNode>(null);
 
   // First-run gate: with no LLM provider configured yet, route to the welcome
   // screen so the user picks one before hitting a dead chat. Settings stays

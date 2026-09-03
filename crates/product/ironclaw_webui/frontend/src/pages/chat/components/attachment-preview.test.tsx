@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// @ts-nocheck
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -60,6 +59,7 @@ test("fetched HTML stays inert when descriptor metadata claims it is a PDF", asy
           workspace_path: "/workspace/../secret.txt",
         }}
         onClose={() => {}}
+        threadId="thread-1"
       />);
       await Promise.resolve();
       await Promise.resolve();
@@ -114,7 +114,7 @@ test("workspace attachments can open their selected file in the workspace viewer
       await Promise.resolve();
     });
 
-    const button = container.querySelector(
+    const button = container.querySelector<HTMLButtonElement>(
       '[data-testid="attachment-open-workspace"]',
     );
     assert.ok(button);
@@ -148,6 +148,7 @@ test("failed workspace attachments do not offer an unavailable workspace jump", 
           workspace_path: "/workspace/generated/missing.html",
         }}
         onClose={() => {}}
+        threadId="thread-1"
       />);
       await Promise.resolve();
       await Promise.resolve();

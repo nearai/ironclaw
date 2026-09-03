@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { InlineNotice } from "../../../design-system/inline-notice";
@@ -8,7 +7,7 @@ import { useGatewayRestart } from "../hooks/useGatewayRestart";
 
 export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
   const t = useT();
-  const restart = useGatewayRestart({ gatewayStatus, gatewayStatusQuery });
+  const restart = useGatewayRestart();
 
   if (!visible) return null;
 

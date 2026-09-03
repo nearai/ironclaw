@@ -176,12 +176,10 @@ pub(super) async fn notify_with_outcome(
         .deliver(
             &outbound_policy,
             context.target_resolver,
-            services.project_filesystem.as_ref(),
             CoordinatedDeliveryRequest {
                 intent: notification.intent,
                 delivery,
                 parts: vec![OutboundPart::Text(notification.text.clone())],
-                attachments: Vec::new(),
                 thread_anchor: None,
                 require_direct_message_target: notification.require_direct_message_target,
                 extension_id: &target.extension_id,
@@ -197,12 +195,10 @@ pub(super) async fn notify_with_outcome(
             NotificationDeliveryFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
         CoordinatedDeliveryOutcome::Delivered { .. }
-        | CoordinatedDeliveryOutcome::AlreadyDelivered { .. }
-        | CoordinatedDeliveryOutcome::StreamDelivered { .. } => Ok(
+        | CoordinatedDeliveryOutcome::AlreadyDelivered { .. } => Ok(
             NotificationDeliveryOutcome::Delivered(delivered_messages_from_outcome(&outcome)),
         ),
-        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. }
-        | CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed { .. } => Ok(
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => Ok(
             NotificationDeliveryOutcome::Unconfirmed(delivered_messages_from_outcome(&outcome)),
         ),
     }

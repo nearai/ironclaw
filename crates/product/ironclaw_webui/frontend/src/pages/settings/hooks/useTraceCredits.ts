@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { authorizeTraceHold, fetchTraceCredits } from "../lib/settings-api";
+import { authorizeTraceHold, fetchTraceCredits } from "../lib/trace-api";
 
 export function useTraceCredits() {
   const queryClient = useQueryClient();

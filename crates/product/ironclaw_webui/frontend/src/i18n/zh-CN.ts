@@ -205,7 +205,6 @@ registerPack("zh-CN", {
   "activity.separator": "、",
   "tool.tabDetails": "详情",
   "tool.tabParameters": "参数",
-  "tool.tabResult": "结果",
   "tool.tabError": "错误",
   "tool.tabDeclined": "已拒绝",
   "tool.noDetail": "无附加详情。",
@@ -1194,6 +1193,7 @@ registerPack("zh-CN", {
   "chat.deleteFailed": "无法删除此对话。",
   "chat.deleteBusy": "对话正在运行时无法删除。请先停止它，然后重试。",
   "chat.cancelFailed": "无法停止此任务。它可能仍在运行，请重试。",
+  "chat.runStopped": "已停止",
   "command.placeholder": "在此输入指令或进行查找...",
   "routine.searchPlaceholder": "搜寻常驻例程的名称、触发条件、或者任务行为",
   "routine.unavailable": "暂不支持例程操作",
@@ -1402,7 +1402,6 @@ registerPack("zh-CN", {
   "common.file": "文件",
   "chat.previewAttachment": "预览 {name}",
   "chat.downloadAttachment": "下载 {name}",
-  "tool.resultAlt": "工具结果"
 });
 
 registerPack("zh-CN", {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -6,13 +5,23 @@ import {
   importSettings as importSettingsPayload,
   NoSupportedSettingsImportError,
   updateSetting,
+  type SettingUpdateSuccess,
 } from "../lib/settings-api";
 import { throwIfApiFailed } from "../lib/api-result";
 import { RESTART_REQUIRED_KEYS } from "../lib/settings-schema";
 
+type SettingsExport = {
+  settings: Record<string, unknown>;
+  diagnostics: unknown[];
+  precedence: unknown[];
+};
+
+type SettingMutationVariables = { key: string; value: unknown };
+type SettingsImportPayload = { settings?: Record<string, unknown> };
+
 export function useSettings() {
   const queryClient = useQueryClient();
-  const query = useQuery({
+  const query = useQuery<SettingsExport>({
     queryKey: ["settings-export"],
     queryFn: fetchSettingsExport,
     staleTime: 30_000,
@@ -20,23 +29,23 @@ export function useSettings() {
 
   const settings = query.data?.settings || {};
 
-  const [savedKeys, setSavedKeys] = React.useState({});
+  const [savedKeys, setSavedKeys] = React.useState<Record<string, boolean>>({});
   const [needsRestart, setNeedsRestart] = React.useState(false);
 
-  const mutation = useMutation({
+  const mutation = useMutation<SettingUpdateSuccess, Error, SettingMutationVariables>({
     // A resolved response with `success: false` is a failed save, not a
     // success — surface it so the UI shows the error rather than a fake
     // "Saved" indicator (and never flips `needsRestart`).
     mutationFn: async ({ key, value }) =>
       throwIfApiFailed(await updateSetting(key, value), "Save failed"),
-    onSuccess: (_data, { key, value }) => {
-      queryClient.setQueryData(["settings-export"], (old) => {
+    onSuccess: (data, { key }) => {
+      queryClient.setQueryData<SettingsExport>(["settings-export"], (old) => {
         if (!old) return old;
         const next = { ...old, settings: { ...old.settings } };
-        if (value === null || value === undefined) {
+        if (data.value === null || data.value === undefined) {
           delete next.settings[key];
         } else {
-          next.settings[key] = value;
+          next.settings[key] = data.value;
         }
         return next;
       });
@@ -54,11 +63,11 @@ export function useSettings() {
   });
 
   const save = React.useCallback(
-    (key, value) => mutation.mutate({ key, value }),
+    (key: string, value: unknown) => mutation.mutate({ key, value }),
     [mutation]
   );
 
-  const importMutation = useMutation({
+  const importMutation = useMutation<unknown, Error, SettingsImportPayload>({
     mutationFn: async (payload) => {
       const result = await importSettingsPayload(payload);
       if (result.success === false) {
@@ -79,7 +88,7 @@ export function useSettings() {
   });
 
   const importSettings = React.useCallback(
-    (payload) => importMutation.mutateAsync(payload),
+    (payload: SettingsImportPayload) => importMutation.mutateAsync(payload),
     [importMutation]
   );
 

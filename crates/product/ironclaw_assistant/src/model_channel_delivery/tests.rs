@@ -7,8 +7,7 @@
 use super::*;
 use crate::{DeliveryRetryPolicy, NoReplyContext};
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelReply, DeliveryReport, OutboundEnvelope,
-    PartDeliveryOutcome,
+    ChannelDelivery, ChannelError, DeliveryReport, OutboundEnvelope, PartDeliveryOutcome,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::preference_target::PreferenceTargetEncodeRequest;
@@ -265,19 +264,6 @@ impl RecordingChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelReply for RecordingChannelAdapter {
-    async fn send_reply(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        // Reply and delivery share one mechanism for this double, as they do
-        // for a conversational vendor; the axis is the coordinator\'s choice.
-        self.deliver(envelope, egress).await
-    }
-}
-
-#[async_trait]
 impl ChannelDelivery for RecordingChannelAdapter {
     async fn deliver(
         &self,
@@ -340,12 +326,16 @@ impl ChannelDeliveryResolver for StaticResolver {
                 "install-alpha",
             )
             .expect("installation id"),
-            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            reply: Some(Arc::new(
+                ironclaw_extension_contracts::test_support::fakes::RecordingReplySink::default(),
+            )
+                as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>),
             delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
             requires_enrollment: false,
             declared_egress_hosts: Vec::new(),
+            generation: 0,
         })
     }
 }
@@ -467,7 +457,6 @@ fn build_harness_with_parts(
     let binding_service: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         Arc::new(ScriptedBindingService { lookup });
     let deliverer = CoordinatedModelChannelDelivery::new(ModelChannelDeliveryDeps {
-        project_filesystem: Arc::new(crate::NoProjectFilesystem),
         fallback_agent_id: ironclaw_host_api::ids::AgentId::new("model-delivery-test")
             .expect("agent id"),
         registry,
@@ -829,33 +818,6 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         }),
         "provider evidence must survive while the failed terminal write stays explicit"
     );
-
-    for (outcome, durably_recorded) in [
-        (
-            CoordinatedDeliveryOutcome::StreamDelivered {
-                attempt: sample_attempt(),
-                cursor: "cursor-1".to_string(),
-            },
-            true,
-        ),
-        (
-            CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed {
-                attempt: sample_attempt(),
-                cursor: "cursor-2".to_string(),
-            },
-            false,
-        ),
-    ] {
-        assert_eq!(
-            classify_delivery_outcome(target.clone(), outcome),
-            Ok(ModelChannelDeliveryEvidence {
-                target: target.clone(),
-                provider_message_refs: Vec::new(),
-                durably_recorded,
-                already_delivered: false,
-            })
-        );
-    }
 
     // A replay of a durably confirmed delivery. The ledger row does not retain
     // provider refs, so the empty list is honest — but it must be flagged, or

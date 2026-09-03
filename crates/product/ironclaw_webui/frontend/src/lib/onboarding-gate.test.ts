@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Unit tests for the first-run onboarding gate decision.
 //
 // Run with Node's built-in test runner (no extra deps):
@@ -9,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import type { DynamicTestOptions } from "../test-support/dynamic-test-types";
 import { shouldRouteToOnboarding } from "./onboarding-gate";
 
 test("a failed providers query (e.g. gated 404 under SSO) does NOT force onboarding", () => {
@@ -80,8 +80,12 @@ test("loading is still deferred even when the query has errored", () => {
 test("an omitted isError key is treated as no error", () => {
   // Makes the implicit `!undefined === true` contract explicit: a caller
   // that forgets to pass `isError` falls back to the reachable-route path.
+  const input: DynamicTestOptions = {
+    isLoading: false,
+    hasActiveProvider: false,
+  };
   assert.equal(
-    shouldRouteToOnboarding({ isLoading: false, hasActiveProvider: false }),
+    Reflect.apply(shouldRouteToOnboarding, null, [input]),
     true
   );
 });

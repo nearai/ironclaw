@@ -210,6 +210,8 @@ pub enum SecretStoreError {
     LeaseExpired { lease_id: SecretLeaseId },
     #[error("secret expired")]
     SecretExpired,
+    #[error("stored secret material is unreadable: {reason}")]
+    SecretMaterialUnreadable { reason: String },
     #[error("secret backend is misconfigured: {reason}")]
     BackendMisconfigured { reason: String },
     #[error("secret store state is unavailable: {reason}")]
@@ -225,6 +227,7 @@ impl SecretStoreError {
             Self::LeaseRevoked { .. } => "CredentialRevoked",
             Self::LeaseExpired { .. } => "CredentialExpired",
             Self::SecretExpired => "CredentialExpired",
+            Self::SecretMaterialUnreadable { .. } => "BackendUnavailable",
             Self::BackendMisconfigured { .. } => "BackendMisconfigured",
             Self::StoreUnavailable { .. } => "BackendUnavailable",
         }
@@ -248,6 +251,10 @@ impl SecretStoreError {
 
     pub fn is_expired(&self) -> bool {
         matches!(self, Self::SecretExpired | Self::LeaseExpired { .. })
+    }
+
+    pub fn is_unreadable_material(&self) -> bool {
+        matches!(self, Self::SecretMaterialUnreadable { .. })
     }
 }
 
@@ -1441,6 +1448,13 @@ mod tests {
         assert_eq!(
             SecretStoreError::SecretExpired.stable_reason(),
             "CredentialExpired"
+        );
+        assert_eq!(
+            SecretStoreError::SecretMaterialUnreadable {
+                reason: "wrong key".to_string()
+            }
+            .stable_reason(),
+            "BackendUnavailable"
         );
         assert_eq!(
             SecretStoreError::BackendMisconfigured {

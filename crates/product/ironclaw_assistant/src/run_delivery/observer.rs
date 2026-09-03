@@ -18,12 +18,14 @@ use crate::commands::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
+use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::channel_adapter::{
     OutboundPart, OutboundVisibility, ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_extension_contracts::reply::ReplyAudience;
 use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_notifications::NotificationKind;
 use ironclaw_outbound::{
@@ -37,12 +39,12 @@ use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
     ProductRejectionKind,
 };
-use ironclaw_threads::{
-    AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
-};
+use ironclaw_threads::ThreadScope;
+
+use crate::ReplyTargetRegistration;
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnExecutionOutcome,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -68,7 +70,6 @@ struct ActionableNotification {
     event_kind: RunNotificationEventKind,
     intent: DeliveryIntent,
     text: String,
-    attachments: Vec<AttachmentRef>,
     /// Gate ref recorded into the delivered-gate route store for approval
     /// and auth prompts, so a bare reply next to the prompt resolves the
     /// gate. `None` for other kinds.
@@ -85,6 +86,9 @@ struct RunNotificationDeliveryContext<'a> {
     /// observer routes every notification from the product-side binding it
     /// already holds.
     reply_target_binding_ref: &'a ReplyTargetBindingRef,
+    /// The channel's reply is a progressive document: the prompt is
+    /// already inside it, so nothing is sent here.
+    progressive: bool,
 }
 
 /// The live working indicator for one run: the currently posted message (if
@@ -97,6 +101,9 @@ struct RunNotificationDeliveryContext<'a> {
 struct WorkingIndicator {
     message: Option<DeliveredChannelMessage>,
     posts: u32,
+    /// The channel's reply is a progressive document: working state lives
+    /// inside it, so no discrete indicator or nudge is posted.
+    progressive: bool,
 }
 
 impl WorkingIndicator {
@@ -196,6 +203,12 @@ impl Drop for RunDeliveryGuard<'_> {
             .remove(&self.run_id);
     }
 }
+
+/// How long the observer lets a run's reply publication settle before it
+/// retracts the working indicator regardless (the publication keeps going;
+/// only the ordering guarantee lapses).
+const REPLY_SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+const REPLY_ATTENTION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Generic immediate-ACK run watcher: observes the ack the workflow
 /// produced for an inbound channel message, polls the submitted run, and
@@ -505,8 +518,70 @@ impl RunDeliveryObserver {
             }
             Err(error) => return Err(error.into()),
         }
+        // The run's answer is not sent from here: it is published through the
+        // channel's bound reply sink, progressively or at terminal per the
+        // channel's declared `[channel.reply]` transport. Register this
+        // conversation as a publication target before watching the run, so
+        // even an instant answer has somewhere to go.
+        let extension_id = ironclaw_host_api::ids::ExtensionId::new(&self.services.extension_id)
+            .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!("channel extension id is not a valid extension id: {error}"),
+            })?;
+        let audience = if envelope_is_direct_chat(&envelope) {
+            ReplyAudience::Private
+        } else {
+            ReplyAudience::Shared
+        };
+        if let Err(error) = self
+            .services
+            .coordinator
+            .register_reply_target(ReplyTargetRegistration {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                run_id,
+                extension_id,
+                reply_target: binding.reply_target_binding_ref.clone(),
+                conversation: Some(envelope.external_conversation_ref().clone()),
+                thread_anchor: None,
+                audience,
+            })
+            .await
+        {
+            // No fallback send: a channel that cannot publish a reply tells
+            // the user so instead of silently answering another way.
+            tracing::warn!(
+                target: "ironclaw::reborn::run_delivery",
+                %run_id,
+                error = %error,
+                "reply publication target could not be registered; the run is not answered on this channel"
+            );
+            let notice_scope = self.notice_scope(&envelope).await;
+            self.services
+                .post_notice(
+                    DeliveryIntent::FailureNotice,
+                    notice_scope,
+                    Some(run_id),
+                    envelope.external_conversation_ref(),
+                    prompts::DELIVERY_ERROR_MESSAGE,
+                    format!("reply-target:{run_id}"),
+                )
+                .await;
+            return Ok(());
+        }
+        // A `stream` channel shows working state, tool activity, and gates
+        // inside the published reply document; only a `message` channel still
+        // gets the observer's discrete working indicator and gate prompts.
+        let progressive = self
+            .services
+            .coordinator
+            .resolve_reply_channel(&self.services.extension_id)
+            .and_then(|channel| channel.reply_transport)
+            == Some(ReplyTransport::Stream);
         let mut observed_blocked_marker: Option<BlockedActionableMarker> = None;
-        let mut working_indicator = WorkingIndicator::default();
+        let mut working_indicator = WorkingIndicator {
+            progressive,
+            ..WorkingIndicator::default()
+        };
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
         // The current run-lifecycle reaction on the triggering message and a
         // monotonic id for each transition. Stays `None` until a working phase
@@ -615,15 +690,31 @@ impl RunDeliveryObserver {
                 .notification_for_actionable_state(
                     &envelope,
                     &binding,
-                    &thread_scope,
                     &scope,
                     run_id,
                     &actionable_state,
+                    progressive,
                 )
                 .await
             {
                 Ok(Some(notification)) => notification,
                 Ok(None) => {
+                    if progressive
+                        && actionable_state.status == TurnStatus::BlockedAuth
+                        && next_blocked_marker
+                            .as_ref()
+                            .and_then(|marker| marker.gate_ref.as_ref())
+                            .is_some()
+                    {
+                        // An unserviceable chat-auth gate was cancelled by
+                        // `notification_for_actionable_state`. Keep the one
+                        // progressive reply alive long enough to observe the
+                        // resulting terminal state, clear its paused facet,
+                        // and close the stream. Suppress the just-observed
+                        // blocked marker so the poll does not process it twice.
+                        observed_blocked_marker = next_blocked_marker;
+                        continue;
+                    }
                     if actionable_state.status == TurnStatus::BlockedResource
                         && let Some(marker) = next_blocked_marker
                     {
@@ -641,7 +732,33 @@ impl RunDeliveryObserver {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .record_delivered(run_id);
+                        // The run is over: hand the durable terminal facts to
+                        // reply publication (the fast path — the process
+                        // journal hook is the durable one) and let the answer
+                        // land before the working indicator goes away, so the
+                        // conversation never shows a gap.
+                        self.services
+                            .coordinator
+                            .reply_run_terminal(&scope, run_id)
+                            .await;
+                        if !self
+                            .services
+                            .coordinator
+                            .await_reply_settled(&scope, run_id, REPLY_SETTLE_WAIT)
+                            .await
+                        {
+                            tracing::debug!(
+                                target: "ironclaw::reborn::run_delivery",
+                                %run_id,
+                                "reply publication is still settling; retracting the working indicator without waiting further"
+                            );
+                        }
                         if let Some(message) = working_indicator.message.take() {
+                            self.services
+                                .retract_message(scope.clone(), Some(run_id), message)
+                                .await;
+                        }
+                        for message in messages_to_delete_after_final.drain(..) {
                             self.services
                                 .retract_message(scope.clone(), Some(run_id), message)
                                 .await;
@@ -656,16 +773,25 @@ impl RunDeliveryObserver {
                             )
                             .await;
                         } else {
-                            self.services
-                                .post_notice(
-                                    DeliveryIntent::FailureNotice,
-                                    scope.clone(),
-                                    Some(run_id),
-                                    envelope.external_conversation_ref(),
-                                    prompts::RUN_FAILED_MESSAGE,
-                                    format!("run-failed:{run_id}"),
-                                )
-                                .await;
+                            // Reply publication owns the run's terminal
+                            // answer — a failed run's failure copy included
+                            // (the terminal document renders the sanitized
+                            // failure summary through the bound sink). The
+                            // conventional failure notice is only the
+                            // fallback for a reply that never reached the
+                            // channel, or two failure messages would land.
+                            if !self.reply_delivered(&scope, run_id).await {
+                                self.services
+                                    .post_notice(
+                                        DeliveryIntent::FailureNotice,
+                                        scope.clone(),
+                                        Some(run_id),
+                                        envelope.external_conversation_ref(),
+                                        prompts::RUN_FAILED_MESSAGE,
+                                        format!("run-failed:{run_id}"),
+                                    )
+                                    .await;
+                            }
                             self.set_source_reaction(
                                 &scope,
                                 run_id,
@@ -731,6 +857,7 @@ impl RunDeliveryObserver {
                         thread_scope: &thread_scope,
                         actor: &actor,
                         reply_target_binding_ref: &binding.reply_target_binding_ref,
+                        progressive,
                     },
                     run_id,
                     notification,
@@ -809,6 +936,7 @@ impl RunDeliveryObserver {
         working_indicator: &mut WorkingIndicator,
         reaction_state: &mut SourceReactionState,
     ) -> Result<TurnRunState, RunDeliveryError> {
+        let progressive = working_indicator.progressive;
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
         let notice_seed = run_id.to_string().bytes().map(u64::from).sum::<u64>();
@@ -837,7 +965,18 @@ impl RunDeliveryObserver {
             if start.elapsed() >= self.settings.max_wait {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
-            if blocked_actionable_marker(&state).is_none() {
+            if blocked_actionable_marker(&state).is_none() && progressive {
+                // The published document carries the working state; only the
+                // vendor-native reaction on the triggering message is placed.
+                self.set_source_reaction(
+                    scope,
+                    run_id,
+                    envelope.external_conversation_ref(),
+                    reaction_state,
+                    RunReaction::Working,
+                )
+                .await;
+            } else if blocked_actionable_marker(&state).is_none() {
                 if working_indicator.message.is_none() {
                     // First working notice for this running stretch. Vary the
                     // line per run (seeded by the run id) so a channel with
@@ -898,6 +1037,49 @@ impl RunDeliveryObserver {
         }
     }
 
+    /// Whether the run's reply publication actually delivered its terminal
+    /// document to this channel — the check behind the single-terminal-reply
+    /// rule: the sink's rendered failure copy and the conventional
+    /// `RUN_FAILED_MESSAGE` notice must never both land. Fail-open toward
+    /// the notice (an unreadable store must not leave the user in silence).
+    async fn reply_delivered(&self, scope: &ironclaw_turns::TurnScope, run_id: TurnRunId) -> bool {
+        match self
+            .services
+            .coordinator
+            .list_reply_publications(scope.clone(), run_id)
+            .await
+        {
+            Ok(records) => records.iter().any(|record| {
+                // Only THIS channel's target counts: the session channel (a
+                // different extension) delivering the same run must not
+                // silence this channel's failure notice. A record without a
+                // descriptor cannot prove this channel delivered.
+                record
+                    .publication
+                    .descriptor
+                    .as_ref()
+                    .is_some_and(|descriptor| {
+                        descriptor.extension_id.as_str() == self.services.extension_id
+                    })
+                    && matches!(
+                        record.publication.status,
+                        ironclaw_outbound::ReplyPublicationStatus::Settled(
+                            ironclaw_outbound::ReplyPublicationSettlement::Delivered
+                        )
+                    )
+            }),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %run_id,
+                    %error,
+                    "could not read the run's reply publications; posting the failure notice"
+                );
+                false
+            }
+        }
+    }
+
     /// Transition the run-lifecycle reaction on the triggering message to
     /// `next` (👀 working → ⚠️ needs-input → 👀 working → ✅ done / ❌ failed),
     /// removing the previous reaction first so only one shows at a time.
@@ -946,42 +1128,20 @@ impl RunDeliveryObserver {
         &self,
         envelope: &ProductInboundEnvelope,
         binding: &ResolvedBinding,
-        thread_scope: &ironclaw_threads::ThreadScope,
         scope: &TurnScope,
         run_id: TurnRunId,
         state: &TurnRunState,
+        progressive: bool,
     ) -> Result<Option<ActionableNotification>, RunDeliveryError> {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
-            TurnStatus::Completed => {
-                if state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport) {
-                    return Ok(None);
-                }
-                let Some(message) = self
-                    .read_latest_assistant_message(thread_scope, binding, run_id)
-                    .await?
-                else {
-                    tracing::warn!(
-                        %run_id,
-                        "completed run has no finalized assistant message; skipping final reply delivery"
-                    );
-                    return Ok(None);
-                };
-                let Some(text) = message.content else {
-                    tracing::warn!(
-                        %run_id,
-                        "completed run finalized assistant message has no content; skipping final reply delivery"
-                    );
-                    return Ok(None);
-                };
-                ActionableNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    intent: DeliveryIntent::FinalReply,
-                    text,
-                    attachments: message.attachments,
-                    gate_ref_for_routing: None,
-                }
-            }
+            // The answer itself is not this observer's to send: reply
+            // publication reconciles the run's reply document — its terminal
+            // revision carries the finalized text and files — through the
+            // channel's bound reply sink. What remains here at completion is
+            // the conversation bookkeeping around it (working indicator,
+            // source reaction, prompt cleanup), handled by the caller.
+            TurnStatus::Completed => return Ok(None),
             TurnStatus::BlockedApproval => {
                 let Some(gate_ref) = state.gate_ref.as_ref() else {
                     tracing::warn!(
@@ -1004,7 +1164,6 @@ impl RunDeliveryObserver {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
                     text: prompts::gate_prompt_text(&view, direct_message),
-                    attachments: Vec::new(),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }
             }
@@ -1087,11 +1246,28 @@ impl RunDeliveryObserver {
                             event_kind: RunNotificationEventKind::AuthRequired,
                             intent: DeliveryIntent::AuthPrompt,
                             text: prompts::auth_prompt_text(&view, direct_message),
-                            attachments: Vec::new(),
                             gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                         }
                     }
                     view => {
+                        if progressive
+                            && !self
+                                .services
+                                .coordinator
+                                .await_current_reply_published(
+                                    scope,
+                                    run_id,
+                                    &binding.reply_target_binding_ref,
+                                    REPLY_ATTENTION_WAIT,
+                                )
+                                .await
+                        {
+                            tracing::debug!(
+                                target: "ironclaw::reborn::run_delivery",
+                                %run_id,
+                                "auth fallback did not publish before the bounded cancellation wait elapsed"
+                            );
+                        }
                         cancel_auth_blocked_run(
                             self.services.turn_coordinator.as_ref(),
                             self.services.auth_flow_cancel.as_deref(),
@@ -1101,16 +1277,18 @@ impl RunDeliveryObserver {
                             Some(gate_ref.as_str()),
                         )
                         .await?;
-                        self.services
-                            .post_notice(
-                                DeliveryIntent::FailureNotice,
-                                scope.clone(),
-                                Some(run_id),
-                                envelope.external_conversation_ref(),
-                                prompts::unserviceable_auth_prompt_message(view.as_ref()),
-                                format!("auth-unavailable:{run_id}"),
-                            )
-                            .await;
+                        if !progressive {
+                            self.services
+                                .post_notice(
+                                    DeliveryIntent::FailureNotice,
+                                    scope.clone(),
+                                    Some(run_id),
+                                    envelope.external_conversation_ref(),
+                                    prompts::unserviceable_auth_prompt_message(view.as_ref()),
+                                    format!("auth-unavailable:{run_id}"),
+                                )
+                                .await;
+                        }
                         return Ok(None);
                     }
                 }
@@ -1132,7 +1310,13 @@ impl RunDeliveryObserver {
             thread_scope,
             actor,
             reply_target_binding_ref,
+            progressive,
         } = context;
+        if progressive {
+            // The gate is the reply document's attention facet on a
+            // progressive channel; a second prompt message would duplicate it.
+            return Ok(Vec::new());
+        }
         let reply_target = reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
@@ -1183,12 +1367,10 @@ impl RunDeliveryObserver {
             .deliver(
                 &outbound_policy,
                 &target_authority,
-                self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
                     intent: notification.intent,
                     delivery,
                     parts: vec![OutboundPart::Text(notification.text)],
-                    attachments: notification.attachments,
                     thread_anchor: None,
                     // MUST stay false on this path. `ObservedReplyTargetAuthority`
                     // (below) has no DM classification for the raw source
@@ -1210,24 +1392,6 @@ impl RunDeliveryObserver {
             }
             outcome => Ok(delivered_messages_from_outcome(&outcome)),
         }
-    }
-
-    async fn read_latest_assistant_message(
-        &self,
-        thread_scope: &ironclaw_threads::ThreadScope,
-        binding: &ResolvedBinding,
-        run_id: TurnRunId,
-    ) -> Result<Option<ThreadMessageRecord>, RunDeliveryError> {
-        let message = self
-            .services
-            .thread_service
-            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-                scope: thread_scope.clone(),
-                thread_id: binding.thread_id.clone(),
-                turn_run_id: run_id.to_string(),
-            })
-            .await?;
-        Ok(message)
     }
 
     /// Scope for notices raised outside a resolved delivery loop: the

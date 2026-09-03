@@ -1,5 +1,16 @@
 # Unified channel model — target architecture
 
+> **Superseded in part (2026-08-31).** The reply half this document describes
+> — a `ChannelReply` trait, and "stream = the host publishes, the adapter is
+> absent" for the web-app channel — is no longer the shipped contract. Every
+> declared `[channel.reply]`, `stream` or `message`, binds one `ReplySink`
+> (`crates/contracts/ironclaw_extension_contracts/src/reply.rs`) that the
+> delivery coordinator's reply-publication lane reconciles; the session
+> channel's sink is the product projection sink composition attaches to its
+> binding. The owning design is now
+> `2026-08-31-progressive-reply-publication.md`; the body below is preserved
+> as written.
+
 **Status:** Shipped, with one accepted deviation from the original plan.
 Originally a target design (approved direction, 2026-08-10); the
 channel-adapter contract described here is built (as the split

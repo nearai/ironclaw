@@ -10,14 +10,17 @@
   - `payload.rs` — Telegram Bot API payload normalization/DTO handling.
   - `render.rs` — Telegram outbound request rendering.
   - `channel.rs` — the `TelegramChannelAdapter` implementations of
-    `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`.
+    `ChannelIngress` and `ChannelDelivery`, plus the shared Bot API send path.
+  - `reply.rs` — the `message`-cadence `ReplySink`: terminal materialization
+    through the shared send path, checkpoint-keyed idempotency.
   - `attachment_transfer.rs`, `preference_targets.rs` — attachment transfer and reply-target codec.
   - `linked/` — MTProto device login, session handling, Telegram mappings,
     connection pooling, and the 15 linked-account tool operations.
   - Re-derive this list with `ls crates/extensions/packages/telegram/src/`.
 - Read the contract before changing channel behavior:
   - `crates/contracts/ironclaw_extension_contracts/` — `ChannelIngress`,
-    `ChannelReply`, `ChannelDelivery`, and the surface vocabulary.
+    `ChannelDelivery` (`channel_adapter.rs`), `ReplySink` and the reply
+    document vocabulary (`reply.rs`), and the surface vocabulary.
 
 ## What This Crate Owns
 
@@ -27,10 +30,14 @@
   (CHECKLIST WS2), which gave Telegram the one-crate-per-package shape Slack
   already had.
 - Telegram's three channel capability implementations. `receive` completes the
-  two-hop Bot API file exchange through restricted egress; reply/delivery
-  render and send. Webhook registration/deregistration are manifest recipes
-  executed by the generic host. This is a plain native crate (no WASM target),
-  and there is no `ProductAdapter` trait in this codebase.
+  two-hop Bot API file exchange through restricted egress; the reply sink
+  materializes the run's terminal document and `deliver` sends notices, both
+  through one shared send path. The sink's checkpoint
+  (`{"terminal_applied", "message_refs"}`, version 1) is what makes a repeated
+  terminal reconcile idempotent — never the revision number. Webhook
+  registration/deregistration are manifest recipes executed by the generic
+  host. This is a plain native crate (no WASM target), and there is no
+  `ProductAdapter` trait in this codebase.
 - Adapter-specific mapping between Telegram shapes and the shared channel DTOs.
 - Staying free of raw token bytes: hosts run the manifest-declared
   `shared_secret_header` verification and inject credentials on mediated egress.

@@ -76,7 +76,14 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
-        .with_recording_network_egress(network_egress),
+        .with_recording_network_egress(network_egress)
+        // The real Slack and Telegram packages declare `[channel.reply]`;
+        // activation fails closed unless the deployment binds their reply
+        // sinks, exactly as the shipping binary does — so lifecycle
+        // scenarios that install them bind the real adapters like the
+        // delivery profile.
+        .with_channel_extension_binding(slack_channel_extension_binding())
+        .with_channel_extension_binding(telegram_channel_extension_binding()),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
@@ -763,10 +770,12 @@ fn acme_scripted_vendor_egress(script: AcmeVendorScript) -> ScriptedVendorServer
         let op_name = request.url.rsplit('/').next().unwrap_or_default();
         match script.outcome_for(op_name) {
             AcmeVendorOutcome::Body(body) => RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: serde_json::to_vec(&body).unwrap_or_default(),
             },
             AcmeVendorOutcome::VendorError(vendor_code) => RestrictedEgressResponse {
+                retry_after: None,
                 status: 400,
                 body: serde_json::to_vec(&serde_json::json!({ "error": vendor_code }))
                     .unwrap_or_default(),
@@ -987,17 +996,166 @@ impl AcmeFixtureChannelAdapter {
     }
 }
 
+/// The acme reply sink's checkpoint schema. A checkpoint of any other version
+/// is ignored — treated as "not applied", so the answer is rendered again —
+/// exactly as the concrete packages do: the host only re-reconciles a
+/// terminal revision it has not settled, and an unreadable checkpoint carries
+/// no evidence that could override that.
+const ACME_REPLY_CHECKPOINT_VERSION: u32 = 1;
+/// The payload minted once the terminal materialization reached the vendor.
+/// The fixture's vendor returns no message ids, so there are no refs to keep.
+const ACME_REPLY_CHECKPOINT_APPLIED: &str = r#"{"terminal_applied":true}"#;
+
+fn acme_applied_reply_checkpoint() -> Result<
+    ironclaw_extension_contracts::reply::ReplySinkCheckpoint,
+    ironclaw_extension_contracts::channel_adapter::ChannelError,
+> {
+    ironclaw_extension_contracts::reply::ReplySinkCheckpoint::new(
+        ACME_REPLY_CHECKPOINT_VERSION,
+        ACME_REPLY_CHECKPOINT_APPLIED,
+    )
+    .map_err(
+        |error| ironclaw_extension_contracts::channel_adapter::ChannelError::Render {
+            reason: format!("acme reply checkpoint exceeds the host bound: {error}"),
+        },
+    )
+}
+
+/// The fixture's `message`-cadence reply half (`[channel.reply] transport =
+/// "message"` in its manifest): the terminal document is rendered as ONE
+/// vendor POST through the same recording send `deliver` uses, so scenarios
+/// keep reading the reply off the scripted vendor's request log. A repeated
+/// terminal reconcile carrying the checkpoint this sink minted answers
+/// `Applied` without a second POST; every non-terminal point is a no-op.
+/// Same shape as the concrete packages, which is what proves the generic
+/// publication path needs no real product.
 #[async_trait::async_trait]
-impl ironclaw_extension_contracts::channel_adapter::ChannelReply for AcmeFixtureChannelAdapter {
-    async fn send_reply(
+impl ironclaw_extension_contracts::reply::ReplySink for AcmeFixtureChannelAdapter {
+    async fn reconcile(
         &self,
-        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
+        request: ironclaw_extension_contracts::reply::ReplyReconcileRequest,
         egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<
-        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::reply::ReplySinkReport,
         ironclaw_extension_contracts::channel_adapter::ChannelError,
     > {
-        self.send(envelope, egress).await
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, OutboundEnvelope, OutboundPart, OutboundTarget, OutboundVisibility,
+            PartDeliveryOutcome,
+        };
+        use ironclaw_extension_contracts::reply::{
+            ReplyOutcome, ReplyOutcomeReason, ReplyReconcilePoint, ReplySinkEvidence,
+            ReplySinkOutcome, ReplySinkReport,
+        };
+
+        if !matches!(request.point, ReplyReconcilePoint::Terminal) {
+            return Ok(ReplySinkReport::applied(
+                request.checkpoint,
+                ReplySinkEvidence::default(),
+            ));
+        }
+        let already_applied = request.checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.version() == ACME_REPLY_CHECKPOINT_VERSION
+                && checkpoint.payload() == ACME_REPLY_CHECKPOINT_APPLIED
+        });
+        if already_applied {
+            return Ok(ReplySinkReport::applied(
+                Some(acme_applied_reply_checkpoint()?),
+                ReplySinkEvidence::default(),
+            ));
+        }
+
+        let document = &request.revision.document;
+        let text = match document.outcome.as_ref() {
+            Some(ReplyOutcome::Completed) => document.answer.text.as_str().to_string(),
+            Some(ReplyOutcome::Failed { summary }) => summary.as_str().to_string(),
+            Some(ReplyOutcome::Cancelled) => {
+                "This reply was stopped before it finished.".to_string()
+            }
+            None => {
+                return Err(ChannelError::Render {
+                    reason: "terminal reply reconcile carries no terminal outcome".to_string(),
+                });
+            }
+        };
+        let Some(conversation) = request.target.conversation.clone() else {
+            return Ok(ReplySinkReport {
+                outcome: ReplySinkOutcome::Permanent {
+                    reason: ReplyOutcomeReason::new("reply target names no vendor conversation"),
+                },
+                checkpoint: None,
+                evidence: ReplySinkEvidence::default(),
+            });
+        };
+        if text.trim().is_empty() {
+            // Nothing to render: the desired state is already reflected.
+            return Ok(ReplySinkReport::applied(
+                Some(acme_applied_reply_checkpoint()?),
+                ReplySinkEvidence::default(),
+            ));
+        }
+
+        // Final attachments stay metadata-only on this vendor: the fixture
+        // delivers text parts only (see `send`).
+        let report = self
+            .send(
+                OutboundEnvelope {
+                    target: OutboundTarget {
+                        conversation,
+                        thread_anchor: request
+                            .target
+                            .thread_anchor
+                            .map(|anchor| anchor.into_inner()),
+                    },
+                    parts: vec![OutboundPart::Text(text)],
+                    reply_context: request
+                        .reply_context
+                        .map(|context| context.as_bytes().to_vec()),
+                    registrations: Vec::new(),
+                    visibility: OutboundVisibility::Public,
+                },
+                egress,
+            )
+            .await?;
+        let accepted = report
+            .parts
+            .iter()
+            .take_while(|part| matches!(part, PartDeliveryOutcome::Sent { .. }))
+            .count();
+        let outcome = match report.parts.get(accepted) {
+            None | Some(PartDeliveryOutcome::Sent { .. }) => ReplySinkOutcome::Applied,
+            // OUT-7: never re-post what the vendor already accepted.
+            Some(PartDeliveryOutcome::Retryable { reason }) if accepted > 0 => {
+                ReplySinkOutcome::Permanent {
+                    reason: ReplyOutcomeReason::new(format!(
+                        "{accepted} part(s) already accepted before a retryable failure \
+                         ({reason}); resending would duplicate them"
+                    )),
+                }
+            }
+            Some(PartDeliveryOutcome::Retryable { reason }) => ReplySinkOutcome::Retryable {
+                reason: ReplyOutcomeReason::new(reason),
+                retry_after: None,
+            },
+            Some(PartDeliveryOutcome::Ambiguous { reason }) => ReplySinkOutcome::Ambiguous {
+                reason: ReplyOutcomeReason::new(reason),
+            },
+            Some(PartDeliveryOutcome::Permanent { reason }) => ReplySinkOutcome::Permanent {
+                reason: ReplyOutcomeReason::new(reason),
+            },
+            Some(PartDeliveryOutcome::Unauthorized { reason }) => ReplySinkOutcome::Unauthorized {
+                reason: ReplyOutcomeReason::new(reason),
+            },
+        };
+        let checkpoint = outcome
+            .is_applied()
+            .then(acme_applied_reply_checkpoint)
+            .transpose()?;
+        Ok(ReplySinkReport {
+            outcome,
+            checkpoint,
+            evidence: ReplySinkEvidence::default(),
+        })
     }
 }
 
@@ -1756,6 +1914,11 @@ pub(crate) fn extension_runtime_acme_tools_profile_with_vendor_script(
     profile.options = profile
         .options
         .with_fixture_extension_dir(acme_fixture_dir(), "acme-messenger")
+        // The real Slack package declares `[channel.reply]`; activation
+        // fails closed unless the deployment binds its reply sink, exactly
+        // as the shipping binary does — so this profile binds the real
+        // adapter like the delivery profile.
+        .with_channel_extension_binding(slack_channel_extension_binding())
         .with_native_extension_factory(Arc::new(AcmeFixtureFactory {
             fallback_egress: Arc::clone(&fallback_egress),
         }));
@@ -1875,6 +2038,34 @@ fn delivery_vendor_router(
             200,
             br#"{"ok":true,"channel":{"id":"D0000000000"}}"#.to_vec(),
         ));
+    }
+    // The native Agent surface the Slack reply sink streams a run's answer
+    // through (`transport = "stream"`): happy-path bodies shaped like the
+    // documented responses (`docs.slack.dev/reference/methods/chat.startStream`
+    // and siblings), so the sink's evidence parsing sees real `ts` values.
+    if request.url.ends_with("/api/agents.sessions.setStatus") {
+        return Some((200, br#"{"ok":true,"status":"processing"}"#.to_vec()));
+    }
+    if request.url.ends_with("/api/chat.startStream")
+        || request.url.ends_with("/api/chat.appendStream")
+        || request.url.ends_with("/api/chat.stopStream")
+    {
+        let body = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+        let channel = body
+            .as_ref()
+            .and_then(|body| body.get("channel").and_then(serde_json::Value::as_str))
+            .unwrap_or("D0000000000")
+            .to_string();
+        let ts = body
+            .as_ref()
+            .and_then(|body| body.get("ts").and_then(serde_json::Value::as_str))
+            .unwrap_or("1710000300.000001")
+            .to_string();
+        let body = serde_json::json!({ "ok": true, "channel": channel, "ts": ts });
+        return Some((200, serde_json::to_vec(&body).ok()?));
+    }
+    if request.url.contains("/api/conversations.replies") {
+        return Some((200, br#"{"ok":true,"messages":[]}"#.to_vec()));
     }
     if request.url.contains("api.telegram.org") {
         if request.url.contains("api.telegram.org/file/") {
@@ -2127,6 +2318,7 @@ pub(crate) mod standard_op_contract_tests {
     fn vendor_ok(body: serde_json::Value) -> ScriptedVendorServer {
         ScriptedVendorServer::new(Arc::new(move |_request: &RestrictedEgressRequest| {
             RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: serde_json::to_vec(&body).expect("fixture body serializes"),
             }
@@ -2138,6 +2330,7 @@ pub(crate) mod standard_op_contract_tests {
     fn vendor_err(vendor_code: &'static str) -> ScriptedVendorServer {
         ScriptedVendorServer::new(Arc::new(move |_request: &RestrictedEgressRequest| {
             RestrictedEgressResponse {
+                retry_after: None,
                 status: 400,
                 body: serde_json::to_vec(&json!({ "error": vendor_code }))
                     .expect("fixture body serializes"),

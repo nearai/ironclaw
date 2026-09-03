@@ -1,11 +1,13 @@
-// @ts-nocheck
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchJobDetail, fetchJobEvents, sendJobPrompt } from "../lib/jobs-api";
 
-export function useJobDetail(jobId) {
+type JobPromptVariables = { content: string; done: boolean };
+type JobPromptResult = { type: "success" | "error"; message: string };
+
+export function useJobDetail(jobId: string | null) {
   const queryClient = useQueryClient();
-  const [promptResult, setPromptResult] = React.useState(null);
+  const [promptResult, setPromptResult] = React.useState<JobPromptResult | null>(null);
 
   const detailQuery = useQuery({
     queryKey: ["job-detail", jobId],
@@ -21,7 +23,7 @@ export function useJobDetail(jobId) {
     refetchInterval: jobId ? 2500 : false,
   });
 
-  const promptMutation = useMutation({
+  const promptMutation = useMutation<unknown, Error, JobPromptVariables>({
     mutationFn: ({ content, done }) => sendJobPrompt(jobId, { content, done }),
     onSuccess: (_data, { done }) => {
       setPromptResult({

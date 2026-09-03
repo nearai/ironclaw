@@ -1,9 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
 
 import { componentProps, findComponent } from "../lib/vm-component-harness";
+import type { DynamicTestOptions } from "../test-support/dynamic-test-types";
 import { sourceForVmTest } from "../test-support/vm-module-harness";
 
 const BASE_MS = Date.parse("2026-07-16T12:00:00Z");
@@ -26,7 +26,7 @@ function pairingPanelSourceForTest() {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-function tForTest(key, params = {}) {
+function tForTest(key, params: DynamicTestOptions = {}) {
   if (key === "pairing.web.expiresIn") return `Expires in ${params.time}`;
   if (key === "pairing.web.qrAlt") return "Telegram pairing QR";
   return key;
@@ -48,7 +48,7 @@ function createPanelHarness({ pairingResponses = [], startResponses = [] } = {})
     return queue.length > 1 ? queue.shift() : queue[0];
   };
 
-  const context = {
+  const context: vm.Context = {
     Button: "button",
     LinkPayloadPanel() {},
     globalThis: {},

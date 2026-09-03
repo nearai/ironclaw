@@ -69,7 +69,6 @@ use crate::delivery_coordinator::DeliveryCoordinator;
 use crate::filesystem_ledger::RebornFilesystemIdempotencyLedger;
 use crate::inbound_turn::DefaultInboundTurnService;
 use crate::ledger::IdempotencyLedger;
-use crate::reborn_services::ProjectFilesystemReader;
 use crate::run_delivery::{
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
@@ -99,10 +98,9 @@ pub struct ChannelWorkflowIdentity {
 /// composed runtime has no delivery coordinator — graphs are then ingress-only
 /// (turns run; nothing watches them for channel replies).
 pub struct ChannelWorkflowDeliveryServices {
+    /// The coordinator every send goes through; its reply-publication
+    /// surface owns every run's answer.
     pub coordinator: Arc<DeliveryCoordinator>,
-    /// Canonical project-filesystem authority the delivery coordinator
-    /// materializes `/workspace/...` references through.
-    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -207,7 +205,6 @@ impl RebornChannelWorkflowFactory {
                 }
             };
         let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
@@ -480,7 +477,6 @@ impl RebornChannelWorkflowFactory {
         let notice_thread_id = ThreadId::new(format!("{extension_id}-channel-notices"))
             .map_err(|error| format!("invalid channel-notice thread id: {error}"))?;
         let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: binding,
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
