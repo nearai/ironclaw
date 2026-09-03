@@ -23,6 +23,7 @@ fn redacts_nested_and_malformed_structured_credentials() {
     for input in [malformed, reversed_delimiters, deep] {
         let preview = ModelResultPreview::redacted(input).expect("preview is redacted");
         assert!(preview.as_str().contains("safe-context"));
+        assert!(preview.as_str().contains("[redacted]"));
         assert!(!preview.as_str().contains(canary));
     }
 }
