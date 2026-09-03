@@ -2,17 +2,19 @@ import assert from "node:assert/strict";
 import { test, vi } from "vitest";
 
 import {
-  fetchTraceCredits,
-  fetchUserModelCatalog,
-  fetchUserModelPreference,
-  setUserModelPolicy,
-  setUserModelPreference,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
   updateSetting,
   updateToolPermission,
-  upsertLlmProvider,
 } from "./settings-api";
+import { fetchTraceCredits } from "./trace-api";
+import {
+  fetchUserModelCatalog,
+  fetchUserModelPreference,
+  setUserModelPolicy,
+  setUserModelPreference,
+  upsertLlmProvider,
+} from "./llm-api";
 
 test("user model preference API uses caller-safe endpoints and reset payload", async () => {
   const requests = [];

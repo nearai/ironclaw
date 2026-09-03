@@ -310,7 +310,7 @@ export function useExtensions() {
   const registry = registryQuery.data?.entries || [];
   const extensionById = new Map(
     extensions
-      .map((extension) => [packageId(extension), extension])
+      .map((extension) => [packageId(extension), extension] as const)
       .filter(([id]) => Boolean(id))
   );
   const registryIds = new Set(registry.map((entry) => packageId(entry)).filter(Boolean));

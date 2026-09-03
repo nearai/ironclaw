@@ -439,7 +439,7 @@ export function useChannelOnboarding(
         ? Promise.resolve(fetchOauthFlowStatus(pending.flowId, pending.invocationId))
         : Promise.resolve(null);
       flowStatus
-        .then((result) => {
+        .then<Awaited<ReturnType<typeof fetchExtensions>> | null | void>((result) => {
           if (!flowSnapshotIsCurrent(pending)) return null;
           if (result?.status === "completed") return finishCompletion(pending);
           const statusErrorKey = OAUTH_FLOW_STATUS_ERROR_KEYS[result?.status];

@@ -11,7 +11,11 @@ export interface NotificationSetupStatusResponse extends ApiRecord {
   extension_id: string;
   requires_setup: boolean;
   enabled: boolean;
-  detail?: unknown;
+  detail?: ApiRecord & {
+    registration_count?: number;
+    registrations?: ApiRecord[];
+    bootstrap?: ApiRecord;
+  };
 }
 
 function decodeNotificationSetupStatus(

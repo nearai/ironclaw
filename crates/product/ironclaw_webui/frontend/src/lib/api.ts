@@ -589,12 +589,39 @@ export function removeProjectMember({ projectId, userId }: ProjectMemberOptions 
 
 // --- Outbound delivery targets + notification channels ---
 
-export function listOutboundDeliveryTargets() {
-  return apiFetch(`${V2_BASE}/outbound/targets`);
+export interface DeliveryTarget extends ApiRecord {
+  target_id: string;
+  display_name?: string;
+  description?: string;
+  channel?: string;
 }
 
-export function getNotificationChannels() {
-  return apiFetch(`${V2_BASE}/outbound/notification-channels`);
+export interface DeliveryTargetOption extends ApiRecord {
+  target?: DeliveryTarget;
+}
+
+export interface NotificationChannel extends ApiRecord {
+  target_id: string;
+  status: string;
+  option?: DeliveryTargetOption | null;
+}
+
+export interface OutboundDeliveryTargetsResponse extends ApiRecord {
+  targets: DeliveryTargetOption[];
+}
+
+export interface NotificationChannelsResponse extends ApiRecord {
+  channels: NotificationChannel[];
+}
+
+export function listOutboundDeliveryTargets(): Promise<OutboundDeliveryTargetsResponse> {
+  return apiFetch<OutboundDeliveryTargetsResponse>(`${V2_BASE}/outbound/targets`);
+}
+
+export function getNotificationChannels(): Promise<NotificationChannelsResponse> {
+  return apiFetch<NotificationChannelsResponse>(
+    `${V2_BASE}/outbound/notification-channels`,
+  );
 }
 
 // `target_ids` is the sole canonical wire name for this full-replace body —
@@ -609,16 +636,19 @@ export function getNotificationChannels() {
 // mutations here reject a missing required argument.
 export function setNotificationChannels({
   targetIds,
-}: { targetIds?: unknown } = {}) {
+}: { targetIds?: unknown } = {}): Promise<NotificationChannelsResponse> {
   if (!Array.isArray(targetIds)) {
     return Promise.reject(
       new TypeError("targetIds must be an array of target ids (pass [] to clear)"),
     );
   }
-  return apiFetch(`${V2_BASE}/outbound/notification-channels`, {
+  return apiFetch<NotificationChannelsResponse>(
+    `${V2_BASE}/outbound/notification-channels`,
+    {
     method: "POST",
     body: JSON.stringify({ target_ids: targetIds }),
-  });
+    },
+  );
 }
 
 // --- Operator logs ---
@@ -716,12 +746,21 @@ export interface SendMessageOptions {
   clientActionId?: string;
 }
 
+export interface SendMessageResponse extends ApiRecord {
+  outcome: string;
+  thread_id?: string;
+  run_id?: string | null;
+  status?: string | null;
+  accepted_message_ref?: ApiRecord | string | null;
+  notice?: string | null;
+}
+
 export function sendMessage({
   threadId,
   content,
   attachments = [],
   clientActionId: clientId,
-}: SendMessageOptions) {
+}: SendMessageOptions): Promise<SendMessageResponse> {
   if (!sessionChannelExtensionId) {
     return Promise.reject(
       new Error("no session channel is configured for this deployment"),
@@ -740,7 +779,7 @@ export function sendMessage({
   if (attachments.length > 0) {
     body.attachments = attachments;
   }
-  return apiFetch(
+  return apiFetch<SendMessageResponse>(
     `${V2_BASE}/channels/${encodeURIComponent(sessionChannelExtensionId)}/messages`,
     {
       method: "POST",
@@ -755,6 +794,13 @@ export interface ChatCommandListResponse extends ApiRecord {
   commands: ApiRecord[];
 }
 
+export interface ChatCommandResponse extends ApiRecord {
+  effect?: {
+    type?: string;
+    thread_id?: string;
+  } | null;
+}
+
 export function listChatCommands(): Promise<ChatCommandListResponse> {
   return apiFetch<ChatCommandListResponse>(`${V2_BASE}/commands`);
 }
@@ -762,8 +808,8 @@ export function listChatCommands(): Promise<ChatCommandListResponse> {
 export async function executeChatCommand({
   threadId,
   text,
-}: { threadId?: string | null; text: string }) {
-  return apiFetch(
+}: { threadId?: string | null; text: string }): Promise<ChatCommandResponse> {
+  return apiFetch<ChatCommandResponse>(
     `${V2_BASE}/threads/${requiredPath(threadId)}/commands`,
     {
       method: "POST",
@@ -1033,14 +1079,14 @@ export function submitManualToken({
 
 // --- Extension setup ---
 
-export function setupExtension(
+export function setupExtension<T = ApiRecord>(
   extensionName: string,
   {
     action,
     payload,
     clientActionId: clientId,
   }: { action?: string; payload?: unknown; clientActionId?: string } = {},
-) {
+): Promise<T> {
   const body: {
     client_action_id: string;
     action?: string;
@@ -1048,7 +1094,7 @@ export function setupExtension(
   } = { client_action_id: clientId || clientActionId() };
   if (action) body.action = action;
   if (payload !== undefined) body.payload = payload;
-  return apiFetch(
+  return apiFetch<T>(
     `${V2_BASE}/extensions/${encodeURIComponent(extensionName)}/setup`,
     {
       method: "POST",
@@ -1066,7 +1112,15 @@ export function setupExtension(
 // HTTP request. When a v2 equivalent lands, replace the stub body
 // with the real wire call.
 
-export function gatewayStatus() {
+export function gatewayStatus(): Promise<{
+  engine_v2_enabled: boolean;
+  restart_enabled: boolean;
+  total_connections: null;
+  llm_backend: null;
+  llm_model: null;
+  extensions?: ApiRecord[];
+  todo: boolean;
+}> {
   // TODO: requires v2 gateway-status endpoint. Returning a zeroed
   // shape so any consumer reading `data.engine_v2_enabled`,
   // `data.llm_backend`, etc. resolves cleanly to falsey values.

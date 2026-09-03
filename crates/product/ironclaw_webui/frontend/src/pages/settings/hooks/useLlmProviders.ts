@@ -6,7 +6,8 @@ import {
   setActiveLlm,
   testLlmProviderConnection,
   upsertLlmProvider,
-} from "../lib/settings-api";
+  type LlmProvidersResponse,
+} from "../lib/llm-api";
 import {
   isProviderConfigured,
   providerDefaultModel,
@@ -81,9 +82,11 @@ export function useLlmProviders({
     staleTime: 60_000,
   });
 
-  const snapshot = enabled
-    ? providersQuery.data || { providers: [], active: null }
-    : { providers: [], active: null };
+  const snapshot = (
+    enabled
+      ? providersQuery.data || { providers: [], active: null }
+      : { providers: [], active: null }
+  ) as LlmProvidersResponse;
   // If the providers query failed (e.g. 404 when the route is gated under
   // multi-user / SSO auth, or a transient 5xx / offline), we can't conclude
   // "no LLM configured" — the provider may be set operator-side at boot — so

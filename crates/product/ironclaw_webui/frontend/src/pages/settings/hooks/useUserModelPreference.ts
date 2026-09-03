@@ -3,7 +3,7 @@ import {
   fetchUserModelCatalog,
   fetchUserModelPreference,
   setUserModelPreference,
-} from "../lib/settings-api";
+} from "../lib/llm-api";
 
 const CATALOG_QUERY_KEY = ["user-model-catalog"];
 const PREFERENCE_QUERY_KEY = ["user-model-preference"];
