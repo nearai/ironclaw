@@ -538,6 +538,10 @@ pub struct NearAiConfig {
     pub failover_cooldown_threshold: u32,
     /// Enable cascade mode for smart routing. Default: true.
     pub smart_routing_cascade: bool,
+    /// Parameter names that NEAR AI does not support (currently only
+    /// `"prompt_cache_key"` is honored here — see `nearai_chat.rs`).
+    /// Listed parameters are stripped from requests before sending.
+    pub unsupported_params: Vec<String>,
 }
 
 impl NearAiConfig {
@@ -574,6 +578,7 @@ impl NearAiConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            unsupported_params: Vec::new(),
         }
     }
 }
@@ -763,6 +768,7 @@ mod tests {
                 failover_cooldown_secs: 300,
                 failover_cooldown_threshold: 3,
                 smart_routing_cascade: true,
+                unsupported_params: Vec::new(),
             },
             provider: None,
             bedrock: None,

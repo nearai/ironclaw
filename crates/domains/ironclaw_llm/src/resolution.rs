@@ -495,6 +495,12 @@ fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> Ne
         failover_cooldown_secs: fields.failover_cooldown_secs,
         failover_cooldown_threshold: fields.failover_cooldown_threshold,
         smart_routing_cascade: chain.smart_routing_cascade,
+        // NEAR AI is a dedicated-config backend (`ProviderProtocol::NearAi`),
+        // so `ResolvedDedicatedProviderConfig` — unlike `RegistryProviderConfig`
+        // — carries no catalog-driven `unsupported_params` today; the kill
+        // switch is real (see `NearAiChatProvider::prompt_cache_key`) but not
+        // yet operator-configurable via `providers.json` for this backend.
+        unsupported_params: Vec::new(),
     }
 }
 

@@ -2082,6 +2082,13 @@ mod tests {
     }
 
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
+        test_nearai_config_with_unsupported_params(base_url, Vec::new())
+    }
+
+    fn test_nearai_config_with_unsupported_params(
+        base_url: &str,
+        unsupported_params: Vec<String>,
+    ) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
             base_url: base_url.to_string(),
@@ -2097,6 +2104,7 @@ mod tests {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            unsupported_params,
         }
     }
 
