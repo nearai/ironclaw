@@ -1637,13 +1637,12 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
                     return;
                 }
                 request.extend_from_slice(&buffer[..read]);
-                let Some(header_end) =
-                    request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
                 else {
                     continue;
                 };
-                let headers = std::str::from_utf8(&request[..header_end])
-                    .expect("request headers are UTF-8");
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
                 let content_length = headers
                     .lines()
                     .find_map(|line| {

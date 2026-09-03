@@ -1050,9 +1050,8 @@ const PROMPT_CACHE_KEY_DOMAIN_SEPARATOR: &str = "ironclaw.prompt-cache-key.v1:";
 /// timestamp in the input — which is the whole point of a per-conversation
 /// routing key.
 fn derive_prompt_cache_key(thread_id: &ironclaw_host_api::ids::ThreadId) -> String {
-    let digest = sha256_digest_token(
-        format!("{PROMPT_CACHE_KEY_DOMAIN_SEPARATOR}{thread_id}").as_bytes(),
-    );
+    let digest =
+        sha256_digest_token(format!("{PROMPT_CACHE_KEY_DOMAIN_SEPARATOR}{thread_id}").as_bytes());
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest.as_str());
     hex.chars().take(32).collect()
 }

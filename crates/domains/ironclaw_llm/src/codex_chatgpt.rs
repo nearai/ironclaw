@@ -1695,18 +1695,20 @@ mod tests {
             let mut request = Vec::new();
             let mut buffer = [0_u8; 4096];
             loop {
-                let read = socket.read(&mut buffer).await.expect("read completion request");
+                let read = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("read completion request");
                 if read == 0 {
                     return;
                 }
                 request.extend_from_slice(&buffer[..read]);
-                let Some(header_end) =
-                    request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
                 else {
                     continue;
                 };
-                let headers = std::str::from_utf8(&request[..header_end])
-                    .expect("request headers are UTF-8");
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
                 let content_length = headers
                     .lines()
                     .find_map(|line| {
