@@ -1323,6 +1323,8 @@ mod tests {
     use super::*;
     use crate::config::NearAiConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     struct StreamingProbe {
         streaming_calls: AtomicUsize,
@@ -1945,55 +1947,50 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn rig_registry_factories_keep_streaming_on_the_buffered_fallback() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        async fn capture_request_body(listener: TcpListener) -> String {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            let (body_start, content_length) = loop {
-                let read = socket.read(&mut buffer).await.expect("read request");
-                assert!(read > 0, "connection closed before request body arrived");
-                request.extend_from_slice(&buffer[..read]);
-                if let Some(header_end) =
-                    request.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let body_start = header_end + 4;
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .expect("content-length header");
-                    break (body_start, content_length);
-                }
-            };
-            while request.len() < body_start + content_length {
-                let read = socket.read(&mut buffer).await.expect("read request body");
-                assert!(read > 0, "connection closed before request body completed");
-                request.extend_from_slice(&buffer[..read]);
+    async fn capture_request_body(listener: TcpListener) -> String {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let (body_start, content_length) = loop {
+            let read = socket.read(&mut buffer).await.expect("read request");
+            assert!(read > 0, "connection closed before request body arrived");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let body_start = header_end + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .expect("content-length header");
+                break (body_start, content_length);
             }
-
-            let response_body = r#"{"error":{"message":"test rejection"}}"#;
-            let response = format!(
-                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
-                response_body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-            String::from_utf8(request[body_start..body_start + content_length].to_vec())
-                .expect("request body is UTF-8 JSON")
+        };
+        while request.len() < body_start + content_length {
+            let read = socket.read(&mut buffer).await.expect("read request body");
+            assert!(read > 0, "connection closed before request body completed");
+            request.extend_from_slice(&buffer[..read]);
         }
 
+        let response_body = r#"{"error":{"message":"test rejection"}}"#;
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        String::from_utf8(request[body_start..body_start + content_length].to_vec())
+            .expect("request body is UTF-8 JSON")
+    }
+
+    #[tokio::test]
+    async fn rig_registry_factories_keep_streaming_on_the_buffered_fallback() {
         for (protocol, provider_id) in [
             (ProviderProtocol::OpenAiCompletions, "openai"),
             (ProviderProtocol::Anthropic, "anthropic"),
@@ -2043,53 +2040,6 @@ mod tests {
     /// shared prompt-cache key just like the generic compatible factory.
     #[tokio::test]
     async fn dedicated_chat_completions_factories_send_prompt_cache_key() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        async fn capture_request_body(listener: TcpListener) -> String {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            let (body_start, content_length) = loop {
-                let read = socket.read(&mut buffer).await.expect("read request");
-                assert!(read > 0, "connection closed before request body arrived");
-                request.extend_from_slice(&buffer[..read]);
-                if let Some(header_end) =
-                    request.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let body_start = header_end + 4;
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .expect("content-length header");
-                    break (body_start, content_length);
-                }
-            };
-            while request.len() < body_start + content_length {
-                let read = socket.read(&mut buffer).await.expect("read request body");
-                assert!(read > 0, "connection closed before request body completed");
-                request.extend_from_slice(&buffer[..read]);
-            }
-
-            let response_body = r#"{"error":{"message":"test rejection"}}"#;
-            let response = format!(
-                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
-                response_body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-            String::from_utf8(request[body_start..body_start + content_length].to_vec())
-                .expect("request body is UTF-8 JSON")
-        }
-
         for (protocol, provider_id) in [
             (ProviderProtocol::DeepSeek, "deepseek"),
             (ProviderProtocol::OpenRouter, "openrouter"),
