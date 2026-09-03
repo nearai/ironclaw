@@ -647,6 +647,85 @@ async fn gateway_stream_model_with_progress_coalesces_many_provider_deltas() {
 }
 
 #[tokio::test]
+async fn gateway_stream_model_with_progress_flushes_buffered_text_when_provider_streaming_errors() {
+    // Regression coverage for the unconditional `ProviderStreamSink::flush()`
+    // after the text-only streaming call site returns `Err` in
+    // `complete_model_request`: the provider emits deltas that stay well
+    // below the coalescing thresholds (so no threshold-driven emit would
+    // deliver them) and then the streaming call itself fails. The buffered
+    // text must still reach the host sink via the flush-on-error path.
+    let provider = Arc::new(StreamingRecordingLlmProvider::new_failing(
+        vec!["Partial ".to_string(), "answer".to_string()],
+        "stream dropped mid-response",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let result = gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await;
+
+    assert!(
+        result.is_err(),
+        "the provider streaming error must propagate as a gateway error"
+    );
+    assert_eq!(
+        sink.updates().last(),
+        Some(&"Partial answer".to_string()),
+        "flush-on-error must still deliver the buffered text to the host sink"
+    );
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_capabilities_and_progress_flushes_buffered_text_when_provider_streaming_errors()
+ {
+    // Same regression as above, for the independent tool-capable streaming
+    // call site (`complete_with_tools_streaming` / the second `flush()` in
+    // `complete_model_request`), which is a distinct code path from the
+    // text-only one above.
+    let provider = Arc::new(StreamingRecordingLlmProvider::new_failing(
+        vec!["Partial ".to_string(), "tool answer".to_string()],
+        "stream dropped mid-response",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let result = gateway
+        .stream_model_with_capabilities_and_progress(
+            model_request(interactive_model()),
+            capabilities,
+            sink.clone(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "the provider streaming error must propagate as a gateway error"
+    );
+    assert_eq!(
+        provider.streaming_tool_requests.lock().unwrap().len(),
+        1,
+        "the tool-capable streaming call site must have been used"
+    );
+    assert_eq!(
+        sink.updates().last(),
+        Some(&"Partial tool answer".to_string()),
+        "flush-on-error must still deliver the buffered text to the host sink on the tool-capable route"
+    );
+}
+
+#[tokio::test]
 async fn gateway_keeps_late_system_messages_in_place_as_system_reminders() {
     // A system message positioned after the first non-system message must NOT
     // be hoisted into the leading system block: that block is the
@@ -5005,8 +5084,13 @@ struct StreamingRecordingLlmProvider {
     model_name: String,
     complete_requests: Mutex<Vec<CompletionRequest>>,
     streaming_requests: Mutex<Vec<CompletionRequest>>,
+    streaming_tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     streaming_deltas: Vec<String>,
     response_content: String,
+    /// When set, both streaming call sites emit `streaming_deltas` via the
+    /// sink and then return `Err` with this reason instead of `Ok`,
+    /// mirroring a provider connection drop mid-stream.
+    fail_after_deltas: Option<String>,
 }
 
 impl StreamingRecordingLlmProvider {
@@ -5015,8 +5099,29 @@ impl StreamingRecordingLlmProvider {
             model_name: "streaming-recording-model".to_string(),
             complete_requests: Mutex::new(Vec::new()),
             streaming_requests: Mutex::new(Vec::new()),
+            streaming_tool_requests: Mutex::new(Vec::new()),
             streaming_deltas,
             response_content: response_content.to_string(),
+            fail_after_deltas: None,
+        }
+    }
+
+    /// Regression coverage for the unconditional `ProviderStreamSink::flush()`
+    /// after a failed streaming call (both the text-only and tool-capable
+    /// call sites in `complete_model_request` flush on `Err` as well as
+    /// `Ok`): the returned provider double emits `streaming_deltas` — kept
+    /// below the coalescing thresholds — via the sink and then fails, so the
+    /// only way the buffered text reaches the host sink is the flush-on-error
+    /// path.
+    fn new_failing(streaming_deltas: Vec<String>, error_reason: &str) -> Self {
+        Self {
+            model_name: "streaming-recording-model".to_string(),
+            complete_requests: Mutex::new(Vec::new()),
+            streaming_requests: Mutex::new(Vec::new()),
+            streaming_tool_requests: Mutex::new(Vec::new()),
+            streaming_deltas,
+            response_content: String::new(),
+            fail_after_deltas: Some(error_reason.to_string()),
         }
     }
 }
@@ -5048,6 +5153,12 @@ impl LlmProvider for StreamingRecordingLlmProvider {
         for delta in &self.streaming_deltas {
             sink.text_delta(delta.clone()).await;
         }
+        if let Some(reason) = &self.fail_after_deltas {
+            return Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: reason.clone(),
+            });
+        }
         Ok(CompletionResponse {
             content: self.response_content.clone(),
             input_tokens: 1,
@@ -5066,6 +5177,34 @@ impl LlmProvider for StreamingRecordingLlmProvider {
         Err(LlmError::RequestFailed {
             provider: self.model_name.clone(),
             reason: "tool completion is not expected".to_string(),
+        })
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.streaming_tool_requests.lock().unwrap().push(request);
+        for delta in &self.streaming_deltas {
+            sink.text_delta(delta.clone()).await;
+        }
+        if let Some(reason) = &self.fail_after_deltas {
+            return Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: reason.clone(),
+            });
+        }
+        Ok(ToolCompletionResponse {
+            content: Some(self.response_content.clone()),
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
         })
     }
 }
