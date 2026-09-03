@@ -65,6 +65,16 @@
 //!     neutral manifest-backed session channel for composition tests that must
 //!     not link the concrete Web App package.
 
+/// Leave reply publication unstarted at build, so an integration harness
+/// whose runs execute on its own turn runtime can start the coordinator's
+/// one publication lane itself with the kernel handles those runs actually
+/// live in (`RebornHostBindings::start_reply_publication_at_build`).
+pub fn defer_reply_publication_for_test(input: &mut crate::RebornRuntimeInput) {
+    if let Some(services) = input.services.as_mut() {
+        services.start_reply_publication_at_build = false;
+    }
+}
+
 /// Build the production runtime and return the exact resource governor wired
 /// into its capability path.
 ///

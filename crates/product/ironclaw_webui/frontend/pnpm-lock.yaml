@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@hot-labs/near-connect':
+        specifier: 0.11.4
+        version: 0.11.4
       '@tanstack/react-query':
         specifier: 5.87.4
         version: 5.87.4(react@19.2.8)
@@ -456,6 +459,9 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
+
+  '@hot-labs/near-connect@0.11.4':
+    resolution: {integrity: sha512-exAL1gqysyCHewcMO334YJ3ddTPg3j9EyVM9novz5Jx4fLbG/YSYBlkYMjMNB8E9K/4I7BiemjOw9bQ+h80hEA==}
 
   '@iconify/types@2.0.0':
     resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
@@ -3339,6 +3345,8 @@ snapshots:
     optional: true
 
   '@exodus/bytes@1.15.1': {}
+
+  '@hot-labs/near-connect@0.11.4': {}
 
   '@iconify/types@2.0.0': {}
 

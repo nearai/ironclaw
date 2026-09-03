@@ -10,8 +10,10 @@ import {
 import {
   REQUEST_FAILURE_ID_PREFIX,
   RUN_FAILURE_ID_PREFIX,
+  RUN_STOPPED_ID_PREFIX,
   STREAM_FAILURE_ID_PREFIX,
   isRunFailureMessageId,
+  isRunStoppedMessageId,
 } from "./message-types";
 
 function useHistorySourceForTest() {
@@ -48,7 +50,9 @@ function useHistorySourceForTest() {
     `const REQUEST_FAILURE_ID_PREFIX = ${JSON.stringify(REQUEST_FAILURE_ID_PREFIX)};`,
     `const RUN_FAILURE_ID_PREFIX = ${JSON.stringify(RUN_FAILURE_ID_PREFIX)};`,
     `const STREAM_FAILURE_ID_PREFIX = ${JSON.stringify(STREAM_FAILURE_ID_PREFIX)};`,
+    `const RUN_STOPPED_ID_PREFIX = ${JSON.stringify(RUN_STOPPED_ID_PREFIX)};`,
     `const isRunFailureMessageId = ${isRunFailureMessageId.toString()};`,
+    `const isRunStoppedMessageId = ${isRunStoppedMessageId.toString()};`,
   ];
   return `${helperLines.join("\n")}\n${messageTypeHelpers.join("\n")}\n${lines.join(
     "\n",
@@ -950,6 +954,36 @@ test("mergeFullRefresh keeps run failures beside the prompt that failed", () => 
   const firstFailure = merged.findIndex((message) => message.id === "err-run-1");
   const secondPrompt = merged.findIndex((message) => message.id === "msg-user-2");
   assert.equal(firstFailure + 1, secondPrompt);
+});
+
+test("mergeFullRefresh keeps a stopped notice when the durable timeline refreshes", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  // The notice is minted by the event reducer; the refresh recognizes it by
+  // the shared id family, not by re-deriving the literal here.
+  const stoppedId = `${RUN_STOPPED_ID_PREFIX}run-1`;
+  assert.equal(isRunStoppedMessageId(stoppedId), true);
+  const merged = mergeFullRefresh(
+    [{ id: "msg-user-1", role: "user", turnRunId: "run-1" }],
+    [
+      { id: "msg-user-1", role: "user", turnRunId: "run-1" },
+      {
+        id: stoppedId,
+        role: "system",
+        content: "Stopped",
+        turnRunId: "run-1",
+        runStatus: "cancelled",
+      },
+    ],
+  );
+
+  assert.equal(
+    merged.map(({ id }) => id).join(","),
+    `msg-user-1,${stoppedId}`,
+  );
+  assert.equal(merged[1].content, "Stopped");
 });
 
 test("mergeFullRefresh keeps a failed request with its client-only prompt", () => {

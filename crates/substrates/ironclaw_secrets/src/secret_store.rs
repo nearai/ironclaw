@@ -1483,6 +1483,12 @@ fn host_api_to_broker_error(error: HostApiError) -> CredentialBrokerError {
 fn secret_error_to_store_error(error: SecretError) -> SecretStoreError {
     match error {
         SecretError::Expired => SecretStoreError::SecretExpired,
+        SecretError::DecryptionFailed(reason) => SecretStoreError::SecretMaterialUnreadable {
+            reason: format!("secret decryption failed: {}", sanitize_error_kind(reason)),
+        },
+        SecretError::InvalidUtf8 => SecretStoreError::SecretMaterialUnreadable {
+            reason: "decrypted secret is not valid UTF-8".to_string(),
+        },
         SecretError::InvalidMasterKey => SecretStoreError::BackendMisconfigured {
             reason: "secrets master key unavailable".to_string(),
         },

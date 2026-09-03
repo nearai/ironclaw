@@ -36,13 +36,16 @@ import {
   createErrorChatMessage,
   isErrorChatMessage,
   isRunFailureMessageId,
+  isRunStoppedMessageId,
   RUN_FAILURE_ID_PREFIX,
+  RUN_STOPPED_ID_PREFIX,
   STREAM_FAILURE_ID_PREFIX,
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
 import { groupMessages } from "./message-groups";
 
 const ENGLISH_FAILURE_COPY = {
+  "chat.runStopped": "Stopped",
   "chat.failure.connectionLost":
     "Connection to the server was lost. Please reconnect and try again.",
   "chat.failure.run": "The run failed before producing a reply.",
@@ -82,10 +85,15 @@ function useChatEventsSourceForTest() {
       continue;
     }
     lines.push(
-      line.replace("export function useChatEvents", "function useChatEvents"),
+      line
+        .replace("export function useChatEvents", "function useChatEvents")
+        .replace(
+          "export function appendRunStoppedMessage",
+          "function appendRunStoppedMessage",
+        ),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents, appendRunStoppedMessage };`;
 }
 
 function createUseChatEventsHarness({
@@ -168,12 +176,14 @@ function createUseChatEventsHarness({
     ensureGateToolActivity,
     isErrorChatMessage,
     isRunFailureMessageId,
+    isRunStoppedMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
     mergeRunIdCandidate,
     publishProductInspectorEnvelope,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
+    RUN_STOPPED_ID_PREFIX,
     STREAM_FAILURE_ID_PREFIX,
     toolCardFromActivity,
     toolCardFromPreview,
@@ -252,6 +262,23 @@ function createUseChatEventsHarness({
     setCurrentActiveRun(run) {
       activeRun = run;
       activeRunRef.current = run;
+    },
+    markLocallyStopped(runId) {
+      runTrackingRef.current.locallyStoppedRuns.current.add(runId);
+    },
+    // Mirror `useChat.cancelRun` once the cancel request is acknowledged:
+    // fence the run, replace its live draft with the stopped notice, and
+    // clear the local run state — the terminal projection still owns settling.
+    stopRunLocally(runId) {
+      runTrackingRef.current.locallyStoppedRuns.current.add(runId);
+      context.globalThis.__testExports.appendRunStoppedMessage(
+        hookProps().setMessages,
+        { runId, t: selectedTranslator },
+      );
+      pendingGate = null;
+      isProcessing = false;
+      activeRun = null;
+      activeRunRef.current = null;
     },
     replaceMessages(next) {
       messages = next;
@@ -431,6 +458,89 @@ test("useChatEvents: completed projection text adopts the durable timeline ident
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
 });
 
+test("useChatEvents: finalized text converges the run's live bubble by identity, not content", () => {
+  const harness = createUseChatEventsHarness();
+
+  // A tool run's live answer concatenates every model call's streamed text
+  // (pre-tool commentary + the answer); the durable transcript finalizes a
+  // different string. Convergence must key on the run's live-text identity —
+  // content equality would miss and render the answer twice.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "Let me check the workspace.\n\nThe answer is 42.",
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].isFinalReply, false);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "durable-message-1",
+              run_id: "run-1",
+              body: "The answer is 42.",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const assistant = harness.messages.filter((m) => m.role === "assistant");
+  assert.equal(
+    assistant.length,
+    1,
+    `one logical answer per run after finalization; got ${JSON.stringify(
+      assistant.map((m) => ({ id: m.id, content: m.content })),
+    )}`,
+  );
+  assert.equal(assistant[0].id, "msg-durable-message-1");
+  assert.equal(assistant[0].content, "The answer is 42.");
+  assert.equal(assistant[0].isFinalReply, true);
+
+  // A late live update for the finalized run (the terminal revision's own
+  // publish racing the durable item) must not resurrect the bubble.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "Let me check the workspace.\n\nThe answer is 42.",
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(
+    harness.messages.filter((m) => m.role === "assistant").length,
+    1,
+    "a late live update never reintroduces a second answer",
+  );
+});
+
 test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {
   const harness = createUseChatEventsHarness();
 
@@ -467,6 +577,122 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
     isFinalReply: true,
   });
   assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: a narration republish marks its phase and leaves the streaming answer alone", () => {
+  const harness = createUseChatEventsHarness();
+  const projection = (items) =>
+    harness.handleEvent({ type: "projection_update", frame: { state: { items } } });
+
+  projection([
+    { run_status: { run_id: "run-1", status: "running" } },
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
+  ]);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.role]),
+    [["text-text:run-1:1", true, "assistant"]],
+    "the first call's text streams as the provisional answer",
+  );
+
+  // The tool call proved the text was narration: the item is republished
+  // flagged under the id it streamed as.
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+  ]);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.content, message.isStreaming, message.role]),
+    [["text-text:run-1:1", "Let me look.", false, "narration"]],
+  );
+
+  projection([{ text: { id: "text:run-1:2", run_id: "run-1", body: "Here you go." } }]);
+  // A late republish of the narration must not settle the streaming answer.
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+  ]);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.role]),
+    [
+      ["text-text:run-1:1", false, "narration"],
+      ["text-text:run-1:2", true, "assistant"],
+    ],
+    "one message per phase; the narration is settled, the answer keeps streaming",
+  );
+});
+
+test("useChatEvents: final_reply keeps its run's narration and converges only the streaming answer", () => {
+  const harness = createUseChatEventsHarness();
+  const projection = (items) =>
+    harness.handleEvent({ type: "projection_update", frame: { state: { items } } });
+
+  projection([
+    { run_status: { run_id: "run-1", status: "running" } },
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
+  ]);
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+  ]);
+  projection([{ text: { id: "text:run-1:2", run_id: "run-1", body: "Here you" } }]);
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "Here you go.",
+        generated_at: "2026-09-02T13:00:00Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [
+      message.id,
+      message.content,
+      message.isFinalReply,
+      message.role,
+    ]),
+    [
+      ["text-text:run-1:1", "Let me look.", false, "narration"],
+      ["reply-run-1", "Here you go.", true, "assistant"],
+    ],
+    "the narration stays with the run's activity; the final reply replaces the streaming answer alone",
+  );
+});
+
+test("useChatEvents: a narration republish that arrives after the final reply still joins the run's activity", () => {
+  const harness = createUseChatEventsHarness();
+  const projection = (items) =>
+    harness.handleEvent({ type: "projection_update", frame: { state: { items } } });
+
+  projection([
+    { run_status: { run_id: "run-1", status: "running" } },
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
+    { text: { id: "text:run-1:2", run_id: "run-1", body: "Here you" } },
+  ]);
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "Here you go.",
+        generated_at: "2026-09-02T13:00:00Z",
+      },
+    },
+  });
+  // The live rail delivers the flagged republish after the durable final
+  // reply; an unflagged late phase for the run stays ignored.
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+    { text: { id: "text:run-1:2", run_id: "run-1", body: "Here you go." } },
+  ]);
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.isFinalReply, message.role]),
+    [
+      ["reply-run-1", true, "assistant"],
+      ["text-text:run-1:1", false, "narration"],
+    ],
+    "the narration lands (the grouping places it inside the run's activity); the stale phase does not",
+  );
 });
 
 test("useChatEvents: final_reply collapses earlier assistant phases from the same run", () => {
@@ -2553,6 +2779,7 @@ test("useChatEvents: stale terminal run status does not clear newer run", () => 
     threadId: "thread-1",
     status: "running",
   });
+  assert.deepEqual(harness.messages, [], "a stale cancellation adds no notice");
 });
 
 test("useChatEvents: stale terminal status before newer projection does not clear newer run", () => {
@@ -2877,7 +3104,17 @@ test("useChatEvents: run failure preserves completed durable timeline phases", (
 });
 
 test("useChatEvents: terminal cancellation settles the run as not successful", () => {
-  const harness = createUseChatEventsHarness();
+  class FixedDate extends Date {
+    constructor(...args) {
+      super(args.length > 0 ? args[0] : "2025-01-02T03:04:05.000Z");
+    }
+
+    static now() {
+      return Date.parse("2025-01-02T03:04:05.000Z");
+    }
+  }
+
+  const harness = createUseChatEventsHarness({ DateImpl: FixedDate });
 
   harness.handleEvent({
     type: "projection_update",
@@ -2887,6 +3124,16 @@ test("useChatEvents: terminal cancellation settles the run as not successful", (
       },
     },
   });
+  harness.replaceMessages([
+    {
+      id: "text-live-run-1",
+      role: "assistant",
+      content: "unfinished draft",
+      turnRunId: "run-1",
+      isFinalReply: false,
+      isStreaming: true,
+    },
+  ]);
   harness.handleEvent({
     type: "projection_update",
     frame: {
@@ -2897,6 +3144,537 @@ test("useChatEvents: terminal cancellation settles the run as not successful", (
   });
 
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+  assert.deepEqual(plain(harness.messages), [
+    {
+      id: "stopped-run-1",
+      role: "system",
+      content: "Stopped",
+      timestamp: "2025-01-02T03:04:05.000Z",
+      turnRunId: "run-1",
+      runStatus: "cancelled",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+  assert.equal(harness.messages.length, 1, "terminal replay stays deduplicated");
+});
+
+test("useChatEvents: a locally stopped run ignores buffered live frames until terminal cancellation settles", () => {
+  const harness = createUseChatEventsHarness();
+  harness.markLocallyStopped("run-1");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            thinking: {
+              id: "run-1:late",
+              run_id: "run-1",
+              body: "late reasoning",
+            },
+          },
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "late draft",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.messages, []);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "cancelled" } },
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "buffered after terminal cancellation",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content }) => ({ id, content })),
+    [{ id: "stopped-run-1", content: "Stopped" }],
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-1", success: false },
+  ]);
+});
+
+test("useChatEvents: a locally stopped run that completes anyway retracts the stopped notice and converges its answer", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "The answer" } },
+        ],
+      },
+    },
+  });
+  harness.stopRunLocally("run-1");
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    [`${RUN_STOPPED_ID_PREFIX}run-1`],
+    "the stop acknowledgement replaces the live draft with the notice",
+  );
+
+  // The cancel lost the race: the backend finished the run before honouring
+  // it. The "Stopped" claim is now false and the fence would swallow the
+  // finalized answer, so the terminal status must retract both.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "durable-message-1",
+              run_id: "run-1",
+              body: "The answer is 42.",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const assistant = harness.messages.filter((m) => m.role === "assistant");
+  assert.equal(assistant.length, 1, "exactly one assistant message");
+  assert.equal(assistant[0].id, "msg-durable-message-1");
+  assert.equal(assistant[0].content, "The answer is 42.");
+  assert.equal(assistant[0].isFinalReply, true);
+  assert.equal(
+    harness.messages.some((message) => isRunStoppedMessageId(message.id)),
+    false,
+    "a run that completed is not presented as stopped",
+  );
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+});
+
+test("useChatEvents: a final reply for a locally stopped run lifts the stop before any projection status", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "The answer" } },
+        ],
+      },
+    },
+  });
+  harness.stopRunLocally("run-1");
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    [`${RUN_STOPPED_ID_PREFIX}run-1`],
+  );
+
+  // The cancel lost the race and the finalized reply outran the projection
+  // status that would have lifted the stop. The reply is the backend's own
+  // evidence that the run completed: it renders and retracts the notice
+  // instead of being fenced away.
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "The answer is 42.",
+        generated_at: "2026-09-02T09:00:00Z",
+      },
+    },
+  });
+
+  const assistant = harness.messages.filter((m) => m.role === "assistant");
+  assert.equal(assistant.length, 1, "the final reply is rendered");
+  assert.equal(assistant[0].content, "The answer is 42.");
+  assert.equal(assistant[0].isFinalReply, true);
+  assert.equal(
+    assistant[0].timestamp,
+    "2026-09-02T09:00:00Z",
+    "the wire's generated_at is the rendered timestamp",
+  );
+  assert.equal(
+    harness.messages.some((message) => isRunStoppedMessageId(message.id)),
+    false,
+    "a run that answered is not presented as stopped",
+  );
+  assert.equal(harness.isProcessing, false);
+
+  // The projection's terminal status then settles the run like any other.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: finalized text converges only its own run's live bubble when two runs stream in one thread", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "draft one" } },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { text: { id: "text:run-2", run_id: "run-2", body: "draft two" } },
+        ],
+      },
+    },
+  });
+  const runOneBubble = plain(harness.messages[0]);
+  assert.equal(runOneBubble.id, "text-text:run-1");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "completed" } },
+          {
+            text: {
+              id: "durable-2",
+              run_id: "run-2",
+              body: "answer two",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["text-text:run-1", "msg-durable-2"],
+    "finalizing run-2 converges only run-2's bubble",
+  );
+  assert.deepEqual(
+    plain(harness.messages[0]),
+    runOneBubble,
+    "run-1's live bubble is untouched by run-2's finalization",
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "durable-1",
+              run_id: "run-1",
+              body: "answer one",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content, isFinalReply }) => ({
+      id,
+      content,
+      isFinalReply,
+    })),
+    [
+      { id: "msg-durable-1", content: "answer one", isFinalReply: true },
+      { id: "msg-durable-2", content: "answer two", isFinalReply: true },
+    ],
+    "two finalized messages total, one per run, in stream order",
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-2", success: true },
+    { runId: "run-1", success: true },
+  ]);
+});
+
+test("useChatEvents: a reasoning item republished under the same id is replaced in place", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { thinking: { id: "run-1:1", run_id: "run-1", body: "Let me" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "draft" } },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["thinking-run-1:1", "text-text:run-1"],
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            thinking: {
+              id: "run-1:1",
+              run_id: "run-1",
+              body: "Let me think about this more carefully.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 2, "republishing never appends");
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["thinking-run-1:1", "text-text:run-1"],
+    "the reasoning bubble keeps its original position",
+  );
+  assert.equal(harness.messages[0].role, "thinking");
+  assert.equal(
+    harness.messages[0].content,
+    "Let me think about this more carefully.",
+  );
+});
+
+test("useChatEvents: a run started after a local stop streams normally", () => {
+  const harness = createUseChatEventsHarness();
+  harness.markLocallyStopped("run-1");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { text: { id: "text:run-2", run_id: "run-2", body: "draft two" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content, isStreaming }) => ({
+      id,
+      content,
+      isStreaming,
+    })),
+    [{ id: "text-text:run-2", content: "draft two", isStreaming: true }],
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "completed" } },
+          {
+            text: {
+              id: "durable-2",
+              run_id: "run-2",
+              body: "answer two",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content, isFinalReply }) => ({
+      id,
+      content,
+      isFinalReply,
+    })),
+    [{ id: "msg-durable-2", content: "answer two", isFinalReply: true }],
+  );
+  assert.equal(
+    harness.messages.some((message) => isRunStoppedMessageId(message.id)),
+    false,
+    "the fence on run-1 never produces a stopped notice for run-2",
+  );
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-2", success: true }]);
+  assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: the local-stop fence drops every typed live frame for the stopped run", () => {
+  const runId = "run-1";
+  // The `gate` frame carries the approval prompt (gateKind "approval").
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => ({ kind: "gate", runId, gateRef: "gate:approval" }),
+  });
+  harness.markLocallyStopped(runId);
+
+  const capability = {
+    invocation_id: "invocation-1",
+    turn_run_id: runId,
+    thread_id: "thread-1",
+    capability_id: "builtin.http",
+    updated_at: "2026-06-03T11:44:43Z",
+  };
+  const typedFrames = [
+    {
+      type: "accepted",
+      frame: { ack: { run_id: runId, thread_id: "thread-1", status: "queued" } },
+    },
+    {
+      type: "running",
+      frame: { progress: { turn_run_id: runId, kind: "typing" } },
+    },
+    {
+      type: "capability_activity",
+      frame: { activity: { ...capability, status: "started" } },
+    },
+    {
+      type: "capability_display_preview",
+      frame: { preview: { ...capability, status: "completed", title: "http" } },
+    },
+    {
+      type: "gate",
+      frame: { prompt: { turn_run_id: runId, gate_ref: "gate:approval" } },
+    },
+    // `final_reply` is the one typed frame the fence lets through: it is the
+    // backend's evidence that the cancel lost, covered by its own case above.
+  ];
+  for (const envelope of typedFrames) {
+    harness.handleEvent(envelope);
+    assert.deepEqual(
+      harness.messages,
+      [],
+      `a fenced ${envelope.type} frame produces no message`,
+    );
+    assert.equal(
+      harness.isProcessing,
+      false,
+      `a fenced ${envelope.type} frame never resumes processing`,
+    );
+    assert.equal(harness.pendingGate, null);
+    assert.equal(harness.activeRun, null);
+  }
+  assert.deepEqual(harness.settledRuns, []);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: runId, status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId, success: false }]);
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, role, content }) => ({
+      id,
+      role,
+      content,
+    })),
+    [{ id: `${RUN_STOPPED_ID_PREFIX}${runId}`, role: "system", content: "Stopped" }],
+    "the terminal cancellation appends exactly one stopped notice",
+  );
+});
+
+test("useChatEvents: typed cancellation replaces the unfinished draft with a stopped notice", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "text-live-run-typed",
+      role: "assistant",
+      content: "unfinished draft",
+      turnRunId: "run-typed",
+      isFinalReply: false,
+      isStreaming: true,
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "cancelled",
+    frame: { run_state: { run_id: "run-typed", status: "Cancelled" } },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, role, content, turnRunId, runStatus }) => ({
+      id,
+      role,
+      content,
+      turnRunId,
+      runStatus,
+    })),
+    [
+      {
+        id: "stopped-run-typed",
+        role: "system",
+        content: "Stopped",
+        turnRunId: "run-typed",
+        runStatus: "cancelled",
+      },
+    ],
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-typed", success: false },
+  ]);
 });
 
 test("useChatEvents: typed failed event settles the run as not successful", () => {

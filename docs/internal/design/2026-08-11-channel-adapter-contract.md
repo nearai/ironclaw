@@ -1,5 +1,17 @@
 # Reply and delivery: two axes for channel output
 
+> **Superseded in part (2026-08-31).** The reply axis below is described as
+> `ChannelReply::send_reply` — one terminal send — with `stream` meaning the
+> host's projection publishes and no adapter half exists. At head the reply
+> axis is `ReplySink::reconcile` over a revisioned reply document
+> (`crates/contracts/ironclaw_extension_contracts/src/reply.rs`), driven by
+> the delivery coordinator's reply-publication lane; `stream` vs `message` is
+> only the cadence a sink hears, every declared `[channel.reply]` binds a
+> sink, and the session channel's sink is the product projection sink
+> composition attaches. The owning design is now
+> `2026-08-31-progressive-reply-publication.md`; the two-axis split and the
+> body below are preserved as written.
+
 **Status:** implemented with dated amendments below · **Date:** 2026-08-11 ·
 **Follows:** the unified channel model
 (`2026-08-10-unified-channel-model.md`), which unified the *pipeline*. This

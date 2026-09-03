@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useNavigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
@@ -10,11 +9,12 @@ import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
 import { ProjectsSummaryStrip } from "./components/projects-summary-strip";
 import { ProjectsGrid } from "./components/projects-grid";
 import { ProjectWorkspaceShell } from "./components/project-workspace-shell";
+import type { GatewayOutletContext } from "../../layout/gateway-layout";
 
 export function ProjectsPage() {
   const t = useT();
   const navigate = useNavigate();
-  const { threadsState } = useOutletContext();
+  const { threadsState } = useOutletContext<GatewayOutletContext>();
   const { projectId = null, threadId = null } = useParams();
   const [search, setSearch] = React.useState("");
   const [chatFlowError, setChatFlowError] = React.useState(null);

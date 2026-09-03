@@ -822,7 +822,34 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // host-side like `guidance_doc`'s, and nothing here schedules,
         // dispatches, or invokes anything. Count read from this test's own
         // failure message.
-        ("ironclaw_extension_contracts", 11_451),
+        // 11_451 -> 12_928 (2026-08-31, progressive reply publication): the
+        // `reply` module — the channel-neutral reply vocabulary
+        // (`ReplyDocument`/`ReplyRevision`, the bounded
+        // display/answer/reasoning newtypes, the sink checkpoint and
+        // evidence bounds), the single `ReplySink` seam that replaced
+        // `ChannelReply` for every reply transport, the reconcile-point
+        // cadence rule, plus the conformance drive and recording sink in
+        // `test_support` and the inline test module this ratchet also counts.
+        // Vocabulary only: publication state, cadence workers, and rendering
+        // live in `ironclaw_outbound`, `ironclaw_assistant`, and the channel
+        // packages.
+        // 12_928 -> 12_896 (2026-08-31, reply-seam consolidation): the
+        // `ReplyChange` change language and its classification moved out of
+        // the public contract (the document's bounded semantic mutators
+        // replaced them; only the host's projection ever produced changes),
+        // and `ReplyId` was deleted. What remains above the 11_451 pre-reply
+        // pin is the seam itself — document + component types, bounded
+        // newtypes, checkpoint/evidence, the sink trait and its
+        // request/report — which every reply-capable channel consumes; the
+        // pin re-captures the measured count rather than restoring 11_451.
+        // Count read from this test's own failure message.
+        // 12_896 -> 12_867 (2026-08-31, reply-vocabulary trim): the dead
+        // `activity_progress` mutator and the never-produced
+        // `ReplyActivityState::{Running, Killed}` variants, plus the unused
+        // `ReplySinkOutcome::retry_after` and `ReplyPhase::as_str` helpers,
+        // were deleted after a workspace-wide consumer sweep. Count read
+        // from this test's own failure message.
+        ("ironclaw_extension_contracts", 12_867),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

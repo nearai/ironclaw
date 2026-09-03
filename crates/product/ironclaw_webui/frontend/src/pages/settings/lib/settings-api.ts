@@ -97,19 +97,81 @@ export async function fetchSetting(key) {
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`);
   return data.entry?.value ?? null;
 }
-export async function updateSetting(key, value) {
+
+type SettingEntry = {
+  key: string;
+  value: unknown;
+  mutable?: boolean;
+  source?: string;
+};
+
+export type SettingUpdateSuccess = {
+  success: true;
+  entry: SettingEntry;
+  value: unknown;
+};
+
+export type SettingUpdateFailure = {
+  success: false;
+  message?: string;
+};
+
+export type SettingUpdateResult = SettingUpdateSuccess | SettingUpdateFailure;
+
+function settingUpdateResult(data: unknown, expectedKey: string): SettingUpdateResult {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("Save response is not an object");
+  }
+  const success = Reflect.get(data, "success");
+  if (success === false) {
+    const message = Reflect.get(data, "message");
+    return {
+      success: false,
+      ...(typeof message === "string" ? { message } : {}),
+    };
+  }
+  if (success !== undefined && success !== true) {
+    throw new Error("Save response has an invalid success flag");
+  }
+
+  const entry = Reflect.get(data, "entry");
+  if (
+    typeof entry !== "object" ||
+    entry === null ||
+    Array.isArray(entry) ||
+    Reflect.get(entry, "key") !== expectedKey ||
+    !Object.prototype.hasOwnProperty.call(entry, "value")
+  ) {
+    throw new Error("Save response is missing the confirmed setting entry");
+  }
+
+  const mutable = Reflect.get(entry, "mutable");
+  const source = Reflect.get(entry, "source");
+  const confirmedEntry: SettingEntry = {
+    key: expectedKey,
+    value: Reflect.get(entry, "value"),
+    ...(typeof mutable === "boolean" ? { mutable } : {}),
+    ...(typeof source === "string" ? { source } : {}),
+  };
+  return { success: true, entry: confirmedEntry, value: confirmedEntry.value };
+}
+
+export async function updateSetting(
+  key: string,
+  value: unknown,
+): Promise<SettingUpdateResult> {
   if (key === AUTO_APPROVE_KEY) {
     const data = await apiFetch(SETTINGS_TOOLS_BASE, {
       method: "POST",
       body: JSON.stringify({ enabled: Boolean(value) }),
     });
-    return { success: true, entry: data.entry, value: data.entry?.value };
+    return settingUpdateResult(data, key);
   }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`, {
     method: "POST",
     body: JSON.stringify({ value }),
   });
-  return { success: true, entry: data.entry, value: data.entry?.value };
+  return settingUpdateResult(data, key);
 }
 
 type SettingsImportUpdateResult = Awaited<ReturnType<typeof updateSetting>>;
@@ -144,7 +206,19 @@ export async function importSettings(
   const settings = payload?.settings || {};
   const imported: SettingsImportUpdateResult[] = [];
   if (Object.prototype.hasOwnProperty.call(settings, AUTO_APPROVE_KEY)) {
-    imported.push(await updateSetting(AUTO_APPROVE_KEY, Boolean(settings[AUTO_APPROVE_KEY])));
+    const result = await updateSetting(
+      AUTO_APPROVE_KEY,
+      Boolean(settings[AUTO_APPROVE_KEY]),
+    );
+    imported.push(result);
+    if (result.success === false) {
+      return {
+        success: false,
+        imported: 0,
+        results: imported,
+        message: result.message || "The setting could not be saved",
+      };
+    }
   }
   if (imported.length === 0) {
     return {

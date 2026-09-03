@@ -227,9 +227,14 @@ Notes on the sections:
   and intentionally binds no package ingress capability.
 - **`[channel.reply]` and `[channel.delivery]` are orthogonal axes.** Reply is
   source-routed back to a run's input; delivery is target-resolved and may
-  happen without a run. `reply.transport = "stream"` is host-owned and binds no
-  `ChannelReply`; message reply binds one. Every delivery section binds
-  `ChannelDelivery`.
+  happen without a run. Every declared `[channel.reply]` binds one
+  `ReplySink` (`ironclaw_extension_contracts::reply`); `transport` only sets
+  the cadence — `stream` sinks are reconciled at every point of the run's
+  reply document, `message` sinks at the terminal revision only. The
+  deployment's session-reply channel (named by the binary via
+  `with_session_reply_channel`) gets the host's projection sink, attached by
+  composition through the same `surfaces.reply` slot every package-bound
+  sink uses. Every delivery section binds `ChannelDelivery`.
 - **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
   segment-bounded `path_prefixes`, and request/response byte limits. Empty path
   lists preserve the legacy host+method policy. Path-placeholder credentials
@@ -379,7 +384,7 @@ pub struct ExtensionBindings {
 
 pub struct ChannelSurfaces {
     pub ingress: Option<Arc<dyn ChannelIngress>>,
-    pub reply: Option<Arc<dyn ChannelReply>>,
+    pub reply: Option<Arc<dyn ReplySink>>,
     pub delivery: Option<Arc<dyn ChannelDelivery>>,
 }
 ```
@@ -393,8 +398,10 @@ framework:
 - manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
 - vendor/webhook `[channel.ingress]` ↔ `channel.ingress` must be `Some`;
 - `authenticated_session` ingress ↔ `channel.ingress` must be `None`;
-- message `[channel.reply]` ↔ `channel.reply` must be `Some`, while stream
-  reply requires it absent;
+- every declared `[channel.reply]` (stream or message cadence) ↔
+  `channel.reply` must be `Some` — a vendor package binds its own
+  `ReplySink`; the deployment's session channel receives the host's
+  projection sink through the same slot before activation checks it;
 - `[channel.delivery]` ↔ `channel.delivery` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
 - internal publication requires an operational surface: a tool, channel, or hook. The
@@ -489,12 +496,15 @@ pub trait ChannelIngress: Send + Sync {
 }
 
 #[async_trait]
-pub trait ChannelReply: Send + Sync {
-    async fn send_reply(
+pub trait ReplySink: Send + Sync {
+    /// Converge the channel's presentation of one run's reply onto
+    /// `request.revision` (desired state, never an event): idempotent under
+    /// the sink's own checkpoint, truthful about ambiguity.
+    async fn reconcile(
         &self,
-        envelope: OutboundEnvelope,
+        request: ReplyReconcileRequest,
         egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError>;
+    ) -> Result<ReplySinkReport, ChannelError>;
 }
 
 #[async_trait]
@@ -515,7 +525,9 @@ pub trait ChannelDelivery: Send + Sync {
 
 A package implements only the halves its protocol needs. Slack and Telegram
 implement all three. Web-app implements delivery only: authenticated-session
-ingress and stream replies are host transports. Lifecycle wiring is manifest
+ingress is host-owned, and its stream reply is the host's projection sink,
+attached by composition to the same `surfaces.reply` slot every package-bound
+sink uses. Lifecycle wiring is manifest
 data too: `[channel.ingress.registration]` and `.deregistration` replace the
 old activation/cleanup hooks and run through restricted egress with host-side
 credential injection.
@@ -551,12 +563,17 @@ message; an absent required value still prevents activation. Verifying a
 syntactically valid but incorrect identity would require a separate mediated
 `getMe` step.
 
-For final replies and target-resolved delivery, the coordinator recognizes
-confined `/workspace/...` file references, reads them through the turn-scoped
-filesystem, and appends transient `OutboundPart::File` values. The package owns
-vendor rendering/upload only; callers cannot inject pre-materialized parts,
-and raw outbound bytes never enter attempts, events, projections, or
-transcripts.
+Final-reply attachments are materialized inside reply publication, at the
+terminal revision: `materialize_workspace_files` (`delivery_coordinator.rs`)
+is called only from the publication worker
+(`delivery_coordinator/publication/worker.rs`), which resolves the reply's
+confined `/workspace/...` references through the turn-scoped filesystem and
+hands the files to `ReplySink::reconcile` as transient
+`materialized_attachments`. The coordinator's `deliver`/`deliver_notice` path
+never materializes files and rejects caller-supplied `OutboundPart::File`
+values (`reject_caller_supplied_files`). The package owns vendor
+rendering/upload only, and raw outbound bytes never enter attempts, events,
+projections, or transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
 
@@ -626,7 +643,7 @@ one narrow call — or nothing:
 | --- | --- | --- |
 | Tool call | dispatcher (§5.2) | `ToolAdapter::invoke` |
 | Inbound message | ingress router (§5.3) | `ChannelIngress::receive` (or host session normalization) |
-| Run reply | delivery coordinator (§5.4) | `ChannelReply::send_reply` (or host projection stream) |
+| Run reply | reply publication over the delivery coordinator's attempt aggregate (§5.4; `docs/internal/design/2026-08-31-progressive-reply-publication.md`) | `ReplySink::reconcile` (the projection sink for the session channel) |
 | Target-resolved delivery | delivery coordinator (§5.4) | `ChannelDelivery::deliver` |
 | Auth | auth engine (§5.5) | recipe data only |
 
@@ -731,25 +748,32 @@ Sending a message decomposes into two halves, and the split is the design:
   method, threading syntax, DM provisioning, vendor error mapping. Different
   per channel → the adapter's **`deliver()`**.
 
-Every user-visible channel output is a semantic [`DeliveryIntent`], not an API
-call: `FinalReply`, `GatePrompt`, `AuthPrompt`, `FailureNotice`,
-`ConnectRequired`, `ConnectionStatus`, `Working`, `Cleanup` (e.g. delete the
-working message), `BackgroundRunNotice` (a background/routine run's gate,
+A run's own reply is not a `DeliveryIntent` at all: it is *published* — every
+revision of the reply document, at the cadence `ReplyTransport::reconciles_at`
+allows — through `ReplySink::reconcile` by the coordinator's reply-publication
+lane (the flow table above; the design doc). Revision, checkpoint, and
+reconcile semantics belong to that path, never to `deliver()`. Every other
+user-visible channel output is a semantic [`DeliveryIntent`], not an API
+call: `GatePrompt`, `AuthPrompt`, `FailureNotice`, `ConnectRequired`,
+`ConnectionStatus`, `CommandFeedback`, `Working`, `Cleanup` (e.g. delete the
+working message), `Reaction`, `BackgroundRunNotice` (a background/routine run's gate,
 auth, or failure notice, fanned out over its creator's notification-channel
 set), and `ModelDelivery` — an explicit, model-invoked delivery via the
 `builtin.outbound_deliver` tool (mid-run, up to a fixed per-run cap of 16
 calls — `MODEL_DELIVERY_PER_RUN_CAP` — further calls return a model-visible
 Failed result naming the cap,
 one catalog target per call). `DeliveryIntent` splits into **policy-class** intents
-(`FinalReply`, `GatePrompt`, `AuthPrompt`, `BackgroundRunNotice`,
-`ModelDelivery` — driven through `deliver()`, outbound-policy validated) and
-**notice-class** intents (`FailureNotice`, `ConnectRequired`,
-`ConnectionStatus`, `Working`, `Cleanup` — driven through `deliver_notice()`,
-source-routed to the originating conversation). Host-emitted intents never
+(`GatePrompt`, `AuthPrompt`, `BackgroundRunNotice`, `ModelDelivery` — driven
+through `deliver()`, outbound-policy validated) and **notice-class** intents
+(`FailureNotice`, `ConnectRequired`, `ConnectionStatus`, `CommandFeedback`,
+`Working`, `Cleanup`, `Reaction` — driven through `deliver_notice()`,
+source-routed to the originating conversation; re-derive the split from
+`DeliveryIntent::runs_outbound_policy`). Host-emitted intents never
 know what channel the user is on; the model does, for exactly the one target
 it named on its one call. One delivery, end to end:
 
-1. An intent is emitted (a host pipeline emits "`FinalReply` for run X"; the
+1. An intent is emitted (a host pipeline emits "`GatePrompt` for run X", or
+   "`BackgroundRunNotice` for background run Y"; the
    `builtin.outbound_deliver` tool handler emits `ModelDelivery` for the
    catalog target id the model chose).
 2. The coordinator resolves the target: reply where the message came from
@@ -784,7 +808,7 @@ handler is not a second pipeline — it is one more caller of the same
 host-emitted intent, so the tool call *is* the coordinator path, not a
 shortcut around it.
 
-The coordinator is **not folded into `ChannelReply`/`ChannelDelivery`** for the
+The coordinator is **not folded into `ReplySink`/`ChannelDelivery`** for the
 same reason the dispatcher is not folded into `ToolAdapter` and the ingress
 router is not folded into `ChannelIngress::receive`: folding it in would hand every channel its own copy
 of retry/persistence/crash semantics, give adapters store access (a buggy or

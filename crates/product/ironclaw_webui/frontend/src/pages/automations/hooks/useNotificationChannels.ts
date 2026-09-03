@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import {
@@ -9,6 +8,21 @@ import {
 
 const CHANNELS_QUERY_KEY = ["outbound-delivery", "notification-channels"];
 const TARGETS_QUERY_KEY = ["outbound-delivery", "targets"];
+
+type DeliveryTarget = {
+  target_id: string;
+  display_name?: string;
+  description?: string;
+  channel?: string;
+};
+
+type DeliveryTargetOption = { target?: DeliveryTarget };
+
+type NotificationChannel = {
+  target_id: string;
+  status: string;
+  option?: DeliveryTargetOption | null;
+};
 
 /**
  * Merge the live delivery-target catalog with the caller's stored
@@ -34,7 +48,10 @@ const TARGETS_QUERY_KEY = ["outbound-delivery", "targets"];
  *    genuinely absent. See `RebornNotificationChannel`'s doc comment in
  *    `crates/ironclaw_product/src/reborn_services/types.rs`.
  */
-export function mergeNotificationChannelRows(targets, channels) {
+export function mergeNotificationChannelRows(
+  targets: DeliveryTargetOption[],
+  channels: NotificationChannel[],
+) {
   const channelById = new Map(
     channels.map((channel) => [channel.target_id, channel]),
   );
@@ -80,7 +97,7 @@ export function useNotificationChannels() {
     queryFn: listOutboundDeliveryTargets,
   });
   const saveMutation = useMutation({
-    mutationFn: (targetIds) => setNotificationChannels({ targetIds }),
+    mutationFn: (targetIds: string[]) => setNotificationChannels({ targetIds }),
     onSuccess: (response) => {
       // Reconcile from the backend response, not the posted draft — the
       // response is authoritative on resolution status (tool-evidence UI
@@ -115,7 +132,8 @@ export function useNotificationChannels() {
     isSaving: saveMutation.isPending,
     error: channelsQuery.error || targetsQuery.error || null,
     saveError: saveMutation.error || null,
-    saveNotificationChannels: (targetIds) => saveMutation.mutateAsync(targetIds),
+    saveNotificationChannels: (targetIds: string[]) =>
+      saveMutation.mutateAsync(targetIds),
     refetch: () => {
       channelsQuery.refetch();
       targetsQuery.refetch();

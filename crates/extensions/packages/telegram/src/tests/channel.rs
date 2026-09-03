@@ -25,6 +25,7 @@ impl RestrictedEgress for FixedAttachmentEgress {
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
         if request.url.ends_with("/getFile") {
             return Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body:
                     br#"{"ok":true,"result":{"file_size":12,"file_path":"documents/fetched.bin"}}"#
@@ -32,6 +33,7 @@ impl RestrictedEgress for FixedAttachmentEgress {
             });
         }
         Ok(RestrictedEgressResponse {
+            retry_after: None,
             status: 200,
             body: b"hello world!".to_vec(),
         })

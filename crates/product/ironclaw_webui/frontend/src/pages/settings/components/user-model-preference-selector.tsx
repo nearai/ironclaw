@@ -1,6 +1,8 @@
-// @ts-nocheck
 import { Card } from "../../../design-system/card";
-import { SelectMenu } from "../../../design-system/select-menu";
+import {
+  SelectMenu,
+  type SelectMenuOption,
+} from "../../../design-system/select-menu";
 import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
 import { useUserModelPreference } from "../hooks/useUserModelPreference";
@@ -37,7 +39,7 @@ export function UserModelPreferenceSelector() {
     modelCapabilities(entry).length > 0
       ? <ModelCapabilityBadges entry={entry} />
       : undefined;
-  const optionWithCapabilities = (value, label, entry) => {
+  const optionWithCapabilities = (value, label, entry): SelectMenuOption => {
     const adornment = capabilityAdornment(entry);
     return {
       value,
@@ -46,7 +48,7 @@ export function UserModelPreferenceSelector() {
       ...(adornment ? { adornment } : {}),
     };
   };
-  const options = [
+  const options: SelectMenuOption[] = [
     optionWithCapabilities(
       "",
       t("llm.followWorkspaceDefault", { model: workspaceDefault }),

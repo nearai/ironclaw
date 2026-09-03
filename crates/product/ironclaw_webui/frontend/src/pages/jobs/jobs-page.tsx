@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useNavigate, useParams } from "react-router";
 import { Button } from "../../design-system/button";
 import { InlineNotice } from "../../design-system/inline-notice";

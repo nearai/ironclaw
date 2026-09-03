@@ -230,16 +230,21 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
-      RUSTC_BOOTSTRAP: "1"
       # The deep composed-runtime futures (turn -> capability -> skills script
       # mount, and the channel admission chain) overflow the 2 MiB default
       # test-thread stack on this lane's Linux codegen — first observed as a
       # SIGABRT in composition-core's
-      # `the_model_runs_a_skills_script_from_the_workdir_the_body_advertises`.
-      # 8 MiB matches the integration-lane headroom below; the deepest
-      # subtrees stay Box::pin'd at their seams — this is headroom, not a
-      # substitute.
-      RUST_MIN_STACK: "8388608"
+      # `the_model_runs_a_skills_script_from_the_workdir_the_body_advertises`;
+      # 8 MiB was the measured headroom, and the deepest subtrees stay
+      # Box::pin'd at their seams — this is headroom, not a substitute.
+      # Job-level on purpose, and the same 64 MiB in every hermetic lane:
+      # rust-cache hashes job-level RUST* variables into its cache key, so a
+      # per-lane value would split the shared `reborn-hermetic` lineage into
+      # keys no other lane can restore, and
+      # tests/reborn_coverage_lane_stack_headroom.rs reads the job-level value.
+      # A larger minimum than a lane strictly needs is a virtual reservation
+      # per thread, not committed memory.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
@@ -263,7 +268,20 @@ jobs:
           docker system prune -af || true
           df -h /
 
+      # Plain (pull-request, merge-queue, dispatch) runs build on the pinned
+      # stable toolchain with the same mold RUSTFLAGS as the root, QA and
+      # integration lanes, so all of them share one build-cache lineage and
+      # one artifact graph. `cargo check --workspace --all-targets` on 1.98.0
+      # passes without the nightly crate attributes below, which only the
+      # instrumented coverage build on main still compiles with.
       - name: Install Rust
+        if: needs.changes.outputs.run_coverage != 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
+
+      - name: Install Rust (coverage toolchain)
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly-2025-11-01
@@ -377,11 +395,25 @@ jobs:
           # shared key keeps the registry + shared-dep build in one small,
           # always-resident entry, so the registry is downloaded once, not ~60x.
           #
-          # `-cov` suffix: instrumented llvm-cov build is a different artifact than plain `reborn-tests-crates`; separate lineage avoids corrupting whichever restores second (same as `reborn-integration-cov` below).
-          shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-tests-crates-cov-llvm21' || 'reborn-tests-crates' }}
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # `-cov` suffix: instrumented llvm-cov build is a different artifact than a plain build; separate lineage avoids corrupting whichever restores second (same as `reborn-integration-cov` below).
+          #
+          # `reborn-hermetic` is the one plain lineage for every lane that
+          # builds inside scripts/ci/run-hermetic-test-process.sh (crate
+          # buckets, root partitions, integration batch, QA replay, the Rust
+          # Reborn E2E groups): same toolchain, same RUSTFLAGS, same stable
+          # hermetic Cargo home, so one entry serves all of them. Only the
+          # push run's root partitions and QA replay save it: a shared key is
+          # written once per lockfile by the first job to finish, and those
+          # jobs build the same complete integration-test closure, so whichever
+          # wins saves the same content. Everything else restores.
+          shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-tests-crates-cov-llvm21' || 'reborn-hermetic' }}
+          # Saved from pushes to main only; pull-request and merge-queue runs
+          # restore. A merge_group save lands on the queue entry's own
+          # gh-readonly-queue ref, which no pull request and no later queue
+          # entry can restore (GitHub scopes a run to its own ref, its base
+          # and the default branch), so those saves were write-only and their
+          # 6-7 GB per entry evicted main's caches from the 10 GB repo limit.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
@@ -414,6 +446,11 @@ jobs:
           CARGO_PACKAGES: ${{ toJSON(matrix.bucket.cargo_packages || fromJSON('[]')) }}
           EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
           COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
+          # Branch-coverage compatibility envelope for the instrumented push
+          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it).
+          # Step-scoped: the hermetic wrapper drops it either way, and a
+          # job-level RUST* key would enter the shared rust-cache key.
+          RUSTC_BOOTSTRAP: "1"
         run: |
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
           printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[] | "- " + .'
@@ -576,6 +613,7 @@ jobs:
       # frames of that pipeline overflow the 8 MiB default (measured need:
       # ~10 MiB for reborn_qa_smoke_scenarios_e2e). Same pathology and value
       # as the documented RUST_MIN_STACK in reborn_qa_recorded_behavior.rs.
+      # Job-level and identical across the hermetic lanes: see crate-tests.
       RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
@@ -606,14 +644,18 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # All 4 root partitions compile the *same* root-package build (they
-          # only run different test partitions), so one shared cache is strictly
-          # better than 4 per-partition copies (~1 GB each) — the cached target
-          # is fully valid for every partition, and it stops the 4 copies from
-          # crowding the shared LRU.
-          shared-key: reborn-tests-root
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # only run different test partitions), and that build is the same
+          # hermetic stable+mold build every other guarded lane makes, so they
+          # share the one `reborn-hermetic` lineage (see crate-tests above).
+          # These push-run jobs (and QA replay) are the lineage's producers.
+          shared-key: reborn-hermetic
+          # Saved from pushes to main only; pull-request and merge-queue runs
+          # restore. A merge_group save lands on the queue entry's own
+          # gh-readonly-queue ref, which no pull request and no later queue
+          # entry can restore (GitHub scopes a run to its own ref, its base
+          # and the default branch), so those saves were write-only and their
+          # 6-7 GB per entry evicted main's caches from the 10 GB repo limit.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Setup OVH sccache cache
         uses: ./.github/actions/setup-sccache-dist
@@ -659,8 +701,17 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: reborn-sandbox-docker-tests
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # `reborn-direct` is the plain lineage for lanes that run cargo
+          # directly (no hermetic wrapper, so the host Cargo home): this job
+          # saves it on push, the merge-queue mutation gate restores it.
+          shared-key: reborn-direct
+          # Saved from pushes to main only; pull-request and merge-queue runs
+          # restore. A merge_group save lands on the queue entry's own
+          # gh-readonly-queue ref, which no pull request and no later queue
+          # entry can restore (GitHub scopes a run to its own ref, its base
+          # and the default branch), so those saves were write-only and their
+          # 6-7 GB per entry evicted main's caches from the 10 GB repo limit.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Prepare sandbox worker and proxy images
         run: |
@@ -694,13 +745,13 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
-      RUSTC_BOOTSTRAP: "1"
       # llvm-cov instrumentation inflates stack frames; the deep channel
       # admission futures (webhook -> pairing gate -> workflow) overflow the
       # default 2 MiB test-thread stack under instrumentation only. The
-      # deepest subtrees are Box::pin'd at their seams; this is headroom for
-      # the instrumented lane, not a substitute.
-      RUST_MIN_STACK: "8388608"
+      # deepest subtrees are Box::pin'd at their seams; 8 MiB was the measured
+      # headroom for the instrumented lane, not a substitute.
+      # Job-level and identical across the hermetic lanes: see crate-tests.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:
@@ -726,7 +777,16 @@ jobs:
       - name: Pre-pull Postgres test image
         run: docker pull postgres:16-alpine
 
+      # Stable for plain runs, nightly only for the instrumented push run —
+      # the same split as crate-tests above, for the same shared lineage.
       - name: Install Rust
+        if: needs.changes.outputs.run_coverage != 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
+
+      - name: Install Rust (coverage toolchain)
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly-2025-11-01
@@ -785,10 +845,15 @@ jobs:
           # cache LRU. A dedicated key (never the plain `reborn-tests-*` keys
           # above) keeps an instrumented (llvm-cov) build from ever evicting
           # or being evicted by a plain one — the artifacts are incompatible.
-          shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-integration-cov-llvm21' || 'reborn-integration-tests' }}
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Plain runs share the `reborn-hermetic` lineage (see crate-tests).
+          shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-integration-cov-llvm21' || 'reborn-hermetic' }}
+          # Saved from pushes to main only; pull-request and merge-queue runs
+          # restore. A merge_group save lands on the queue entry's own
+          # gh-readonly-queue ref, which no pull request and no later queue
+          # entry can restore (GitHub scopes a run to its own ref, its base
+          # and the default branch), so those saves were write-only and their
+          # 6-7 GB per entry evicted main's caches from the 10 GB repo limit.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-llvm-cov
         if: needs.changes.outputs.run_coverage == 'true'
@@ -800,6 +865,11 @@ jobs:
           REBORN_COV_LANES_JSON: ${{ toJSON(matrix.batch.lanes) }}
           REBORN_COV_LANE_TEST_TIMEOUT: 45m
           REBORN_COV_COLLECT: ${{ needs.changes.outputs.run_coverage }}
+          # Branch-coverage compatibility envelope for the instrumented push
+          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it).
+          # Step-scoped: the hermetic wrapper drops it either way, and a
+          # job-level RUST* key would enter the shared rust-cache key.
+          RUSTC_BOOTSTRAP: "1"
         run: |
           if [[ "${REBORN_COV_COLLECT}" == "true" ]]; then
             # A shared instrumented cache can contain profraw from another
@@ -1001,18 +1071,34 @@ jobs:
         with:
           mold: true
 
+      # Restore the direct-cargo lineage the sandbox Docker job saves on push,
+      # so the baseline build of each named package starts from warm
+      # dependencies instead of a cold closure per invariant (the cold shape
+      # set a 40-minute merge-queue wall clock when the gate ran everything).
+      - name: Restore Rust cache
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: reborn-direct
+          save-if: false
+
       - name: Install cargo-mutants
         if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
         with:
           tool: cargo-mutants@27.1.0
 
+      # `--in-place` mutates this disposable checkout and builds in its own
+      # `target/`, which is what lets the restored cache count; cargo-mutants
+      # cannot run in place with parallel jobs, so the gate runs one at a
+      # time against a warm tree instead of three at a time against cold copies.
       - name: Run affected named critical invariants
         if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           python3 scripts/ci/critical_mutation_gate.py \
             --manifest tests/integration/critical-mutation-functions.toml \
-            --changed-files changed-files.txt
+            --changed-files changed-files.txt \
+            --in-place
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
@@ -1035,6 +1121,7 @@ jobs:
       # the boundary itself, so any layout shift decides it. The root-tests and
       # group-suite jobs already set this for the same pathology; this job was
       # the one that ran the documented binary without it.
+      # Job-level and identical across the hermetic lanes: see crate-tests.
       RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
@@ -1086,8 +1173,16 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-qa-recorded-fixtures
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Same hermetic stable+mold build as the root partitions: one
+          # shared lineage (see crate-tests), saved by this push-run job.
+          shared-key: reborn-hermetic
+          # Saved from pushes to main only; pull-request and merge-queue runs
+          # restore. A merge_group save lands on the queue entry's own
+          # gh-readonly-queue ref, which no pull request and no later queue
+          # entry can restore (GitHub scopes a run to its own ref, its base
+          # and the default branch), so those saves were write-only and their
+          # 6-7 GB per entry evicted main's caches from the 10 GB repo limit.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Setup OVH sccache cache
         uses: ./.github/actions/setup-sccache-dist

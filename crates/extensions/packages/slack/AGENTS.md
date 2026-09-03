@@ -9,25 +9,50 @@
   `wasm-src/`) live together, per the family's self-containment rule.
 - Read `src/lib.rs` first, then:
   - `channel.rs` — the `SlackChannelAdapter` implementations of
-    `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`.
-  - `payload.rs` — Slack Events API payload parsing/DTO handling.
+    `ChannelIngress` and `ChannelDelivery`.
+  - `reply_sink/` — the `ReplySink` half: the run's answer on Slack's
+    native Agent surface (`agents.sessions.setStatus`, `chat.startStream` /
+    `appendStream` / `stopStream`, task cards, read-back after ambiguity).
+    `mod.rs` is the reconciler; `plan.rs` the chunk planner; `checkpoint.rs`
+    the checkpoint version and shape; `agent_api.rs` the request/outcome
+    mapping.
+  - `reply_context.rs` — the reply context ingress stamps on every message
+    (recipient ids + session thread) and the sink reads at reply time.
+  - `api.rs` — the one inventory of Slack Web API endpoints the package
+    calls; `tests/agent_app_manifest_lockstep.rs` pins it against the
+    manifest's `[[channel.egress]]` and the documented app manifest.
+  - `payload.rs` — Slack Events API payload parsing/DTO handling, including
+    the Agent event family (`agent_session_stopped` → the declared `stop`
+    command; the rest are authenticated no-ops with their own reason).
   - `mrkdwn.rs` — Slack outbound mrkdwn rendering and message chunking.
   - `delivery.rs`, `attachment_transfer.rs`, `preference_targets.rs` — delivery DTOs, attachment transfer, reply-target codec.
   - Re-derive this list with `ls crates/extensions/packages/slack/src/`.
 - Read the contract before changing channel behavior:
   - `crates/contracts/ironclaw_extension_contracts/` — `ChannelIngress`,
-    `ChannelReply`, `ChannelDelivery`, and the
+    `ChannelDelivery`, `reply::ReplySink`, and the
     surface vocabulary (a channel package depends on contracts-tier crates
     only; never on `ironclaw_assistant`, the registry, or the extension host).
+  - `docs/internal/design/2026-08-31-progressive-reply-publication.md` §6
+    (the sink seam) and §9 (the Slack native Agent plan this package
+    implements). Verified Slack facts are quoted at the top of
+    `src/reply_sink/mod.rs`; re-fetch the docs.slack.dev pages before changing
+    a request shape.
 
 ## What This Crate Owns
 
 - Slack's three channel capability implementations for Reborn (issue #3857).
   `receive` completes payload-derived attachments and shared-conversation
-  context through restricted egress before returning; the output methods
-  render/send only. There is no `ProductAdapter` trait in this codebase.
-- Slack Events API payload parsing and outbound `chat.postMessage` rendering.
+  context through restricted egress before returning; `deliver` renders and
+  sends message-shaped notices; the reply sink reconciles Slack's native
+  Agent surface toward each reply revision behind its own checkpoint. There
+  is no `ProductAdapter` trait in this codebase.
+- Slack Events API payload parsing, outbound `chat.postMessage` rendering,
+  and the streamed reply (`chat.*Stream`, `agents.sessions.setStatus`).
 - Adapter-specific mapping between Slack shapes and the shared channel DTOs.
+- The no-fallback rule: a workspace whose app is not an Agent
+  (`feature_disabled`/`not_agent_app`) fails the reply with a `Permanent`
+  outcome naming the missing capability; never post a conventional message
+  in its place.
 
 ## Do Not Move In Here
 
@@ -37,7 +62,11 @@
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_slack_extension`
+- Fast local check: `cargo test -p ironclaw_slack_extension` — includes the
+  conformance suite (`tests/channel_conformance.rs`, stream cadence), the
+  reply sink against the in-crate fake Agent API
+  (`tests/reply_sink_agent_api.rs`, exact request bodies), and the
+  manifest/docs lockstep (`tests/agent_app_manifest_lockstep.rs`).
 - Run `cargo test -p ironclaw_assistant` when shared DTO assumptions change.
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 

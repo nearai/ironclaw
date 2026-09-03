@@ -205,7 +205,6 @@ registerPack("es", {
   "activity.separator": ", ",
   "tool.tabDetails": "Detalles",
   "tool.tabParameters": "Parámetros",
-  "tool.tabResult": "Resultado",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Rechazado",
   "tool.noDetail": "Sin detalles adicionales.",
@@ -1195,6 +1194,7 @@ registerPack("es", {
   "common.deleteChat": "Eliminar chat",
   "chat.deleteFailed": "No se pudo eliminar esta conversación.",
   "chat.cancelFailed": "No se pudo detener esta ejecución. Puede que siga en curso. Inténtalo de nuevo.",
+  "chat.runStopped": "Detenido",
   "chat.deleteBusy": "No se puede eliminar una conversación mientras se está ejecutando. Detenla primero y vuelve a intentarlo.",
   "command.placeholder": "Escriba un comando o busque...",
   "routine.searchPlaceholder": "Buscar nombre de rutina, activador o acción",
@@ -1404,7 +1404,6 @@ registerPack("es", {
   "common.file": "archivo",
   "chat.previewAttachment": "Previsualizar {name}",
   "chat.downloadAttachment": "Descargar {name}",
-  "tool.resultAlt": "Resultado de herramienta"
 });
 
 registerPack("es", {

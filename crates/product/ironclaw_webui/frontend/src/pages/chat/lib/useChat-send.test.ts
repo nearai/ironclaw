@@ -61,6 +61,7 @@ import {
 } from "../../../lib/channel-connection-events";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 import { moduleSourceForVm } from "../../../lib/vm-inline-source";
+import { appendRunStoppedMessage } from "./useChatEvents";
 
 const STATE_SLOT = Object.freeze({
   cooldownUntil: 0,
@@ -151,6 +152,9 @@ function runUseChatSource(context) {
   });
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
+  }
+  if (!("appendRunStoppedMessage" in context)) {
+    context.appendRunStoppedMessage = appendRunStoppedMessage;
   }
   if (!("failureMessageForRequestError" in context)) {
     context.failureMessageForRequestError = (error) =>
@@ -1962,6 +1966,8 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
   const stateUpdates = [];
   let cancelRequest = null;
   let resolveCancelRequest;
+  let stoppedRun = null;
+  let chatEventOptions = null;
 
   const context: vm.Context = {
     AbortController,
@@ -1980,6 +1986,12 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
       setCalls: stateUpdates,
     }),
     addPending,
+    appendRunStoppedMessage: (_setMessages, { runId, t: translate }) => {
+      stoppedRun = {
+        runId,
+        content: translate("chat.runStopped"),
+      };
+    },
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async (request) => {
@@ -2006,7 +2018,10 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
-    useChatEvents: () => () => {},
+    useChatEvents: (options) => {
+      chatEventOptions = options;
+      return () => {};
+    },
     useHistory: () => ({
       messages: [],
       hasMore: false,
@@ -2037,6 +2052,17 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
     { index: 3, value: false },
     { index: 2, value: null },
   ]);
+  assert.deepEqual(stoppedRun, {
+    runId: "run-1",
+    content: "chat.runStopped",
+  });
+  assert.equal(
+    chatEventOptions.runTrackingRef.current.locallyStoppedRuns.current.has(
+      "run-1",
+    ),
+    true,
+    "the caller must fence buffered live frames as soon as cancellation is acknowledged",
+  );
 });
 
 test("useChat.cancelRun preserves local state when the cancel request fails", async () => {

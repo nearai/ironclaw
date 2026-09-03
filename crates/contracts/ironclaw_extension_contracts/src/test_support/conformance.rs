@@ -6,16 +6,20 @@
 //! vendor-shape fixtures — no bespoke harness per channel.
 //!
 //! **The suite is keyed on the halves the channel actually implements**
-//! ([`ChannelSurfaces`]), not on one fused adapter. A channel declaring
-//! `[channel.reply] transport = "stream"` implements no reply half at all, so
-//! there is nothing to drive there — and that absence is asserted rather than
-//! stubbed. The suite exercises exactly the halves present and asserts the
-//! absent ones stay absent.
+//! ([`ChannelSurfaces`]), not on one fused adapter. The reply slot holds one
+//! [`ReplySink`]; the fixture's declared `reply_transport` picks the cadence
+//! it is driven at — a `message` sink sees the terminal materialization (and
+//! an idempotent repeat), a `stream` sink sees the opening revision, an
+//! idempotent repeat, the terminal revision, and an idempotent terminal
+//! repeat — with the checkpoint round-tripped between calls. The suite
+//! exercises exactly the halves present.
 //!
 //! Covered: inbound outcomes are bounded and well-formed (and malformed input
-//! never panics), reply/delivery honor the envelope with structured per-part
-//! reports, deferred post-ack fetch handles fail cleanly when unimplemented,
-//! and unsupported surfaces error rather than panic.
+//! never panics), delivery honors the envelope with structured per-part
+//! reports, reply sinks apply and re-apply revisions against the scripted
+//! vendor with bounded reports and never treat a checkpoint they cannot read
+//! as evidence of application, deferred post-ack fetch handles fail cleanly
+//! when unimplemented, and unsupported surfaces error rather than panic.
 //!
 //! Not covered, deliberately: vendor-side ingress registration. That stopped
 //! being adapter behavior when `activate`/`cleanup` became the
@@ -31,10 +35,18 @@ use crate::tool_adapter::{
 };
 use async_trait::async_trait;
 
+use crate::channel::ReplyTransport;
 use crate::channel_adapter::{
     ChannelSurfaces, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
     VerifiedInbound,
 };
+use crate::reply::{
+    ReplyAnswerText, ReplyAttachmentRef, ReplyAudience, ReplyContextBytes, ReplyDisplayText,
+    ReplyDocument, ReplyItemId, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision,
+    ReplySink, ReplySinkCheckpoint, ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
+};
+use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope};
 
 /// One host-verified inbound request fixture.
 pub struct ConformanceInbound {
@@ -48,6 +60,10 @@ pub struct ChannelAdapterConformance {
     /// The halves this channel implements. `None` entries are asserted absent
     /// rather than skipped: a missing half is a declaration, not a gap.
     pub surfaces: ChannelSurfaces,
+    /// The manifest's declared `[channel.reply] transport`, which decides the
+    /// cadence the bound sink is driven at. `None` when the channel declares
+    /// no reply section (and then `surfaces.reply` must be `None` too).
+    pub reply_transport: Option<ReplyTransport>,
     pub extension_id: String,
     pub installation_id: String,
     /// A vendor-valid inbound request that must normalize to `Messages`.
@@ -122,6 +138,7 @@ impl RestrictedEgress for ScriptedVendorServer {
 pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConformance) {
     let ChannelAdapterConformance {
         surfaces,
+        reply_transport,
         extension_id,
         installation_id,
         message_inbound,
@@ -262,12 +279,19 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         .iter()
         .filter(|part| matches!(part, OutboundPart::Text(_)))
         .count();
-    if let Some(reply) = surfaces.reply.as_ref() {
-        let report = reply
-            .send_reply(outbound_envelope.clone(), &server)
-            .await
-            .expect("conformance: send_reply must drive the scripted vendor server"); // safety: test-support conformance failure should fail the caller's test.
-        assert_delivery_report(&report.parts, text_parts, "send_reply");
+    match (surfaces.reply.as_ref(), reply_transport) {
+        (Some(sink), Some(transport)) => {
+            run_reply_sink_conformance(sink.as_ref(), transport, &outbound_envelope, &server).await;
+        }
+        (Some(_), None) => {
+            panic!(
+                "conformance: a reply sink is bound but the fixture declares no reply transport"
+            );
+        }
+        (None, Some(_)) => {
+            panic!("conformance: the fixture declares a reply transport but binds no reply sink");
+        }
+        (None, None) => {}
     }
     if let Some(delivery) = surfaces.delivery.as_ref() {
         let report = delivery
@@ -275,6 +299,231 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             .await
             .expect("conformance: deliver must drive the scripted vendor server"); // safety: test-support conformance failure should fail the caller's test.
         assert_delivery_report(&report.parts, text_parts, "deliver");
+    }
+}
+
+/// The reply-sink half of the contract: a synthetic reply drives the sink at
+/// its declared cadence — a `stream` sink through the opening revision, an
+/// idempotent repeat with the returned checkpoint, the terminal revision, and
+/// an idempotent terminal repeat; a `message` sink through the terminal
+/// revision and its repeat only. Against the fixture's happy-path vendor
+/// script each must be `Applied`, and every report must stay within the host
+/// bounds a real publisher re-validates. The terminal document lists the
+/// same attachments the request materializes, as the request contract
+/// requires. Finally the terminal revision is reconciled once more under a
+/// checkpoint of a foreign version: an unreadable checkpoint is never
+/// evidence the terminal was applied, so the sink must either drive the
+/// provider again or report a non-`Applied` outcome — never `Applied` off
+/// bytes it could not decode.
+async fn run_reply_sink_conformance(
+    sink: &dyn ReplySink,
+    transport: ReplyTransport,
+    outbound_envelope: &OutboundEnvelope,
+    server: &ScriptedVendorServer,
+) {
+    let answer_text = outbound_envelope
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            OutboundPart::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let answer_text = if answer_text.is_empty() {
+        "conformance reply".to_string()
+    } else {
+        answer_text
+    };
+    let run_id = TurnRunId::new();
+    let target = ReplyTarget {
+        scope: TurnScope::new_with_owner(
+            conformance_value(
+                TenantId::new("conformance-tenant"),
+                "conformance: tenant id",
+            ),
+            None,
+            None,
+            conformance_value(
+                ThreadId::new("conformance-thread"),
+                "conformance: thread id",
+            ),
+            Some(conformance_value(
+                UserId::new("conformance-user"),
+                "conformance: user id",
+            )),
+        ),
+        actor: TurnActor::new(conformance_value(
+            UserId::new("conformance-user"),
+            "conformance: user id",
+        )),
+        run_id,
+        conversation: Some(outbound_envelope.target.conversation.clone()),
+        thread_anchor: outbound_envelope
+            .target
+            .thread_anchor
+            .as_deref()
+            .map(|anchor| conformance_value(ReplyThreadAnchor::new(anchor), "conformance: anchor")),
+        audience: ReplyAudience::Private,
+    };
+    let reply_context = outbound_envelope.reply_context.clone().map(|bytes| {
+        conformance_value(ReplyContextBytes::new(bytes), "conformance: reply context")
+    });
+    let materialized_attachments: Vec<ironclaw_host_api::attachment::WorkspaceFile> =
+        outbound_envelope
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                OutboundPart::File(file) => Some(file.clone()),
+                _ => None,
+            })
+            .collect();
+
+    let mut document = ReplyDocument::default();
+    document.note_phase(crate::reply::ReplyPhase::Working);
+    document.append_answer(&answer_text);
+    let first = ReplyRevision {
+        revision: 1,
+        document: document.clone(),
+    };
+
+    let reconcile = |revision: ReplyRevision,
+                     point: ReplyReconcilePoint,
+                     checkpoint: Option<ReplySinkCheckpoint>| {
+        ReplyReconcileRequest {
+            revision,
+            point,
+            target: target.clone(),
+            reply_context: reply_context.clone(),
+            checkpoint,
+            extension_generation: 1,
+            materialized_attachments: if matches!(point, ReplyReconcilePoint::Terminal) {
+                materialized_attachments.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    };
+
+    let mut checkpoint = None;
+    if transport.reconciles_at(ReplyReconcilePoint::Opened) {
+        let report = sink
+            .reconcile(
+                reconcile(first.clone(), ReplyReconcilePoint::Opened, None),
+                server,
+            )
+            .await
+            .expect("conformance: the opening revision must reconcile against the scripted vendor"); // safety: test-support conformance failure should fail the caller's test.
+        assert_stream_report_applied(&report.outcome, "opening revision");
+        checkpoint = report.checkpoint;
+
+        let repeat = sink
+            .reconcile(
+                reconcile(first, ReplyReconcilePoint::Progress, checkpoint.clone()),
+                server,
+            )
+            .await
+            .expect("conformance: repeating a revision must not error"); // safety: test-support conformance failure should fail the caller's test.
+        assert_stream_report_applied(&repeat.outcome, "repeated revision");
+        checkpoint = repeat.checkpoint.or(checkpoint);
+    }
+
+    // The document and the request must agree: `materialized_attachments`
+    // is non-empty only when the document lists attachments, so derive the
+    // listed refs from the very files the terminal request carries.
+    let attachment_refs: Vec<ReplyAttachmentRef> = materialized_attachments
+        .iter()
+        .enumerate()
+        .map(|(index, file)| ReplyAttachmentRef {
+            id: conformance_value(
+                ReplyItemId::new(format!("attachment-{index}")),
+                "conformance: attachment id",
+            ),
+            filename: conformance_value(
+                ReplyDisplayText::new(
+                    file.filename
+                        .clone()
+                        .unwrap_or_else(|| file.path.to_string()),
+                ),
+                "conformance: attachment filename",
+            ),
+            mime_type: conformance_value(
+                ReplyDisplayText::new(file.mime_type.clone()),
+                "conformance: attachment mime type",
+            ),
+            size_bytes: file.size_bytes(),
+        })
+        .collect();
+    document.finalize_answer(
+        conformance_value(ReplyAnswerText::new(&answer_text), "conformance: answer"),
+        attachment_refs,
+    );
+    document.set_status(
+        conformance_value(ReplyDisplayText::new("done"), "conformance: status"),
+        None,
+    );
+    document.complete();
+    let terminal = ReplyRevision {
+        revision: 2,
+        document,
+    };
+    let report = sink
+        .reconcile(
+            reconcile(
+                terminal.clone(),
+                ReplyReconcilePoint::Terminal,
+                checkpoint.clone(),
+            ),
+            server,
+        )
+        .await
+        .expect("conformance: the terminal revision must reconcile"); // safety: test-support conformance failure should fail the caller's test.
+    assert_stream_report_applied(&report.outcome, "terminal revision");
+    // `None` keeps the previous checkpoint (the report contract): a sink
+    // with nothing new to persist must still see its carried state on the
+    // repeated terminal reconcile.
+    let checkpoint = report.checkpoint.or(checkpoint);
+
+    let repeat = sink
+        .reconcile(
+            reconcile(terminal.clone(), ReplyReconcilePoint::Terminal, checkpoint),
+            server,
+        )
+        .await
+        .expect("conformance: repeating the terminal revision must not error"); // safety: test-support conformance failure should fail the caller's test.
+    assert_stream_report_applied(&repeat.outcome, "repeated terminal revision");
+
+    // ── A checkpoint the sink cannot read is never evidence of application.
+    // A foreign checkpoint version is treated as absent: the sink either
+    // drives the provider again (calls recorded) or reports a non-`Applied`
+    // outcome. What it must never do is short-circuit to `Applied` off bytes
+    // it could not decode.
+    let foreign = conformance_value(
+        ReplySinkCheckpoint::new(u32::MAX, "foreign"),
+        "conformance: foreign checkpoint",
+    );
+    let calls_before = server.requests().len();
+    let report = sink
+        .reconcile(
+            reconcile(terminal, ReplyReconcilePoint::Terminal, Some(foreign)),
+            server,
+        )
+        .await
+        .expect("conformance: reconciling under an unreadable checkpoint must not error"); // safety: test-support conformance failure should fail the caller's test.
+    let calls_during = server.requests().len().saturating_sub(calls_before);
+    if report.outcome.is_applied() && calls_during == 0 {
+        panic!(
+            "conformance: the sink reported Applied off a checkpoint it cannot read without \
+             driving the provider"
+        );
+    }
+}
+
+fn assert_stream_report_applied(outcome: &ReplySinkOutcome, step: &str) {
+    if !outcome.is_applied() {
+        panic!(
+            "conformance: against the fixture's happy-path vendor script the {step} must be Applied, got {outcome:?}"
+        );
     }
 }
 

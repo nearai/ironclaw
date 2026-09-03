@@ -20,6 +20,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 hex = "0.4"
 ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_event_projections = { path = "../../events/ironclaw_event_projections" }
+ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 serde = { version = "1", features = ["derive"] }

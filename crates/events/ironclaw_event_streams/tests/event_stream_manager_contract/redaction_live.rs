@@ -11,6 +11,7 @@ async fn fresh_subscription_hydrates_latest_live_state_then_tails_new_updates() 
         id: "text:active-run".to_string(),
         run_id,
         body: body.to_string(),
+        narration: false,
     };
     let thinking_item = ThreadLiveProjectionItem::Thinking {
         id: "thinking:active-run".to_string(),

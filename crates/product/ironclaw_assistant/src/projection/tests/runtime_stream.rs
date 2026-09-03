@@ -301,9 +301,10 @@ async fn initial_runtime_items_order_live_text_before_terminal_status() {
             cursor: cursor(11),
             thread_id,
             items: vec![ironclaw_event_streams::ThreadLiveProjectionItem::Text {
-                id: format!("text:{live_run}"),
+                id: format!("text:{live_run}:1"),
                 run_id: live_run,
                 body: "live text before terminal".to_string(),
+                narration: false,
             }],
         }),
     ));
@@ -409,9 +410,10 @@ async fn terminal_turn_events_wait_for_next_live_text_projection() {
             state: completed_state,
         }),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let live_scope = scope.clone();
     let live_user_id = user_id.clone();
@@ -1084,9 +1086,10 @@ async fn product_event_stream_drains_live_reasoning_projection_from_update_sourc
         event_log,
         ReplyTargetBindingRef::new("webui-thinking-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -1157,9 +1160,10 @@ async fn live_projection_is_keyed_to_run_actor_not_publisher_owner() {
         ReplyTargetBindingRef::new("webui-actor-reply").unwrap(),
     );
     // Publisher built with the runtime owner — the fallback owner.
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(runtime_owner.clone()),
+        runtime_owner.clone(),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -1395,9 +1399,10 @@ async fn product_event_stream_drains_work_summary_projection_from_driver_note() 
         event_log,
         ReplyTargetBindingRef::new("webui-work-summary-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -1463,9 +1468,10 @@ async fn product_event_stream_live_cursor_does_not_poison_runtime_failure_resume
         event_log,
         ReplyTargetBindingRef::new("webui-live-failure-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let actor = TurnActor::new(user_id.clone());
     let scope = TurnScope::new(
@@ -1704,6 +1710,7 @@ async fn product_event_stream_delivers_prior_completed_activity_before_pending_a
 }
 
 #[tokio::test]
+// arch-exempt: large_file, existing test re-pointed at the projection-driven live path (decomposition follow-up), plan #8007
 async fn product_event_stream_maps_subscription_terminated_work_summary_to_context() {
     let tenant_id = TenantId::new("webui-terminated-summary-tenant").unwrap();
     let user_id = UserId::new("webui-terminated-summary-user").unwrap();
@@ -1714,9 +1721,10 @@ async fn product_event_stream_maps_subscription_terminated_work_summary_to_conte
         event_log,
         ReplyTargetBindingRef::new("webui-terminated-summary-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -1779,9 +1787,10 @@ async fn product_event_stream_skips_empty_work_summary_body() {
         event_log,
         ReplyTargetBindingRef::new("webui-empty-summary-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),

@@ -1,8 +1,24 @@
-// @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchTools, updateToolPermission } from "../lib/settings-api";
 import { throwIfApiFailed } from "../lib/api-result";
+
+type SettingsTool = {
+  name: string;
+  state: string;
+  description?: string;
+  default_state?: string;
+  locked?: boolean;
+  effective_source?: string;
+};
+
+type ToolsSnapshot = { tools: SettingsTool[]; diagnostics?: unknown[] };
+type ToolMutationVariables = {
+  name: string;
+  state: string;
+  requestId: number;
+};
+type ToolMutationResult = { tool?: Partial<SettingsTool> };
 
 export function useTools() {
   const queryClient = useQueryClient();
@@ -13,11 +29,15 @@ export function useTools() {
 
   const tools = query.data?.tools || [];
 
-  const [savedTools, setSavedTools] = React.useState({});
-  const [pendingPermissions, setPendingPermissions] = React.useState({});
+  const [savedTools, setSavedTools] = React.useState<Record<string, boolean>>({});
+  const [pendingPermissions, setPendingPermissions] = React.useState<
+    Record<string, { requestId: number; state: string }>
+  >({});
   const nextRequestId = React.useRef(0);
-  const pendingRequestIds = React.useRef({});
-  const savedTimeouts = React.useRef({});
+  const pendingRequestIds = React.useRef<Record<string, number>>({});
+  const savedTimeouts = React.useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
 
   React.useEffect(() => {
     return () => {
@@ -28,7 +48,7 @@ export function useTools() {
     };
   }, []);
 
-  const clearPendingPermission = React.useCallback((name, requestId) => {
+  const clearPendingPermission = React.useCallback((name: string, requestId: number) => {
     if (pendingRequestIds.current[name] !== requestId) return;
     delete pendingRequestIds.current[name];
     setPendingPermissions((prev) => {
@@ -39,7 +59,11 @@ export function useTools() {
     });
   }, []);
 
-  const mutation = useMutation({
+  const mutation = useMutation<
+    ToolMutationResult,
+    Error,
+    ToolMutationVariables
+  >({
     // Treat `success: false` as a failed save so the UI never shows a fake
     // "Saved" indicator for a permission change that didn't persist.
     mutationFn: async ({ name, state }) =>
@@ -49,7 +73,7 @@ export function useTools() {
         queryClient.invalidateQueries({ queryKey: ["settings-tools"] });
         return;
       }
-      queryClient.setQueryData(["settings-tools"], (old) => {
+      queryClient.setQueryData<ToolsSnapshot>(["settings-tools"], (old) => {
         if (!old) return old;
         const updatedTool = data?.tool;
         return {
@@ -76,7 +100,7 @@ export function useTools() {
   });
 
   const setPermission = React.useCallback(
-    (name, state) => {
+    (name: string, state: string) => {
       const requestId = nextRequestId.current + 1;
       nextRequestId.current = requestId;
       pendingRequestIds.current[name] = requestId;

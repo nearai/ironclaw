@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::device_link::DeviceLinkAdapter;
 use ironclaw_extension_contracts::linked_session::{
@@ -32,9 +31,13 @@ use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifes
 #[derive(Clone, Default)]
 pub struct ExtensionBindings {
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    /// The channel halves this extension implements. An all-`None` value can
-    /// be valid when every declared axis is host-owned (authenticated-session
-    /// ingress plus stream reply); [`check_binding`] proves agreement per axis.
+    /// The channel halves this extension implements. Only
+    /// `authenticated_session` ingress is host-owned, so an all-`None` value
+    /// is valid only for a channel that declares nothing but that ingress;
+    /// every declared `[channel.reply]` still needs a `ReplySink` (composition
+    /// attaches the host projection sink to the session channel's binding
+    /// before [`check_binding`] runs). [`check_binding`] proves agreement per
+    /// axis.
     pub channel: ChannelSurfaces,
     /// The device-link adapter, bound iff the resolved contract declares an
     /// `[auth.<vendor>] method = "device_link"` surface.
@@ -198,15 +201,17 @@ pub fn check_binding(
 /// two in agreement (`.claude/rules/architecture.md` §3); with it, a
 /// declaration and its code cannot disagree past activation.
 ///
-/// Two axes are required to be **absent**, and that is the point rather than
-/// an exception:
+/// The reply slot is one `ReplySink` whatever the declared transport —
+/// `stream` and `message` differ only in the cadence the host reconciles at,
+/// never in what the package binds. A declared `[channel.reply]` with no
+/// bound sink fails activation (there is no host-owned stand-in for a reply:
+/// the transitional bridge deliberately implements no reply half), and a
+/// bound sink with no reply section is refused as undeclared behavior.
 ///
-/// - `[channel.reply] transport = "stream"` means the host publishes to the
-///   durable projection pipeline and the adapter is never called. Binding a
-///   reply half there would be dead code that reads as live.
-/// - `authenticated_session` ingress is normalized at the host session door,
-///   whose actor authority an adapter may never mint. There is no vendor
-///   payload to parse, so there is nothing for an ingress half to do.
+/// One axis is required to be **absent**, and that is the point rather than
+/// an exception: `authenticated_session` ingress is normalized at the host
+/// session door, whose actor authority an adapter may never mint. There is
+/// no vendor payload to parse, so there is nothing for an ingress half to do.
 pub(crate) fn check_channel_halves(
     channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
     bound: &ChannelSurfaces,
@@ -224,8 +229,8 @@ pub(crate) fn check_channel_halves(
         "reply",
         expected.reply,
         bound.reply.is_some(),
-        "a message reply transport needs an adapter to render and send it",
-        "a stream reply (or no reply section) is published by the host",
+        "a declared [channel.reply] needs a bound reply sink to answer a run",
+        "no [channel.reply] section declares this channel able to answer a run",
     )?;
 
     check_half(
@@ -241,6 +246,8 @@ pub(crate) fn check_channel_halves(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChannelHalfExpectations {
     pub ingress: bool,
+    /// Whether the manifest declares `[channel.reply]` (any transport), hence
+    /// whether activation requires a bound reply sink.
     pub reply: bool,
     pub delivery: bool,
 }
@@ -255,7 +262,7 @@ pub(crate) fn channel_half_expectations(
             .ingress
             .as_ref()
             .is_some_and(|ingress| !ingress.verification.is_authenticated_session()),
-        reply: channel.reply_transport() == Some(ReplyTransport::Message),
+        reply: channel.supports_reply(),
         delivery: channel.supports_delivery(),
     }
 }
@@ -496,12 +503,11 @@ mod tests {
         }
     }
 
-    /// The two absences that are the point rather than an exception: a
-    /// `stream` reply is published by the host, and `authenticated_session`
-    /// ingress is normalized at the host session door. Binding a half for
-    /// either is dead code that reads as live, so it fails closed.
+    /// A declared reply — `stream` here — needs a bound reply sink and fails
+    /// activation without one; `authenticated_session` ingress is still
+    /// normalized at the host session door and refuses an ingress half.
     #[test]
-    fn a_stream_reply_and_session_ingress_must_bind_no_half() {
+    fn a_declared_reply_binds_a_sink_and_session_ingress_binds_no_half() {
         let resolved = session_channel_manifest();
 
         check_binding(
@@ -509,41 +515,75 @@ mod tests {
             &ExtensionBindings {
                 tools: None,
                 device_link: None,
+                channel: FakeChannelAdapter::reply_and_delivery(),
+            },
+        )
+        .expect("a reply sink plus delivery is the exact binding for a stream/session channel");
+
+        let error = check_binding(
+            &resolved,
+            &ExtensionBindings {
+                tools: None,
+                device_link: None,
                 channel: FakeChannelAdapter::delivery_only(),
             },
         )
-        .expect("delivery alone is the exact binding for a stream/session channel");
+        .expect_err("a declared reply with no bound sink must fail activation");
+        assert!(
+            matches!(error, BindError::ChannelHalfMismatch { axis: "reply", .. }),
+            "expected a reply mismatch, got {error:?}"
+        );
 
-        for (axis, bindings) in [
-            (
-                "ingress",
-                FakeChannelAdapter::delivery_only()
+        let error = check_binding(
+            &resolved,
+            &ExtensionBindings {
+                tools: None,
+                device_link: None,
+                channel: FakeChannelAdapter::reply_and_delivery()
                     .with_ingress(Arc::new(FakeChannelAdapter::default())),
+            },
+        )
+        .expect_err("binding an ingress half for session ingress must fail activation");
+        assert!(
+            matches!(
+                error,
+                BindError::ChannelHalfMismatch {
+                    axis: "ingress",
+                    ..
+                }
             ),
-            (
-                "reply",
-                FakeChannelAdapter::delivery_only()
-                    .with_reply(Arc::new(FakeChannelAdapter::default())),
-            ),
-        ] {
-            let error = check_binding(
-                &resolved,
-                &ExtensionBindings {
-                    tools: None,
-                    device_link: None,
-                    channel: bindings,
-                },
-            )
-            .expect_err("binding a half the manifest publishes host-side must fail activation");
-            assert!(
-                matches!(error, BindError::ChannelHalfMismatch { axis: reported, .. } if reported == axis),
-                "expected a {axis} mismatch, got {error:?}"
-            );
+            "expected an ingress mismatch, got {error:?}"
+        );
+    }
+
+    /// The transport never changes what binds: a `message` channel binds the
+    /// same reply sink a `stream` channel does.
+    #[test]
+    fn message_and_stream_replies_bind_the_same_sink_kind() {
+        let message = channel_only_manifest();
+        assert_eq!(
+            message
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.reply_transport()),
+            Some(ironclaw_extension_contracts::channel::ReplyTransport::Message)
+        );
+        check_binding(&message, &bound(false, true)).expect("a message channel binds a sink");
+
+        let mut stream = channel_only_manifest();
+        if let Some(reply) = stream
+            .channel
+            .as_mut()
+            .and_then(|channel| channel.reply.as_mut())
+        {
+            reply.transport = ironclaw_extension_contracts::channel::ReplyTransport::Stream;
         }
+        check_binding(&stream, &bound(false, true))
+            .expect("the same bindings satisfy the same channel declared as stream");
     }
 
     #[test]
-    fn a_fully_host_owned_session_stream_channel_needs_no_adapter_half() {
+    fn a_session_stream_channel_without_delivery_binds_only_its_sink() {
         let mut resolved = session_channel_manifest();
         resolved.channel.as_mut().expect("session channel").delivery = None;
 
@@ -552,10 +592,25 @@ mod tests {
             &ExtensionBindings {
                 tools: None,
                 device_link: None,
+                channel: ChannelSurfaces::default()
+                    .with_reply(Arc::new(FakeChannelAdapter::default())),
+            },
+        )
+        .expect("host-owned ingress plus a bound reply sink is a complete operational channel");
+
+        let error = check_binding(
+            &resolved,
+            &ExtensionBindings {
+                tools: None,
+                device_link: None,
                 channel: ChannelSurfaces::default(),
             },
         )
-        .expect("host-owned ingress and reply are a complete operational channel");
+        .expect_err("a declared reply with nothing bound cannot answer a run");
+        assert!(matches!(
+            error,
+            BindError::ChannelHalfMismatch { axis: "reply", .. }
+        ));
     }
 
     #[test]

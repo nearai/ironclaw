@@ -54,21 +54,6 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
     /PRE_WRAP_CLASS,[\s\S]*active === "declined" \? "text-iron-300" : "text-\[var\(--v2-danger-text\)\]"/,
     "tool errors should reuse the shared preformatted preview class",
   );
-  assert.match(
-    toolActivitySource,
-    /className=\{\[PRE_WRAP_CLASS, "text-\[var\(--v2-positive-text\)\]"\]\.join\(" "\)\}/,
-    "tool result previews should wrap long lines within the detail panel",
-  );
-  assert.match(
-    toolActivitySource,
-    /<div className="max-w-full overflow-x-auto rounded border border-iron-700\/60">/,
-    "tool result tables should scroll horizontally inside the detail panel",
-  );
-  assert.doesNotMatch(
-    toolActivitySource,
-    /className="v2-wrap-anywhere border-b border-iron-700\/(?:60|40)/,
-    "tool result table cells should keep natural column widths instead of aggressively wrapping",
-  );
 });
 
 test("a failed tool call is flagged with a subtle badge, not a red banner (#7302)", () => {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
@@ -229,7 +228,9 @@ export function ModelSelectionPolicyEditor({ providerState }) {
         returnedCatalog.modelEntries
       );
       queryClient.setQueryData(["user-model-catalog"], catalog);
-      queryClient.setQueryData(["llm-providers"], (snapshot) =>
+      queryClient.setQueryData<Record<string, unknown>>(
+        ["llm-providers"],
+        (snapshot) =>
         snapshot
           ? {
               ...snapshot,
@@ -244,7 +245,7 @@ export function ModelSelectionPolicyEditor({ providerState }) {
                 ),
               },
             }
-          : snapshot
+          : snapshot,
       );
       setAllowedModels(catalog.models ?? request.allowed_models);
       setWorkspaceDefault(catalog.workspace_default ?? request.workspace_default);

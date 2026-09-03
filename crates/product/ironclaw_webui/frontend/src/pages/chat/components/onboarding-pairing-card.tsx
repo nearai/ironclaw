@@ -15,7 +15,11 @@ function getOnboardingDeviceLinkPanel() {
   return LazyOnboardingDeviceLinkPanel;
 }
 
-export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
+export function OnboardingPairingCard({
+  onboarding,
+  onConfigure = undefined,
+  onCancel,
+}) {
   const t = useT();
   const [error, setError] = React.useState("");
   const [isConfiguring, setIsConfiguring] = React.useState(false);

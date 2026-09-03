@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { ProjectActivityColumn } from "./project-activity-column";
 import { ProjectFilesystemPanel } from "./project-filesystem-panel";
 
@@ -7,7 +6,9 @@ import { ProjectFilesystemPanel } from "./project-filesystem-panel";
 // recent one is enough to list the project's scoped filesystem.
 function representativeThreadId(threads) {
   const sorted = [...(threads || [])].sort(
-    (a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at)
+    (a, b) =>
+      new Date(b.updated_at || b.created_at).getTime() -
+      new Date(a.updated_at || a.created_at).getTime(),
   );
   return sorted[0]?.id || null;
 }

@@ -120,6 +120,9 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                 reply_transport,
                 requires_enrollment,
                 declared_egress_hosts,
+                // Deployment-bound: the halves are linked into the binary
+                // and cannot change without a process restart.
+                generation: 0,
             });
         }
         let snapshot = self.watch.current();
@@ -165,6 +168,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             reply_transport,
             requires_enrollment,
             declared_egress_hosts,
+            generation: snapshot.generation().0,
         })
     }
 }

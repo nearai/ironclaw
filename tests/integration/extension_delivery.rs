@@ -9,7 +9,8 @@
 //! against a scripted model → the canonical `RunDeliveryObserver` and
 //! per-channel event handler → the factory-built `DeliveryCoordinator` (sole
 //! delivery-state writer, §5.4) →
-//! the real adapter's `deliver` → the policy-enforced channel egress with
+//! the real adapter's `ReplySink::reconcile` (a run's reply) or `deliver`
+//! (a target-resolved send) → the policy-enforced channel egress with
 //! host-side credential injection → the recorded network wire. Assertions
 //! land at two seams: the wire recorder (vendor call + injected credential)
 //! and the coordinator's outbound-state store (terminal `Delivered` attempt —
@@ -17,9 +18,12 @@
 //!
 //! Pinned here, matrixed over libSQL and PostgreSQL (a provisioning failure
 //! is a test failure, never a skip):
-//! - The Slack proof: a signed threaded channel event yields a `FinalReply` coordinated
-//!   through the REAL coordinator to `chat.postMessage`, with the §11
-//!   bridged bot token injected host-side (OUT-1/2/5, ING-11 read half).
+//! - The Slack proof: a signed threaded channel event yields a run whose
+//!   reply is PUBLISHED through the REAL coordinator's reply-publication lane
+//!   onto Slack's native Agent stream (`chat.startStream` →
+//!   `chat.appendStream` → one `chat.stopStream`, never a plain
+//!   `chat.postMessage`), with the §11 bridged bot token injected host-side
+//!   (OUT-1/2/5, ING-11 read half).
 //!   The Slack lane still owns its ingress registration in production
 //!   (setup-store secrets + per-revision sink fed to the assembly as a
 //!   lane override), so this test keeps its lane-shaped manual
@@ -84,9 +88,12 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedModelStreamSink,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
@@ -107,7 +114,11 @@ use sha2::Sha256;
 use tower::ServiceExt;
 
 const SLACK_ROUTE: &str = "/webhooks/extensions/slack/events";
-const SLACK_INSTALLATION: &str = "slack-itest-install";
+// The active snapshot reports the bundled deployment channel's installation
+// as the extension id itself; the ingress route must register under the SAME
+// installation identity or the reply-context rows it stores (ING-11) are
+// invisible to reply publication's read-back.
+const SLACK_INSTALLATION: &str = "slack";
 const SLACK_SIGNING_SECRET: &[u8] = b"itest-slack-signing-secret";
 const SLACK_BOT_TOKEN: &str = "xoxb-itest-bot-token";
 const SLACK_REPLY: &str = "Here is the coordinated Slack reply.";
@@ -219,6 +230,120 @@ impl HostManagedModelGateway for StaticReplyGateway {
         _request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         Ok(HostManagedModelResponse::assistant_reply(self.0))
+    }
+}
+
+/// A two-phase gateway shaped like a real streaming provider on a tool run:
+/// the first model call streams pre-tool commentary through the progress
+/// sink and returns a real `builtin.extension_search` call; the second call
+/// streams and returns the final answer. The run's progressive reply
+/// therefore holds BOTH phases while the durable transcript finalizes only
+/// the second — the divergence the exactly-once journey pins.
+struct PreambleToolReplyGateway {
+    preamble: &'static str,
+    answer: &'static str,
+    calls: Mutex<usize>,
+    /// When set, the first call waits for a permit after streaming its
+    /// preamble and before registering the tool call, so a journey can let
+    /// the preamble reach the wire first.
+    hold_before_tool: Option<tokio::sync::Semaphore>,
+}
+
+impl PreambleToolReplyGateway {
+    fn new(preamble: &'static str, answer: &'static str) -> Self {
+        Self {
+            preamble,
+            answer,
+            calls: Mutex::new(0),
+            hold_before_tool: None,
+        }
+    }
+
+    fn holding_before_tool(preamble: &'static str, answer: &'static str) -> Self {
+        Self {
+            hold_before_tool: Some(tokio::sync::Semaphore::new(0)),
+            ..Self::new(preamble, answer)
+        }
+    }
+
+    fn release_tool(&self) {
+        if let Some(hold) = &self.hold_before_tool {
+            hold.add_permits(1);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HostManagedModelGateway for PreambleToolReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "PreambleToolReplyGateway requires the capability-aware streaming path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let index = {
+            let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+            let index = *calls;
+            *calls += 1;
+            index
+        };
+        if index > 0 {
+            sink.safe_text_update(self.answer.to_string()).await;
+            return Ok(HostManagedModelResponse::assistant_reply(self.answer));
+        }
+        sink.safe_text_update(self.preamble.to_string()).await;
+        if let Some(hold) = &self.hold_before_tool {
+            let permit = hold
+                .acquire()
+                .await
+                .expect("preamble gateway semaphore remains open");
+            permit.forget();
+        }
+        let search = CapabilityId::new("builtin.extension_search").expect("capability id");
+        let tool = capabilities
+            .tool_definitions()
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {error}"),
+                )
+            })?
+            .into_iter()
+            .find(|definition| definition.capability_id == search)
+            .expect("builtin.extension_search is on the vendor run's surface");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "itest-provider".to_string(),
+                provider_model_id: "itest-model".to_string(),
+                turn_id: Some("itest-turn-1".to_string()),
+                id: "itest-call-1".to_string(),
+                name: tool.name,
+                arguments: serde_json::json!({ "query": "web" }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call failed: {error}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
     }
 }
 
@@ -356,6 +481,7 @@ fn delivery_run_services(
     let coordinator = services
         .delivery_coordinator()
         .expect("composition built the delivery coordinator");
+    harness.start_reply_publication_for_test(services);
     let fallback_notice_scope = TurnScope::new_with_owner(
         harness.binding.tenant_id.clone(),
         harness.binding.agent_id.clone(),
@@ -376,7 +502,6 @@ fn delivery_run_services(
         route_store,
         communication_preferences,
         notification_inbox: None,
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         delivery_targets,
         coordinator,
         extension_id: extension_id.to_string(),
@@ -414,6 +539,7 @@ async fn preresolve_vendor_turn_scope(
         ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer::new(
             Arc::new(
                 |_| ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                    retry_after: None,
                     status: 503,
                     body: Vec::new(),
                 },
@@ -691,22 +817,26 @@ async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
     );
 }
 
-fn assert_slack_thread_delivery_evidence(messages: &[serde_json::Value]) {
+/// The journey-evidence citation for `slack_channel_inbound_real_turn_reply`
+/// (`tests/e2e/journey_cases.py`): the run's reply reaches the exact source
+/// channel thread exactly once. On the Agent surface the destination-opening
+/// mutation is `chat.startStream`, so the exact-destination/exact-count claim
+/// is asserted over every captured stream open.
+fn assert_slack_thread_delivery_evidence(stream_opens: &[serde_json::Value]) {
     let expected_conversation_id = "C777";
     let expected_thread_anchor = Some("1710000200.000050");
     let expected_count = 1;
-    let matching = messages.iter().filter(|message| {
-        message["channel"] == expected_conversation_id
-            && message.get("thread_ts").and_then(serde_json::Value::as_str)
-                == expected_thread_anchor
-            && message["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(SLACK_REPLY))
+    let matching = stream_opens.iter().filter(|body| {
+        body["channel"] == expected_conversation_id
+            && body.get("thread_ts").and_then(serde_json::Value::as_str) == expected_thread_anchor
+            && body["recipient_user_id"] == "U777"
+            && body["recipient_team_id"] == "T-A"
     });
     assert_eq!(
         matching.count(),
         expected_count,
-        "the coordinated Slack reply must reach the exact channel thread once: {messages:?}"
+        "the published Slack reply must open its Agent stream in the exact \
+         channel thread once: {stream_opens:?}"
     );
 }
 
@@ -977,6 +1107,7 @@ fn start_channel_host_assembly(
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -1285,11 +1416,12 @@ async fn telegram_identity_configuration_errors_are_retryable_on_the_real_router
 }
 
 /// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed threaded
-/// channel
-/// event on the production mount becomes a real turn whose `FinalReply` is
-/// coordinated through the REAL factory-built `DeliveryCoordinator` to
-/// `chat.postMessage`, with the §11 bridged bot token injected host-side —
-/// asserted on the wire recorder AND in the coordinator's outbound store.
+/// channel event on the production mount becomes a real turn whose reply is
+/// PUBLISHED through the REAL factory-built `DeliveryCoordinator` onto Slack's
+/// native Agent stream (`chat.startStream` → `chat.appendStream` → one
+/// `chat.stopStream`, never a plain `chat.postMessage`), with the §11 bridged
+/// bot token injected host-side — asserted on the wire recorder AND in the
+/// coordinator's outbound store.
 #[rstest]
 #[case::libsql(StorageMode::LibSql)]
 #[case::postgres(StorageMode::Postgres)]
@@ -1449,41 +1581,482 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     );
     assert_delivered_attempt(services, &vendor_scope).await;
 
-    // Wire seam: the coordinated FinalReply reached chat.postMessage with the
-    // bridged bot token injected host-side (the adapter never saw it).
-    // #6520 delivery is event-driven, so poll the wire with the file's
-    // bounded deadline instead of a single post-idle snapshot.
+    // Wire seam: the run's reply is PUBLISHED through Slack's native Agent
+    // stream (`[channel.reply] transport = "stream"`) — opened in the source
+    // channel with the stored reply context's recipient/thread, carrying the
+    // reply text, closed once — with the bridged bot token injected
+    // host-side (the adapter never saw it). Publication is event-driven, so
+    // poll the wire with the file's bounded deadline.
     let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let (requests, post_message_position) = loop {
+    let (requests, start_position) = loop {
         let requests = inbound.captured_network_requests_for_test();
-        if let Some(position) = requests.iter().position(|request| {
-            request.url.ends_with("/api/chat.postMessage")
-                && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)
-        }) {
+        if let Some(position) = requests
+            .iter()
+            .position(|request| request.url.ends_with("/api/chat.startStream"))
+        {
             break (requests, position);
         }
         assert!(
             tokio::time::Instant::now() < wire_deadline,
-            "chat.postMessage with the reply must land on the wire; got {:?}",
+            "chat.startStream must open the reply on the wire; got {:?}",
             requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    let post_message = &requests[post_message_position];
-    let posted_messages = requests
+    let start_stream = &requests[start_position];
+    let stream_opens: Vec<serde_json::Value> = requests
         .iter()
-        .filter(|request| request.url.ends_with("/api/chat.postMessage"))
+        .filter(|request| request.url.ends_with("/api/chat.startStream"))
         .map(|request| {
-            serde_json::from_slice(&request.body).expect("Slack chat.postMessage body is JSON")
+            serde_json::from_slice(&request.body).expect("chat.startStream body is JSON")
         })
-        .collect::<Vec<_>>();
-    assert_slack_thread_delivery_evidence(&posted_messages);
-    let authorization = post_message
+        .collect();
+    assert_slack_thread_delivery_evidence(&stream_opens);
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let stops = inbound
+            .captured_network_requests_for_test()
+            .into_iter()
+            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
+            .count();
+        if stops == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "the stream is closed exactly once at the terminal revision"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Settled wire (the stream closed): the exactly-once and no-empty-open
+    // pins hold on the COMPLETE request log, not the first-start snapshot.
+    let settled = inbound.captured_network_requests_for_test();
+    let settled_opens: Vec<serde_json::Value> = settled
+        .iter()
+        .filter(|request| request.url.ends_with("/api/chat.startStream"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("chat.startStream body is JSON")
+        })
+        .collect();
+    assert_eq!(
+        settled_opens.len(),
+        1,
+        "one logical reply opens exactly one Agent stream: {settled_opens:?}"
+    );
+    for open in &settled_opens {
+        let chunks = open["chunks"].as_array();
+        assert!(
+            chunks.is_some_and(|chunks| !chunks.is_empty()),
+            "chat.startStream never opens an empty Agent container; a stream \
+             opens only when renderable content exists and carries it: {open}"
+        );
+    }
+    let streamed: String = settled
+        .iter()
+        .filter(|request| {
+            request.url.ends_with("/api/chat.startStream")
+                || request.url.ends_with("/api/chat.appendStream")
+                || request.url.ends_with("/api/chat.stopStream")
+        })
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        streamed.contains(SLACK_REPLY),
+        "the reply text is streamed through the agent surface: {streamed}"
+    );
+    assert!(
+        !settled
+            .iter()
+            .any(|request| request.url.ends_with("/api/chat.postMessage")
+                && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)),
+        "the answer is never also posted as a plain message"
+    );
+    let authorization = start_stream
         .headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
         .expect("host-side credential injection must add the authorization header");
     assert_eq!(authorization.1, format!("Bearer {SLACK_BOT_TOKEN}"));
+}
+
+/// A Slack tool run whose model streams pre-tool commentary, executes a real
+/// capability, and then streams the answer — the multi-phase shape the live
+/// stack produces. The commentary is a model call the loop went on past:
+/// the projection resets the answer when the tool call proves it was
+/// narration, and a one-line narration never had a paragraph boundary, so
+/// it reaches Slack nowhere. This pins that and the exactly-once invariant
+/// end to end: one Agent stream carrying a task card and the answer; one
+/// close; the narration in no request; and the terminal answer NEVER also
+/// posted as a conventional `chat.postMessage`.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
+    slack_tool_run_with_preamble(
+        "Let me search the catalog first.",
+        "The catalog holds a web-access extension.",
+        PreambleExpectation::HeldAndNeverSent,
+    )
+    .await;
+}
+
+/// Narration that had a complete paragraph before the tool call was already
+/// streamed when the tool call proved it narration. Through the production
+/// wiring (reducer → publication worker → sink → captured network), the
+/// sink closes that stream, retracts its message with `chat.delete`, and
+/// opens a fresh stream for the task card and the answer — exactly one
+/// stream is left standing and it carries no narration.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_tool_run_retracts_a_streamed_preamble_paragraph() {
+    slack_tool_run_with_preamble(
+        "Let me search the catalog first.\n\nStarting with the web results.",
+        "The catalog holds a web-access extension.",
+        PreambleExpectation::StreamedThenRetracted,
+    )
+    .await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreambleExpectation {
+    /// A one-line narration: held by the paragraph rule, never sent.
+    HeldAndNeverSent,
+    /// A narration paragraph: streamed, then retracted with `chat.delete`.
+    StreamedThenRetracted,
+}
+
+async fn slack_tool_run_with_preamble(
+    preamble: &'static str,
+    answer: &'static str,
+    expectation: PreambleExpectation,
+) {
+    // The narration's first sentence: the text that must reach no surviving
+    // request in either shape.
+    let narration = preamble.split('\n').next().expect("a preamble line");
+    let gateway = Arc::new(match expectation {
+        PreambleExpectation::HeldAndNeverSent => PreambleToolReplyGateway::new(preamble, answer),
+        PreambleExpectation::StreamedThenRetracted => {
+            PreambleToolReplyGateway::holding_before_tool(preamble, answer)
+        }
+    });
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds");
+    activate_slack(&group).await;
+    let services = reborn_services(&group);
+    assert!(
+        services.register_static_channel_egress_credentials_for_test(vec![(
+            "slack".to_string(),
+            "slack_bot_token".to_string(),
+            ironclaw_secrets::SecretMaterial::from(SLACK_BOT_TOKEN.to_string()),
+        )]),
+        "the composed runtime must expose channel-egress credential bridging"
+    );
+
+    let inbound = group
+        .thread("conv-slack-preamble-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    let delivery_services = delivery_run_services(&inbound, services, "slack");
+    let observer = Arc::new(RecordingForwardObserver::new(Arc::new(
+        RunDeliveryObserver::new(delivery_services),
+    )));
+    let ingress = VendorIngress::register(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+        "slack",
+        SLACK_INSTALLATION,
+        SLACK_SIGNING_SECRET,
+        VerifiedEvidenceMint::RequestSignature {
+            signature_header: "X-Slack-Signature".to_string(),
+            timestamp_header: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        &inbound,
+        Arc::clone(&observer),
+    );
+
+    let body = json!({
+        "type": "event_callback",
+        "event_id": "Ev-preamble-slack-1",
+        "team_id": "T-A",
+        "event": {
+            "type": "app_mention",
+            "user": "U777",
+            "channel": "C777",
+            "text": "<@UBOT> search the catalog and tell me",
+            "thread_ts": "1710000200.000060",
+            "ts": "1710000300.000200"
+        }
+    })
+    .to_string();
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".to_string(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        SLACK_INSTALLATION,
+    );
+    let slack_binding_service = inbound
+        .binding_service_for_test()
+        .expect("group binding service");
+    let (vendor_scope, _vendor_actor_user_id) = preresolve_vendor_turn_scope(
+        &slack_binding_service,
+        &ironclaw_slack_extension::SlackChannelAdapter,
+        "slack",
+        SLACK_INSTALLATION,
+        &[],
+        &evidence,
+        &body,
+        true,
+    )
+    .await;
+    let scope_gateway: Arc<dyn HostManagedModelGateway> =
+        Arc::clone(&gateway) as Arc<dyn HostManagedModelGateway>;
+    inbound.register_scope_gateway_for_test(vendor_scope.clone(), scope_gateway);
+
+    // The ingress drain below waits for the whole turn, so the tool call is
+    // released from a task that watches the wire: once the narration
+    // paragraph has streamed, the gateway may register the tool call that
+    // proves it narration.
+    let releaser = (expectation == PreambleExpectation::StreamedThenRetracted).then(|| {
+        let recorder = inbound.capability_recorder.clone();
+        let gateway = Arc::clone(&gateway);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let streamed = loop {
+                let streamed = recorder
+                    .network_http_requests()
+                    .iter()
+                    .filter(|request| {
+                        request.url.ends_with("/api/chat.startStream")
+                            || request.url.ends_with("/api/chat.appendStream")
+                    })
+                    .any(|request| String::from_utf8_lossy(&request.body).contains(narration));
+                if streamed || tokio::time::Instant::now() >= deadline {
+                    break streamed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            gateway.release_tool();
+            streamed
+        })
+    });
+    let timestamp = now_unix().to_string();
+    let signature = slack_signature(&timestamp, &body);
+    let status = ingress
+        .post(
+            SLACK_ROUTE,
+            &body,
+            vec![
+                ("X-Slack-Signature", signature),
+                ("X-Slack-Request-Timestamp", timestamp),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the signed event must be accepted");
+    ingress.drain().await;
+    assert_eq!(
+        observer.accepted_count(),
+        1,
+        "the signed tool-run mention must be admitted (errors: {:?})",
+        observer.errors()
+    );
+    let run_id = observer
+        .accepted_run_id()
+        .expect("the accepted Slack event must identify its submitted run");
+    if let Some(releaser) = releaser {
+        assert!(
+            releaser
+                .await
+                .expect("the releaser task runs to completion"),
+            "the narration paragraph must stream before the tool call is released"
+        );
+    }
+    let coordinator = inbound.turn_coordinator_for_test();
+    wait_for_run_status_in_scope(&coordinator, &vendor_scope, run_id, TurnStatus::Completed).await;
+    let durable_reply = inbound
+        .thread_service_for_test()
+        .expect("group thread service")
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: thread_scope_for_turn(&vendor_scope),
+            thread_id: vendor_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+        })
+        .await
+        .expect("Slack thread history remains readable")
+        .expect("Slack reply is durable");
+    assert!(
+        durable_reply
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains(answer)),
+        "the durable transcript finalizes the answer: {durable_reply:?}"
+    );
+
+    // The wire settles exactly once: one stream carrying commentary, a task
+    // card, and the answer; one close; zero conventional posts of either.
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = inbound.captured_network_requests_for_test();
+        let stops = requests
+            .iter()
+            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
+            .count();
+        if stops >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "the stream must close at the terminal revision; got {:?}",
+            requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The first close is not settlement: wait until the publication's attempt
+    // is terminal (`Delivered`, nothing left `Sending`) before sampling the
+    // wire, so a late duplicate worker opening a second stream would already
+    // be on the wire when the exactly-once pins below read it.
+    assert_delivered_attempt(services, &vendor_scope).await;
+    let requests = inbound.captured_network_requests_for_test();
+    let bodies = |suffix: &str| -> Vec<(serde_json::Value, String)> {
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with(suffix))
+            .map(|request| {
+                let raw = String::from_utf8_lossy(&request.body).into_owned();
+                (
+                    serde_json::from_str(&raw).expect("slack request body is JSON"),
+                    raw,
+                )
+            })
+            .collect()
+    };
+    let stream_opens = bodies("/api/chat.startStream");
+    let appends = bodies("/api/chat.appendStream");
+    let stops = bodies("/api/chat.stopStream");
+    let deletes = bodies("/api/chat.delete");
+    let conventional = bodies("/api/chat.postMessage");
+    assert!(
+        conventional
+            .iter()
+            .all(|(_, raw)| !raw.contains(answer) && !raw.contains(narration)),
+        "the answer is never also posted as a conventional message: {conventional:?}"
+    );
+    match expectation {
+        PreambleExpectation::HeldAndNeverSent => {
+            assert_eq!(
+                stream_opens.len(),
+                1,
+                "one logical reply opens exactly one Agent stream: {stream_opens:?}"
+            );
+            assert_eq!(
+                stops.len(),
+                1,
+                "the stream is closed exactly once: {stops:?}"
+            );
+            assert!(deletes.is_empty(), "nothing streamed, nothing to retract");
+            let streamed = stream_opens
+                .iter()
+                .chain(&appends)
+                .chain(&stops)
+                .map(|(_, raw)| raw.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                streamed.contains(answer) && streamed.contains("task_update"),
+                "the stream carries the task card and the answer: {streamed}"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !String::from_utf8_lossy(&request.body).contains(narration)),
+                "held narration reaches slack nowhere"
+            );
+        }
+        PreambleExpectation::StreamedThenRetracted => {
+            // The recorded Slack answers every `chat.startStream` with the
+            // same `ts`, so streams are told apart by wire order, which is
+            // unambiguous: close the stale stream, retract it, open the
+            // fresh one, close that at the terminal.
+            let ordered = requests
+                .iter()
+                .enumerate()
+                .map(|(index, request)| {
+                    (
+                        index,
+                        request.url.rsplit('/').next().unwrap_or_default(),
+                        String::from_utf8_lossy(&request.body).into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let index_of = |method: &str, nth: usize| {
+                ordered
+                    .iter()
+                    .filter(|(_, seen, _)| *seen == method)
+                    .nth(nth)
+                    .map(|(index, _, _)| *index)
+                    .unwrap_or_else(|| panic!("expected {method} request #{nth}: {ordered:?}"))
+            };
+            assert_eq!(
+                stream_opens.len(),
+                2,
+                "the stale stream and the fresh one: {ordered:?}"
+            );
+            assert_eq!(
+                stops.len(),
+                2,
+                "one close for retraction, one at the terminal: {ordered:?}"
+            );
+            assert_eq!(deletes.len(), 1, "exactly one retraction: {ordered:?}");
+            let stale_open = index_of("chat.startStream", 0);
+            let stale_close = index_of("chat.stopStream", 0);
+            let retraction = index_of("chat.delete", 0);
+            let fresh_open = index_of("chat.startStream", 1);
+            let terminal_close = index_of("chat.stopStream", 1);
+            assert!(
+                stale_open < stale_close
+                    && stale_close < retraction
+                    && retraction < fresh_open
+                    && fresh_open < terminal_close,
+                "close the stale stream, retract it, open the fresh one, close it at the terminal: {ordered:?}"
+            );
+            assert_eq!(
+                stops[0].0["session_status"].as_str(),
+                Some("processing"),
+                "retracting keeps the session processing"
+            );
+            assert_eq!(
+                deletes[0].0["ts"], stops[0].0["ts"],
+                "the retracted message is the stream closed first"
+            );
+            for (index, _, body) in &ordered {
+                if body.contains(narration) {
+                    assert!(
+                        *index < retraction,
+                        "narration only ever reached the retracted stream: {ordered:?}"
+                    );
+                }
+                if body.contains(answer) {
+                    // The fresh stream may open already carrying the answer
+                    // when the reset and the terminal coalesce into one
+                    // reconcile; either way it is never on the stale stream.
+                    assert!(
+                        *index >= fresh_open,
+                        "the answer streams only on the fresh stream: {ordered:?}"
+                    );
+                }
+            }
+            assert!(
+                ordered[fresh_open].2.contains("task_update")
+                    && !ordered[fresh_open].2.contains(narration),
+                "the fresh stream opens with the task card and no narration: {}",
+                ordered[fresh_open].2
+            );
+        }
+    }
 }
 
 /// DEL-10: the bundled Telegram package — one manifest plus the adapter
@@ -1536,6 +2109,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -2478,6 +3052,7 @@ async fn telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_d
                 .expect("group thread service"),
             turn_coordinator: lifecycle.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: lifecycle.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: lifecycle.binding.tenant_id.clone(),
                 agent_id: lifecycle
@@ -2720,6 +3295,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),

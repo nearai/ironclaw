@@ -1,4 +1,3 @@
-// @ts-nocheck
 export function normalizeLogEntry(entry) {
   return {
     id: String(entry?.id ?? `${entry?.timestamp}:${entry?.target}:${entry?.message}`),
@@ -15,8 +14,17 @@ export function normalizeLogEntry(entry) {
   };
 }
 
+type LogScopeInput = {
+  threadId?: string | null;
+  runId?: string | null;
+  turnId?: string | null;
+  toolCallId?: string | null;
+  toolName?: string | null;
+  source?: string | null;
+};
+
 export function buildScopedLogsPath(
-  { threadId, runId, turnId, toolCallId, toolName, source } = {},
+  { threadId, runId, turnId, toolCallId, toolName, source }: LogScopeInput = {},
 ) {
   const params = new URLSearchParams();
   if (threadId) params.set("thread_id", threadId);

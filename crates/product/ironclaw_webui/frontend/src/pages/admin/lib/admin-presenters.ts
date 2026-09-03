@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { interpolateParams } from "../../../lib/i18n-format";
 
 function tx(t, key, params = {}, fallback = key) {

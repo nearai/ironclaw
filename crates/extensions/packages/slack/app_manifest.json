@@ -1,0 +1,100 @@
+{
+  "display_information": {
+    "name": "IronClaw"
+  },
+  "features": {
+    "agent_view": {
+      "agent_description": "IronClaw is your autonomous assistant: ask it to research, draft, run tools, and act across your connected apps. Replies stream into the thread as they are produced, with each step shown as it happens.",
+      "suggested_prompts": [
+        {
+          "title": "Summarize a thread",
+          "message": "Summarize the discussion in the thread I share next and list the open questions."
+        },
+        {
+          "title": "Draft a reply",
+          "message": "Draft a concise reply to the last message I received, in my voice."
+        },
+        {
+          "title": "Check my integrations",
+          "message": "Which integrations are connected for me right now, and what can you do with them?"
+        }
+      ]
+    },
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "IronClaw",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/ironclaw",
+        "url": "https://example.com/webhooks/extensions/slack/events",
+        "description": "Run IronClaw commands",
+        "usage_hint": "status | model use <name> | new | stop",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://example.com/api/reborn/product-auth/oauth/slack/callback"
+    ],
+    "scopes": {
+      "user": [
+        "search:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "channels:read",
+        "groups:read",
+        "im:read",
+        "mpim:read",
+        "users:read",
+        "chat:write",
+        "reactions:read",
+        "reactions:write",
+        "im:write"
+      ],
+      "bot": [
+        "assistant:write",
+        "channels:history",
+        "app_mentions:read",
+        "chat:write",
+        "im:history",
+        "im:write",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "mpim:history",
+        "reactions:write",
+        "commands"
+      ]
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://example.com/webhooks/extensions/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "app_home_opened",
+        "app_context_changed",
+        "agent_session_stopped",
+        "agent_session_title_changed"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "is_mcp_enabled": false
+  }
+}

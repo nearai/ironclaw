@@ -245,7 +245,15 @@ fn map_intent_port_error(error: OutboundError) -> FirstPartyCapabilityError {
         | OutboundError::CasConflict
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
-        | OutboundError::DeliveryNotFound => {
+        | OutboundError::DeliveryNotFound
+        // Reply publication guards never fire on the attachment-intent port.
+        | OutboundError::StaleReplyPublisher { .. }
+        | OutboundError::ReplyPublicationSettled
+        | OutboundError::ReplyPublicationRevisionRegressed { .. }
+        | OutboundError::ReplyPublicationNotFound
+        | OutboundError::ReplyPublicationTargetMismatch
+        | OutboundError::ReplyPublicationNotTerminal
+        | OutboundError::ReplyPublicationLeaseRequired => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
     }

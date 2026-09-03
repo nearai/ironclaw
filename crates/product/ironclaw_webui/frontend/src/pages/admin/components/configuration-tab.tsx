@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";

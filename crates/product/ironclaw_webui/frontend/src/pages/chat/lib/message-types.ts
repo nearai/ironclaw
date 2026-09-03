@@ -5,6 +5,10 @@ export const CHAT_MESSAGE_ROLES = Object.freeze({
   ERROR: "error",
   TOOL_ACTIVITY: "tool_activity",
   THINKING: "thinking",
+  /** Live assistant text the loop went on past (a tool call followed it):
+   *  progress narration that belongs with the run's activity, never the
+   *  answer. Set from the projection's `narration` flag. */
+  NARRATION: "narration",
   IMAGE: "image",
 } as const);
 
@@ -15,6 +19,8 @@ export const RUN_FAILURE_ID_PREFIX = "err-";
 export const REQUEST_FAILURE_ID_PREFIX = "err-request-";
 export const STREAM_FAILURE_ID_PREFIX = "err-stream-";
 export const UNKNOWN_RUN_FAILURE_ID = `${RUN_FAILURE_ID_PREFIX}unknown`;
+// Client-only "Stopped" notice for a run the user cancelled: `stopped-<runId>`.
+export const RUN_STOPPED_ID_PREFIX = "stopped-";
 
 export type ChatAttachment = {
   id?: string;
@@ -151,4 +157,8 @@ export function isRunFailureMessageId(value: unknown): boolean {
     !id.startsWith(REQUEST_FAILURE_ID_PREFIX) &&
     !id.startsWith(STREAM_FAILURE_ID_PREFIX)
   );
+}
+
+export function isRunStoppedMessageId(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith(RUN_STOPPED_ID_PREFIX);
 }
