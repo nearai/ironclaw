@@ -1070,7 +1070,23 @@ impl LlmProvider for SmartRoutingProvider {
     }
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.primary.model_metadata().await
+        // `complete`/`complete_streaming` may serve a simple no-tool call from
+        // `self.cheap` instead of `self.primary` (see the routing above), so
+        // the advertised context window must be safe for whichever model
+        // actually answers. `id` stays the primary's so it keeps matching
+        // `active_model_name()`, which the gateway checks against before
+        // trusting this metadata. This stays I/O-free: both inner
+        // `model_metadata()` calls are static by contract.
+        let primary = self.primary.model_metadata().await?;
+        let cheap = self.cheap.model_metadata().await?;
+        let context_length = match (primary.context_length, cheap.context_length) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            _ => None,
+        };
+        Ok(ModelMetadata {
+            id: primary.id,
+            context_length,
+        })
     }
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
@@ -1747,6 +1763,9 @@ mod tests {
         completion_requests: Mutex<Vec<CompletionRequest>>,
         tool_requests: Mutex<Vec<ToolCompletionRequest>>,
         sinks: Mutex<Vec<Arc<dyn CompletionStreamSink>>>,
+        // Test-only: lets tests control the advertised context window instead
+        // of always exercising the trait default (`None`).
+        context_length: Option<u32>,
     }
 
     impl StreamingStubLlm {
@@ -1764,11 +1783,17 @@ mod tests {
                 completion_requests: Mutex::new(Vec::new()),
                 tool_requests: Mutex::new(Vec::new()),
                 sinks: Mutex::new(Vec::new()),
+                context_length: None,
             }
         }
 
         fn failing_after_deltas(mut self) -> Self {
             self.fail_after_deltas = true;
+            self
+        }
+
+        fn with_context_length(mut self, context_length: Option<u32>) -> Self {
+            self.context_length = context_length;
             self
         }
 
@@ -1797,6 +1822,13 @@ mod tests {
 
         fn cost_per_token(&self) -> (Decimal, Decimal) {
             (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+            Ok(ModelMetadata {
+                id: self.model_name.to_string(),
+                context_length: self.context_length,
+            })
         }
 
         async fn complete(
@@ -1949,6 +1981,40 @@ mod tests {
         assert_eq!(resp.content, "cheap-response");
         assert_eq!(cheap.calls(), 1);
         assert_eq!(primary.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn model_metadata_advertises_the_smaller_window_of_primary_and_cheap() {
+        let primary = Arc::new(
+            StreamingStubLlm::new("primary", "primary-response", vec![])
+                .with_context_length(Some(2_000_000)),
+        );
+        let cheap = Arc::new(
+            StreamingStubLlm::new("cheap", "cheap-response", vec![])
+                .with_context_length(Some(1_000_000)),
+        );
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+
+        let metadata = router.model_metadata().await.unwrap();
+
+        assert_eq!(metadata.id, "primary");
+        assert_eq!(metadata.context_length, Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn model_metadata_is_unknown_when_either_route_is_unknown() {
+        let primary = Arc::new(
+            StreamingStubLlm::new("primary", "primary-response", vec![])
+                .with_context_length(Some(2_000_000)),
+        );
+        let cheap = Arc::new(
+            StreamingStubLlm::new("cheap", "cheap-response", vec![]).with_context_length(None),
+        );
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+
+        let metadata = router.model_metadata().await.unwrap();
+
+        assert_eq!(metadata.context_length, None);
     }
 
     #[tokio::test]
