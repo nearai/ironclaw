@@ -328,6 +328,20 @@ impl RunOutcomeProcessCommitObserver {
         // reconciliation still closes every open gate for the run, exactly as
         // before. A run is suspended on at most one gate at a time, so one
         // read of the snapshot is enough to answer every requested kind.
+        //
+        // ponytail: this sample is taken before the listing loop, and
+        // `NotificationInboxStorePort::resolve` takes no precondition, so a
+        // gate that becomes current *after* the sample can still be resolved
+        // by the scan below — the child stays suspended with no actionable
+        // item. Ceiling: a duplicate or delayed `Resumed` delivery racing a
+        // re-suspension, which the journal store permits (its observer
+        // documents that entries "may be delivered twice"). The window is
+        // pre-existing — it predates per-kind preservation, which only
+        // widened an auth-only sample — and re-reading here would trade it
+        // for a reopen that can resurrect a legitimately decided gate.
+        // Upgrade path: a conditional (compare-and-set on lifecycle state)
+        // resolve on the inbox port, which fixes every caller at once
+        // instead of teaching this one to re-check.
         let current_gate = match self.process_journal_source.as_deref() {
             Some(source) => Self::current_gate(source, snapshot).await?,
             None => None,
