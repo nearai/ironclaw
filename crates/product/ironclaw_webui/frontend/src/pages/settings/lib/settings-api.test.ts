@@ -175,7 +175,7 @@ test("updateSetting returns the backend-confirmed value", async () => {
   }
 });
 
-test("fetchTraceCredits rejects missing required collection fields", async () => {
+test("fetchTraceCredits normalizes omitted serde-default collections", async () => {
   const responses = [
     {
       enrolled: true,
@@ -192,6 +192,49 @@ test("fetchTraceCredits rejects missing required collection fields", async () =>
       submissions_accepted: 1,
       manual_review_hold_count: 0,
       recent_explanations: [],
+    },
+  ];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+
+  try {
+    assert.deepEqual((await fetchTraceCredits()).recent_explanations, []);
+    assert.deepEqual((await fetchTraceCredits()).holds, []);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("fetchTraceCredits rejects present non-array collection fields", async () => {
+  const responses = [
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      recent_explanations: "not-an-array",
+      holds: [],
+    },
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      recent_explanations: [],
+      holds: "not-an-array",
     },
   ];
   vi.stubGlobal("sessionStorage", {
