@@ -61,6 +61,22 @@ impl DefaultCompactionStrategy {
             .unwrap_or(self.prompt_context_budget)
     }
 
+    /// The tail this run can afford to protect: the configured tail, capped
+    /// at half the visible transcript so compaction can always drop the
+    /// other half.
+    ///
+    /// `preserve_tail_tokens` is compiled-in, but the visible transcript is
+    /// run-resolved from the model's advertised context window and can be
+    /// far smaller (a small-window model can derive a visible transcript
+    /// below the compiled-in tail). Without this cap, both automatic and
+    /// forced-recovery compaction would be permanently disabled for that
+    /// run — the `can_evaluate` guard would never clear and the boundary
+    /// searches would never find a tail-sized gap to cut before.
+    pub(super) fn effective_preserve_tail_tokens(&self, budget: PromptContextTokenBudget) -> u64 {
+        self.preserve_tail_tokens
+            .min(budget.visible_transcript_tokens() / 2)
+    }
+
     pub(super) fn can_evaluate(
         &self,
         state: &LoopExecutionState,
@@ -70,7 +86,7 @@ impl DefaultCompactionStrategy {
             return false;
         }
         let threshold = budget.visible_transcript_tokens();
-        if threshold <= self.preserve_tail_tokens {
+        if threshold <= self.effective_preserve_tail_tokens(budget) {
             return false;
         }
         // Forced/recovery compactions (context-overflow retry, byte-cap
@@ -103,7 +119,7 @@ impl DefaultCompactionStrategy {
         };
         CompactionDecision::Trigger {
             drop_through_seq,
-            preserve_tail_tokens: self.preserve_tail_tokens,
+            preserve_tail_tokens: self.effective_preserve_tail_tokens(budget),
             deadline_ms: self.deadline_ms,
             effectiveness_baseline,
         }
@@ -147,7 +163,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         tail_preserving_user_boundary(
             state,
             prompt_fingerprint,
-            self.preserve_tail_tokens,
+            self.effective_preserve_tail_tokens(budget),
             0,
             |_| true,
         )

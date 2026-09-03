@@ -73,9 +73,23 @@ fn evaluate_skips_when_below_threshold_with_valid_user_boundary_and_forcing_is_o
 }
 
 #[test]
-fn can_evaluate_skips_when_visible_threshold_equals_preserve_tail() {
-    let context = crate::test_support::test_run_context("compaction-strategy-equal-tail");
+fn can_evaluate_skips_when_the_budget_leaves_no_visible_transcript() {
+    // Old assertion (`can_evaluate_skips_when_visible_threshold_equals_preserve_tail`)
+    // pinned the defect: it relied on the raw `preserve_tail_tokens` (90)
+    // being >= `threshold` (90) to trip the guard, which is exactly the
+    // condition the small-advertised-window bug hit (a run-resolved
+    // threshold now legitimately falls below a compiled-in tail). With the
+    // tail clamped to half the visible transcript, that guard no longer
+    // trips here (threshold 90 > clamped tail 45), and forcing would no
+    // longer be suppressed — which is correct: the guard's real purpose is
+    // "there is no visible transcript to compact," not "the tail happens to
+    // be large." This rewrite asserts that real purpose directly with a
+    // budget whose `visible_transcript_tokens()` is 0, and proves it still
+    // holds even for the forced/recovery path.
+    let context =
+        crate::test_support::test_run_context("compaction-strategy-no-visible-transcript");
     let mut state = LoopExecutionState::initial_for_run(&context);
+    state.compaction_state.force_compact_on_next_iteration = true;
     state.compaction_prompt =
         CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
             sequence: 1,
@@ -83,7 +97,7 @@ fn can_evaluate_skips_when_visible_threshold_equals_preserve_tail() {
             estimated_tokens: 100,
         }]);
     let strategy = DefaultCompactionStrategy {
-        prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+        prompt_context_budget: PromptContextTokenBudget::new(10, 10, 0),
         preserve_tail_tokens: 90,
         deadline_ms: 1,
     };
@@ -131,7 +145,11 @@ fn evaluate_triggers_at_latest_user_boundary_outside_tail() {
         strategy.should_compact(&state, &context),
         CompactionDecision::Trigger {
             drop_through_seq: 1,
-            preserve_tail_tokens: 60,
+            // Clamped from the configured 60: visible (90) / 2 = 45. The
+            // walk-back to sequence 1 is unaffected by the clamp here (it
+            // still needs to cross two message blocks either way), so this
+            // is the genuine clamp output, not an incidental input choice.
+            preserve_tail_tokens: 45,
             deadline_ms: 7,
             effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
                 tokens: 90,
@@ -167,7 +185,9 @@ fn evaluate_triggers_when_newest_assistant_block_exceeds_tail_budget() {
         strategy.should_compact(&state, &context),
         CompactionDecision::Trigger {
             drop_through_seq: 1,
-            preserve_tail_tokens: 60,
+            // Clamped from the configured 60 to visible (90) / 2 = 45; the
+            // boundary walk-back is unaffected (genuine clamp output).
+            preserve_tail_tokens: 45,
             deadline_ms: 7,
             effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
                 tokens: 90,
@@ -301,7 +321,10 @@ fn evaluate_skips_deferred_boundary_in_threshold_overflow_path() {
         strategy.should_compact(&state, &context),
         CompactionDecision::Trigger {
             drop_through_seq: 1,
-            preserve_tail_tokens: 60,
+            // Clamped from the configured 60 to visible (90) / 2 = 45; the
+            // boundary walk-back (and the deferred-boundary rejection at
+            // sequence 3) is unaffected (genuine clamp output).
+            preserve_tail_tokens: 45,
             deadline_ms: 7,
             effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
                 tokens: 90,
@@ -731,5 +754,91 @@ fn absent_run_context_budget_falls_back_to_the_strategy_default() {
     assert_eq!(
         strategy.should_compact(&state, &ctx),
         CompactionDecision::Skip
+    );
+}
+
+// --- Small-advertised-window tail clamp regression (context-length bug) ---
+//
+// `preserve_tail_tokens` is compiled-in at 8,000, but `threshold` is now
+// derived from the run's model-advertised window. An 8k-window model derives
+// visible_transcript_tokens() == 5,400 (< 8,000), so both the automatic and
+// forced-recovery paths must clamp the tail to half the visible transcript
+// instead of disabling compaction outright.
+
+#[test]
+fn small_advertised_window_still_allows_forced_compaction() {
+    let ctx = crate::test_support::test_run_context("compaction-small-window-forced")
+        .with_resolved_context_budget(PromptContextTokenBudget::from_advertised_window(Some(
+            8_000,
+        )));
+    let mut state = state_with_observed_prompt_tokens(80, &ctx);
+    state.compaction_state.force_compact_on_next_iteration = true;
+    let strategy = DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::default(),
+        preserve_tail_tokens: DefaultCompactionStrategy::DEFAULT_PRESERVE_TAIL_TOKENS,
+        deadline_ms: 30_000,
+    };
+
+    assert_eq!(
+        strategy.should_compact(&state, &ctx),
+        CompactionDecision::Trigger {
+            // Forced/recovery compaction uses `latest_eligible_user_boundary`,
+            // which is not tail-aware — it always cuts at the most recent
+            // eligible user message (sequence 3 here), not the earliest.
+            drop_through_seq: 3,
+            preserve_tail_tokens: 2_700,
+            deadline_ms: 30_000,
+            effectiveness_baseline: CompactionEffectivenessBaseline::PreCompactionPromptTokens {
+                tokens: 80,
+            },
+        }
+    );
+}
+
+#[test]
+fn small_advertised_window_still_triggers_automatic_compaction() {
+    let ctx = crate::test_support::test_run_context("compaction-small-window-automatic")
+        .with_resolved_context_budget(PromptContextTokenBudget::from_advertised_window(Some(
+            8_000,
+        )));
+    let state = state_with_observed_prompt_tokens(5_400, &ctx);
+    let strategy = DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::default(),
+        preserve_tail_tokens: DefaultCompactionStrategy::DEFAULT_PRESERVE_TAIL_TOKENS,
+        deadline_ms: 30_000,
+    };
+
+    assert_eq!(
+        strategy.should_compact(&state, &ctx),
+        CompactionDecision::Trigger {
+            drop_through_seq: 1,
+            preserve_tail_tokens: 2_700,
+            deadline_ms: 30_000,
+            effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                tokens: 5_400,
+            },
+        }
+    );
+}
+
+#[test]
+fn default_budget_keeps_the_full_configured_tail() {
+    let ctx = crate::test_support::test_run_context("compaction-default-budget-tail");
+    let state = state_with_observed_prompt_tokens(120_000, &ctx);
+    let strategy = DefaultCompactionStrategy::default();
+
+    assert_eq!(
+        strategy.should_compact(&state, &ctx),
+        CompactionDecision::Trigger {
+            // Each 30,000-token message block alone exceeds the 8,000-token
+            // tail, so the walk-back returns at the first eligible user
+            // boundary it finds (sequence 3), not the earliest message.
+            drop_through_seq: 3,
+            preserve_tail_tokens: 8_000,
+            deadline_ms: DefaultCompactionStrategy::DEFAULT_DEADLINE_MS,
+            effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                tokens: 108_000,
+            },
+        }
     );
 }
