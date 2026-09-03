@@ -787,7 +787,7 @@ impl SubagentSpawnCapabilityPort {
             .into_iter()
             .filter(|record| !record.status.is_terminal())
             .count();
-        if running_children as u32 >= self.limits.max_concurrent_children {
+        if running_children >= self.limits.max_concurrent_children as usize {
             return Ok(spawn_rejected("concurrent_children_cap_exceeded"));
         }
 
