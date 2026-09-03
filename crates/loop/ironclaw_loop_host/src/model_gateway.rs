@@ -449,7 +449,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -464,7 +464,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -507,7 +507,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -522,7 +522,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -565,7 +565,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -580,7 +580,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
 
         let provider_turn_scope = format!(
@@ -628,7 +628,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -643,7 +643,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
 
         let provider_turn_scope = format!(
@@ -815,7 +815,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -831,7 +831,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
         add_route_metadata(&mut completion, &snapshot);
 
@@ -866,7 +866,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -882,7 +882,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
         add_route_metadata(&mut completion, &snapshot);
 
@@ -917,7 +917,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -933,7 +933,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
         add_route_metadata(&mut completion, &snapshot);
 
@@ -973,7 +973,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let thread_id = request.thread_id.clone();
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -989,7 +989,7 @@ where
             &model_profile_id,
             run_id,
             turn_id,
-            thread_id.as_ref(),
+            thread_id,
         );
         add_route_metadata(&mut completion, &snapshot);
 
