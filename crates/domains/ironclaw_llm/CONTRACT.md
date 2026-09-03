@@ -371,14 +371,18 @@ and both transports' construction paths. Wire shape is pinned by
 capture-server tests in both files.
 
 **OpenAI Responses `prompt_cache_key`**: `openai_codex_provider.rs` and
-`codex_chatgpt.rs` set `prompt_cache_key` on the wire to the durable thread
-id when `ToolCompletionRequest`/`CompletionRequest.metadata` carries one
-under `ironclaw_llm::PROMPT_CACHE_KEY_METADATA` — a stable per-conversation
-key raises OpenAI's cache hit rate. The loop-host gateway
+`codex_chatgpt.rs` set `prompt_cache_key` on the wire to whatever value
+`ToolCompletionRequest`/`CompletionRequest.metadata` carries under
+`ironclaw_llm::PROMPT_CACHE_KEY_METADATA` — a stable per-conversation key
+raises OpenAI's cache hit rate. The loop-host gateway
 (`ironclaw_loop_host::model_gateway::add_request_metadata`) is the one seam
-that inserts it, from `HostManagedModelRequest.thread_id`; the field is
-omitted, never backfilled from `run_id`, when no thread id is known (a
-per-run key would fragment the cache across a conversation's turns).
+that inserts it, and it is **never the raw thread id**: `ThreadId` is
+caller-authoritative free text, so the gateway derives a domain-separated
+SHA-256 of `HostManagedModelRequest.thread_id`, hex-encoded and truncated to
+32 characters (`derive_prompt_cache_key`), before it ever reaches an
+outbound request. The field is omitted, never backfilled from `run_id`, when
+no thread id is known (a per-run key would fragment the cache across a
+conversation's turns).
 
 ## rig_adapter.rs Details
 

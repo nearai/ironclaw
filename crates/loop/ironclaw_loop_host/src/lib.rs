@@ -2678,8 +2678,10 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
-    /// Durable thread identity, when known. Carried through to the provider
-    /// as request metadata (see `ironclaw_llm::PROMPT_CACHE_KEY_METADATA`) so
+    /// Durable thread identity, when known. Hashed (never sent raw) before
+    /// it leaves the process — the gateway derives a domain-separated
+    /// SHA-256 of this value and carries that through to the provider as
+    /// request metadata (see `ironclaw_llm::PROMPT_CACHE_KEY_METADATA`) so
     /// OpenAI Responses-API providers can set a stable `prompt_cache_key`
     /// that survives across a conversation's turns. `#[serde(default)]` so
     /// wire shapes recorded before this field existed keep deserializing.

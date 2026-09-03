@@ -114,6 +114,21 @@ fn non_production_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::non_production_noop()
 }
 
+/// Mirrors the private `derive_prompt_cache_key` in
+/// `ironclaw_loop_host::model_gateway`: a domain-separated SHA-256 of the
+/// thread id, hex-encoded and truncated to 32 characters. Duplicated here
+/// (rather than exposed from production) because this is an external
+/// integration-test crate; the domain separator string must stay in sync
+/// with the production constant of the same name.
+fn expected_prompt_cache_key(thread_id: &str) -> String {
+    const PROMPT_CACHE_KEY_DOMAIN_SEPARATOR: &str = "ironclaw.prompt-cache-key.v1:";
+    let digest = ironclaw_host_api::approval::sha256_digest_token(
+        format!("{PROMPT_CACHE_KEY_DOMAIN_SEPARATOR}{thread_id}").as_bytes(),
+    );
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest.as_str());
+    hex.chars().take(32).collect()
+}
+
 #[tokio::test]
 async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
@@ -128,11 +143,12 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let request = model_request(interactive_model());
     let expected_run_id = request.run_id.to_string();
     let expected_turn_id = request.turn_id.to_string();
-    let expected_thread_id = request
+    let raw_thread_id = request
         .thread_id
         .as_ref()
         .expect("test fixture always sets thread_id")
         .to_string();
+    let expected_prompt_cache_key = expected_prompt_cache_key(&raw_thread_id);
 
     let response = gateway.stream_model(request).await.unwrap();
 
@@ -165,11 +181,21 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         requests[0].metadata.get("turn_id").map(String::as_str),
         Some(expected_turn_id.as_str())
     );
+    let prompt_cache_key = requests[0]
+        .metadata
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .map(String::as_str);
     assert_eq!(
-        requests[0].metadata.get("thread_id").map(String::as_str),
-        Some(expected_thread_id.as_str()),
-        "gateway must carry the resolved thread id through as request metadata \
-         so OpenAI Responses-API providers can set a stable prompt_cache_key"
+        prompt_cache_key,
+        Some(expected_prompt_cache_key.as_str()),
+        "gateway must carry a derived prompt-cache key through as request \
+         metadata so OpenAI Responses-API providers can set a stable \
+         prompt_cache_key"
+    );
+    assert_ne!(
+        prompt_cache_key,
+        Some(raw_thread_id.as_str()),
+        "the raw thread id must never be sent to the provider"
     );
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
@@ -3174,14 +3200,20 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
+    let prompt_cache_key = requests[0]
+        .metadata
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .map(String::as_str);
     assert_eq!(
-        requests[0]
-            .metadata
-            .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
-            .map(String::as_str),
-        Some(fixture.run_context.thread_id.as_str()),
+        prompt_cache_key,
+        Some(expected_prompt_cache_key(fixture.run_context.thread_id.as_str()).as_str()),
         "the real ThreadBackedLoopModelPort::stream_model construction site \
-         must carry the resolved thread id through as request metadata"
+         must carry a derived prompt-cache key through as request metadata"
+    );
+    assert_ne!(
+        prompt_cache_key,
+        Some(fixture.run_context.thread_id.as_str()),
+        "the raw thread id must never be sent to the provider"
     );
     assert!(requests[0].messages.iter().any(|message| {
         message

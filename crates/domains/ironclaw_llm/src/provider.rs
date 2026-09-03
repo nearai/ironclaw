@@ -936,14 +936,14 @@ pub struct ModelMetadata {
 /// ordered provider fallback chain.
 pub(crate) const FALLBACK_INDEX_METADATA_KEY: &str = "ironclaw_fallback_index";
 
-/// Metadata key carrying the durable thread identity, when known. Set once
-/// by the loop-host gateway seam that resolves thread scope
-/// (`ironclaw_loop_host::model_gateway::add_request_metadata`) and read by
-/// the OpenAI Responses-API providers (`openai_codex_provider.rs`,
-/// `codex_chatgpt.rs`) to populate the wire `prompt_cache_key`. Deliberately
-/// the thread id, not the run id — a per-run key would fragment OpenAI's
-/// prompt cache across turns of the same conversation instead of reusing it.
-pub const PROMPT_CACHE_KEY_METADATA: &str = "thread_id";
+/// Metadata key carrying the OpenAI prompt-cache routing key, when known.
+/// Set by the loop-host gateway seam (`add_request_metadata`) as a
+/// domain-separated SHA-256 hash of the thread id — pseudonymization for an
+/// external routing hint, never proof of authenticity. No tenant/user scope
+/// is mixed in: a cache hit still needs an identical prompt prefix, which is
+/// already per-user, so threading extra scope through eight call sites would
+/// buy nothing.
+pub const PROMPT_CACHE_KEY_METADATA: &str = "prompt_cache_key";
 
 /// Deterministic selection evidence for an ordered provider fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]

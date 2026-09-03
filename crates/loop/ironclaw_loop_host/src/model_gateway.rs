@@ -1033,6 +1033,30 @@ where
     }
 }
 
+/// Domain separator mixed into the SHA-256 input for
+/// [`derive_prompt_cache_key`], so the digest can never be confused with a
+/// hash of the same bytes computed for an unrelated purpose elsewhere.
+const PROMPT_CACHE_KEY_DOMAIN_SEPARATOR: &str = "ironclaw.prompt-cache-key.v1:";
+
+/// Derive the value sent to the provider under
+/// [`ironclaw_llm::PROMPT_CACHE_KEY_METADATA`]: a domain-separated SHA-256 of
+/// the thread id, hex-encoded and truncated to 32 characters. This is
+/// pseudonymization for an external cache-routing hint, not an authenticity
+/// guarantee — `ThreadId` is caller-authoritative free text, so the raw id
+/// must never reach the provider. No tenant/user scope is mixed in: a cache
+/// hit still requires an identical prompt prefix, which is already
+/// per-user, so plumbing tenant scope through every call site would buy
+/// nothing. Stable across turns by construction — no salt, run id, or
+/// timestamp in the input — which is the whole point of a per-conversation
+/// routing key.
+fn derive_prompt_cache_key(thread_id: &ironclaw_host_api::ids::ThreadId) -> String {
+    let digest = sha256_digest_token(
+        format!("{PROMPT_CACHE_KEY_DOMAIN_SEPARATOR}{thread_id}").as_bytes(),
+    );
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest.as_str());
+    hex.chars().take(32).collect()
+}
+
 fn add_request_metadata(
     completion: &mut CompletionRequest,
     model_profile_id: &ModelProfileId,
@@ -1059,7 +1083,7 @@ fn add_request_metadata(
     if let Some(thread_id) = thread_id {
         completion.metadata.insert(
             ironclaw_llm::PROMPT_CACHE_KEY_METADATA.to_string(),
-            thread_id.to_string(),
+            derive_prompt_cache_key(thread_id),
         );
     }
 }
@@ -2916,6 +2940,28 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn derive_prompt_cache_key_is_stable_and_never_leaks_the_raw_thread_id() {
+        let thread_id = ironclaw_host_api::ids::ThreadId::new("user@example.com").unwrap();
+        let other_thread_id = ironclaw_host_api::ids::ThreadId::new("thread-other").unwrap();
+
+        let key_a = derive_prompt_cache_key(&thread_id);
+        let key_b = derive_prompt_cache_key(&thread_id);
+        let key_other = derive_prompt_cache_key(&other_thread_id);
+
+        assert_eq!(key_a, key_b, "the key must be stable across calls");
+        assert_ne!(
+            key_a, key_other,
+            "different thread ids must derive different keys"
+        );
+        assert_eq!(key_a.len(), 32);
+        assert!(key_a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            !key_a.contains("user@example.com"),
+            "the derived key must never contain the raw thread id"
+        );
+    }
 
     #[derive(Default)]
     struct StopSequenceRecordingProvider {
