@@ -6,9 +6,12 @@ import {
   cancelRun,
   eventStreamRequest,
   executeChatCommand,
+  fetchSession,
   fetchTimeline,
+  getSessionChannelExtensionId,
   openEventSocket,
   resolveGate,
+  setSessionChannelExtensionId,
 } from "./api";
 import { getNotificationSetupStatus } from "./notification-setup-api";
 
@@ -27,11 +30,28 @@ function setSessionStorage(): void {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  setSessionChannelExtensionId("");
   if (originalSessionStorage) {
     Object.defineProperty(globalThis, "sessionStorage", originalSessionStorage);
   } else {
     Reflect.deleteProperty(globalThis, "sessionStorage");
   }
+});
+
+test("fetchSession rejects malformed success payloads before updating session state", async () => {
+  setSessionStorage();
+  setSessionChannelExtensionId("existing-channel");
+  const responses = [true, {}];
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  await assert.rejects(fetchSession(), /invalid session response/);
+  assert.equal(getSessionChannelExtensionId(), "existing-channel");
+  await assert.rejects(fetchSession(), /invalid session response/);
+  assert.equal(getSessionChannelExtensionId(), "existing-channel");
 });
 
 test("thread and run routes reject missing path identifiers before URL construction", async () => {

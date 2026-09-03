@@ -1,26 +1,31 @@
 import { apiFetch, clientActionId, type ApiRecord } from "../../../lib/api";
 
 export interface UserModelPolicyResponse extends ApiRecord {
-  provider_id?: string;
-  workspace_default?: string | null;
+  provider_id: string;
+  workspace_default: string;
   allowed_models: string[];
   model_entries: ApiRecord[];
 }
 
 export interface LlmProvidersResponse extends ApiRecord {
-  providers: Array<
-    ApiRecord & {
-      id: string;
-      description?: string;
-      adapter?: string;
-      base_url?: string;
-      default_model?: string;
-      builtin?: boolean;
-      api_key_set?: boolean;
-    }
-  >;
-  active: (ApiRecord & { provider_id?: string; model?: string }) | null;
+  providers: LlmProviderResponse[];
+  active: (ApiRecord & { provider_id: string; model?: string | null }) | null;
   user_model_policy: UserModelPolicyResponse | null;
+}
+
+interface LlmProviderResponse extends ApiRecord {
+  id: string;
+  description: string;
+  adapter: string;
+  default_model: string;
+  base_url?: string | null;
+  builtin: boolean;
+  active: boolean;
+  active_model?: string | null;
+  api_key_required: boolean;
+  accepts_api_key: boolean;
+  api_key_set: boolean;
+  can_list_models: boolean;
 }
 
 export interface UserModelCatalogResponse extends ApiRecord {
@@ -50,11 +55,51 @@ function records(value: unknown): ApiRecord[] {
     : invalidProviders();
 }
 
+function decodeProvider(value: unknown): LlmProviderResponse {
+  const provider = record(value);
+  if (
+    typeof provider.id !== "string" ||
+    typeof provider.description !== "string" ||
+    typeof provider.adapter !== "string" ||
+    typeof provider.default_model !== "string" ||
+    (provider.base_url !== undefined &&
+      provider.base_url !== null &&
+      typeof provider.base_url !== "string") ||
+    typeof provider.builtin !== "boolean" ||
+    typeof provider.active !== "boolean" ||
+    (provider.active_model !== undefined &&
+      provider.active_model !== null &&
+      typeof provider.active_model !== "string") ||
+    typeof provider.api_key_required !== "boolean" ||
+    typeof provider.accepts_api_key !== "boolean" ||
+    typeof provider.api_key_set !== "boolean" ||
+    typeof provider.can_list_models !== "boolean"
+  ) {
+    return invalidProviders();
+  }
+  return provider as LlmProviderResponse;
+}
+
+function decodeActive(value: unknown): LlmProvidersResponse["active"] {
+  if (value === undefined || value === null) return null;
+  const active = record(value);
+  if (
+    typeof active.provider_id !== "string" ||
+    (active.model !== undefined &&
+      active.model !== null &&
+      typeof active.model !== "string")
+  ) {
+    return invalidProviders();
+  }
+  return active as LlmProvidersResponse["active"];
+}
+
 function decodeUserModelPolicy(value: unknown): UserModelPolicyResponse | null {
   if (value === undefined || value === null) return null;
   const policy = record(value);
   if (
-    (policy.provider_id !== undefined && typeof policy.provider_id !== "string") ||
+    typeof policy.provider_id !== "string" ||
+    typeof policy.workspace_default !== "string" ||
     !Array.isArray(policy.allowed_models) ||
     !policy.allowed_models.every((model) => typeof model === "string")
   ) {
@@ -67,22 +112,27 @@ function decodeUserModelPolicy(value: unknown): UserModelPolicyResponse | null {
   } as UserModelPolicyResponse;
 }
 
+function decodeLlmProvidersResponse(value: unknown): LlmProvidersResponse {
+  const response = record(value);
+  if (!Array.isArray(response.providers)) return invalidProviders();
+  return {
+    ...response,
+    providers: response.providers.map(decodeProvider),
+    active: decodeActive(response.active),
+    user_model_policy: decodeUserModelPolicy(response.user_model_policy),
+  };
+}
+
 // LLM provider configuration — v2 native endpoints. The snapshot is the single
 // source of truth: a unified provider list (built-in + operator-defined) plus
 // the active selection. API-key values are write-only; the snapshot only ever
 // reports `api_key_set`.
 export async function fetchLlmProviders(): Promise<LlmProvidersResponse> {
-  const response = await apiFetch("/api/webchat/v2/llm/providers");
-  const active =
-    response.active === undefined || response.active === null
-      ? null
-      : record(response.active);
-  return {
-    ...response,
-    providers: records(response.providers) as LlmProvidersResponse["providers"],
-    active: active as LlmProvidersResponse["active"],
-    user_model_policy: decodeUserModelPolicy(response.user_model_policy),
-  };
+  return apiFetch(
+    "/api/webchat/v2/llm/providers",
+    {},
+    decodeLlmProvidersResponse,
+  );
 }
 
 export function fetchUserModelCatalog(): Promise<UserModelCatalogResponse> {

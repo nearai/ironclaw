@@ -17,6 +17,11 @@ const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
 
 export type ApiRecord = Record<string, unknown>;
+export type ApiDecoder<T> = (value: unknown) => T;
+
+function isApiRecord(value: unknown): value is ApiRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function missingRequired(name: string): Promise<never> {
   return Promise.reject(new Error(`${name} is required`));
@@ -162,6 +167,7 @@ export function describeApiError({
 export async function apiFetch<T = ApiRecord>(
   path: string | URL,
   options: RequestInit = {},
+  decoder?: ApiDecoder<T>,
 ): Promise<T> {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
@@ -194,9 +200,10 @@ export async function apiFetch<T = ApiRecord>(
   }
 
   const contentType = response.headers.get("content-type") || "";
-  return (contentType.includes("application/json")
+  const value: unknown = contentType.includes("application/json")
     ? await response.json()
-    : await response.text()) as T;
+    : await response.text();
+  return decoder ? decoder(value) : value as T;
 }
 
 // --- Threads ---
@@ -217,6 +224,25 @@ export interface SessionResponse extends ApiRecord {
   session_channel_extension_id?: string | null;
 }
 
+function decodeSessionResponse(value: unknown): SessionResponse {
+  if (
+    !isApiRecord(value) ||
+    typeof value.tenant_id !== "string" ||
+    value.tenant_id.length === 0 ||
+    typeof value.user_id !== "string" ||
+    value.user_id.length === 0 ||
+    !isApiRecord(value.capabilities) ||
+    !isApiRecord(value.features) ||
+    !isApiRecord(value.attachments) ||
+    (value.session_channel_extension_id !== undefined &&
+      value.session_channel_extension_id !== null &&
+      typeof value.session_channel_extension_id !== "string")
+  ) {
+    throw new TypeError("invalid session response");
+  }
+  return value as SessionResponse;
+}
+
 export function setSessionChannelExtensionId(extensionId: string | null | undefined) {
   sessionChannelExtensionId = extensionId || "";
 }
@@ -230,8 +256,8 @@ export function getSessionChannelExtensionId() {
 }
 
 export async function fetchSession(): Promise<SessionResponse> {
-  const session = await apiFetch<SessionResponse>(`${V2_BASE}/session`);
-  setSessionChannelExtensionId(session?.session_channel_extension_id);
+  const session = await apiFetch(`${V2_BASE}/session`, {}, decodeSessionResponse);
+  setSessionChannelExtensionId(session.session_channel_extension_id);
   return session;
 }
 
