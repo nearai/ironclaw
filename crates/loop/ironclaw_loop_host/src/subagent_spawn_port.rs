@@ -44,6 +44,14 @@ use crate::{
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
+/// Not smaller than `DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN` (4): a parent that
+/// spawns its full per-turn fanout in one turn must be able to have all of
+/// them alive at once without tripping this cap on its very first turn.
+/// Conservative relative to `DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS` (16): a
+/// parent may run half its lifetime tree budget concurrently before this cap
+/// bites, leaving headroom for a second turn's fanout while still bounding
+/// concurrent resource usage well under the absolute tree total.
+pub const DEFAULT_SUBAGENT_MAX_CONCURRENT_CHILDREN: u32 = 8;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
 const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
 pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
@@ -361,6 +369,7 @@ pub struct SubagentSpawnLimits {
     pub max_depth: u32,
     pub max_spawn_per_turn: u32,
     pub max_tree_descendants: u32,
+    pub max_concurrent_children: u32,
 }
 
 impl Default for SubagentSpawnLimits {
@@ -369,6 +378,7 @@ impl Default for SubagentSpawnLimits {
             max_depth: DEFAULT_SUBAGENT_MAX_DEPTH,
             max_spawn_per_turn: DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN,
             max_tree_descendants: DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
+            max_concurrent_children: DEFAULT_SUBAGENT_MAX_CONCURRENT_CHILDREN,
         }
     }
 }
@@ -757,6 +767,30 @@ impl SubagentSpawnCapabilityPort {
         if child_depth > self.limits.max_depth {
             return Ok(spawn_rejected("depth_cap_exceeded"));
         }
+
+        // ponytail: read-then-decide pre-check, not an atomic reservation
+        // like the kernel's tree cap — parallel spawn calls inside a single
+        // turn can race between this count and the child submission below
+        // and briefly overshoot `max_concurrent_children`. The overshoot is
+        // bounded by `max_spawn_per_turn` (the in-memory per-turn slot cap
+        // already reserved above via `reserve_spawn_slot`), and the durable
+        // tree cap (`max_tree_descendants`) still bounds the absolute total.
+        // Upgrade path: an atomic reserve-at-admission in the kernel's
+        // process-tree reservation, the way `spawn_tree_descendant_cap` is
+        // enforced in `apply_submit_process`.
+        let running_children = self
+            .deps
+            .agent_turn_runtime
+            .children_of(&self.run_context.scope, self.run_context.run_id)
+            .await
+            .map_err(map_turn_error)?
+            .into_iter()
+            .filter(|record| !record.status.is_terminal())
+            .count();
+        if running_children as u32 >= self.limits.max_concurrent_children {
+            return Ok(spawn_rejected("concurrent_children_cap_exceeded"));
+        }
+
         let parent_definition = self
             .deps
             .definition_resolver
