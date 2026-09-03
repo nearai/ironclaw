@@ -1925,6 +1925,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["mode"], "selected")
                 self.assertEqual(plan["root_partitions"], [inventory[reader]])
 
+    def test_trace_llm_tests_is_a_root_test_partition(self) -> None:
+        """`tests/trace_llm_tests.rs` is a real, Cargo-auto-discovered root
+
+        test binary (no `[[test]]` entry needed) but was missing from the
+        `_root_test_partitions()` hard-coded `extra_tests` tuple, so any PR
+        touching it failed planning with `unmapped test or CI path`. It must
+        be inventoried like `tests/dockerfile_runtime_home.rs`, and a PR that
+        changes it must produce a plan rather than raise.
+        """
+        target = "tests/trace_llm_tests.rs"
+        inventory = planner._root_test_partitions()
+        self.assertIn(target, inventory)
+        plan = self.plan("pull_request", [target])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["root_partitions"], [inventory[target]])
+
     def test_sibling_container_inputs_still_require_a_decision(self) -> None:
         """`docker/` is classified per-file for the same reason repo-root
         `scripts/` is: a blanket prefix would silently absorb paths with no

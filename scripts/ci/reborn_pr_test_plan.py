@@ -774,7 +774,7 @@ def _bound_pr_buckets(
 def _root_test_partitions() -> dict[str, int]:
     extra_tests = [
         name
-        for name in ("dockerfile_runtime_home", "support_unit_tests")
+        for name in ("dockerfile_runtime_home", "support_unit_tests", "trace_llm_tests")
         if (ROOT / f"tests/{name}.rs").is_file()
     ]
     names = sorted(
