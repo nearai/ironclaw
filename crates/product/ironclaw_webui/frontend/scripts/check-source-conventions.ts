@@ -18,8 +18,20 @@ const TYPESCRIPT_EXTENSIONS = new Set([".ts", ".tsx"]);
 const EXPLICIT_RELATIVE_EXTENSION = /\.(?:[cm]?[jt]sx?)(?:[?#].*)?$/i;
 const SINGLE_LINE_CHECK_PRAGMA =
   /^\/\/\/?\s*@(ts-check|ts-nocheck)(?:(?:[^\S\r\n]|:).*)?$/i;
-const SINGLE_LINE_IGNORE_DIRECTIVE = /^\/\/\/?\s*@ts-ignore/;
-const MULTI_LINE_IGNORE_DIRECTIVE = /^(?:\/|\*)*\s*@ts-ignore/;
+
+type ParsedCommentDirective = {
+  range: ts.TextRange;
+  type: number;
+};
+
+type SourceFileWithCommentDirectives = ts.SourceFile & {
+  commentDirectives?: readonly ParsedCommentDirective[];
+};
+
+// TypeScript's public declarations do not expose CommentDirectiveType, but the
+// pinned compiler represents ExpectError as 0 and Ignore as 1. Reading the
+// parser-populated directives keeps recognition identical to the compiler.
+const TYPESCRIPT_IGNORE_DIRECTIVE = 1;
 
 export type ConventionViolationKind =
   | "explicit-relative-extension"
@@ -105,26 +117,6 @@ function effectiveNocheckPosition(sourceText: string): number | undefined {
   return position;
 }
 
-function effectiveIgnoreOffset(
-  comment: string,
-  token: ts.SyntaxKind,
-): number | undefined {
-  if (token === ts.SyntaxKind.SingleLineCommentTrivia) {
-    return SINGLE_LINE_IGNORE_DIRECTIVE.test(comment)
-      ? comment.indexOf("@")
-      : undefined;
-  }
-
-  const lastLineStart = Math.max(
-    comment.lastIndexOf("\n"),
-    comment.lastIndexOf("\r"),
-  ) + 1;
-  const lastLine = comment.slice(lastLineStart);
-  return MULTI_LINE_IGNORE_DIRECTIVE.test(lastLine)
-    ? lastLineStart + lastLine.indexOf("@")
-    : undefined;
-}
-
 function checkTypeScriptSuppressions(
   filePath: string,
   sourceFile: ts.SourceFile,
@@ -144,26 +136,12 @@ function checkTypeScriptSuppressions(
     }
   }
 
-  const scanner = ts.createScanner(
-    ts.ScriptTarget.Latest,
-    false,
-    sourceFile.languageVariant,
-    sourceText,
-  );
-
-  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
-    if (
-      token !== ts.SyntaxKind.SingleLineCommentTrivia &&
-      token !== ts.SyntaxKind.MultiLineCommentTrivia
-    ) {
-      continue;
-    }
-
-    const comment = scanner.getTokenText();
-    const ignoreOffset = effectiveIgnoreOffset(comment, token);
-    if (ignoreOffset === undefined) continue;
-    const position = scanner.getTokenPos() + ignoreOffset;
-    const line = sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+  const commentDirectives =
+    (sourceFile as SourceFileWithCommentDirectives).commentDirectives ?? [];
+  for (const directive of commentDirectives) {
+    if (directive.type !== TYPESCRIPT_IGNORE_DIRECTIVE) continue;
+    const line =
+      sourceFile.getLineAndCharacterOfPosition(directive.range.pos).line + 1;
     violations.push({ file: filePath, kind: "prohibited-ts-ignore", line });
   }
 
@@ -280,6 +258,66 @@ export function checkSourceTree(
   return violations.sort(compareViolations);
 }
 
+function typeScriptProjectFiles(configPath: string): string[] {
+  const configResult = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (configResult.error) {
+    throw new Error(
+      ts.formatDiagnostic(configResult.error, {
+        getCanonicalFileName: (fileName) => fileName,
+        getCurrentDirectory: ts.sys.getCurrentDirectory,
+        getNewLine: () => ts.sys.newLine,
+      }),
+    );
+  }
+
+  const parsed = ts.parseJsonConfigFileContent(
+    configResult.config,
+    ts.sys,
+    dirname(configPath),
+    undefined,
+    configPath,
+  );
+  if (parsed.errors.length > 0) {
+    throw new Error(
+      ts.formatDiagnostics(parsed.errors, {
+        getCanonicalFileName: (fileName) => fileName,
+        getCurrentDirectory: ts.sys.getCurrentDirectory,
+        getNewLine: () => ts.sys.newLine,
+      }),
+    );
+  }
+  return parsed.fileNames;
+}
+
+export function checkTypeScriptProject(
+  projectRoot: string,
+  legacyTsNocheckFiles: ReadonlySet<string> = new Set(),
+): ConventionViolation[] {
+  const root = resolve(projectRoot);
+  const sourceRoot = resolve(root, "src");
+  const configPath = resolve(root, "tsconfig.json");
+  const authoredFiles = new Set([
+    ...sourceFilesUnder(sourceRoot),
+    ...typeScriptProjectFiles(configPath),
+  ]);
+  const seenLegacyTsNocheckFiles = new Set<string>();
+  const violations = [...authoredFiles].flatMap((absolutePath) => {
+    const file = relative(root, absolutePath).split(sep).join("/");
+    return checkSourceFileWithSeenBaseline(
+      file,
+      readFileSync(absolutePath, "utf8"),
+      legacyTsNocheckFiles,
+      seenLegacyTsNocheckFiles,
+    );
+  });
+  for (const file of legacyTsNocheckFiles) {
+    if (!seenLegacyTsNocheckFiles.has(file)) {
+      violations.push({ file, kind: "stale-ts-nocheck-baseline", line: 1 });
+    }
+  }
+  return violations.sort(compareViolations);
+}
+
 const VIOLATION_MESSAGES: Record<ConventionViolationKind, string> = {
   "explicit-relative-extension": "relative module imports must be extensionless",
   "html-tagged-template": "React markup must use JSX instead of html tagged templates",
@@ -297,15 +335,16 @@ export function formatViolation(violation: ConventionViolation): string {
 
 function runCli(): void {
   const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-  const sourceRoot = resolve(scriptDirectory, "../src");
+  const projectRoot = resolve(scriptDirectory, "..");
   const baselinePath = resolve(scriptDirectory, "ts-nocheck-baseline.txt");
   const legacyTsNocheckFiles = new Set(
     readFileSync(baselinePath, "utf8")
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .filter(Boolean),
+      .filter(Boolean)
+      .map((file) => `src/${file}`),
   );
-  const violations = checkSourceTree(sourceRoot, legacyTsNocheckFiles);
+  const violations = checkTypeScriptProject(projectRoot, legacyTsNocheckFiles);
   if (violations.length === 0) return;
 
   for (const violation of violations) {

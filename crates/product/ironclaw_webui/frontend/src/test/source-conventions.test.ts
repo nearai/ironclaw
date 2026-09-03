@@ -7,6 +7,7 @@ import { afterEach, test } from "vitest";
 import {
   checkSourceFile,
   checkSourceTree,
+  checkTypeScriptProject,
   formatViolation,
 } from "../../scripts/check-source-conventions";
 
@@ -144,6 +145,18 @@ test("matches only suppression directives that TypeScript applies", () => {
   );
 });
 
+test("rejects compiler-effective indented multiline ignore directives", () => {
+  const violations = checkSourceFile(
+    "feature.ts",
+    "/*\n * @ts-ignore */\nconst value: string = 1;\n",
+  );
+
+  assert.deepEqual(
+    violations.map(({ kind, line }) => ({ kind, line })),
+    [{ kind: "prohibited-ts-ignore", line: 2 }],
+  );
+});
+
 test("recursively scans source trees and reports stable relative paths", () => {
   const root = mkdtempSync(join(tmpdir(), "ironclaw-source-conventions-"));
   temporaryRoots.push(root);
@@ -187,6 +200,36 @@ test("rejects stale nocheck baseline entries", () => {
     [
       { file: "cleaned-up.ts", kind: "stale-ts-nocheck-baseline", line: 1 },
       { file: "deleted.ts", kind: "stale-ts-nocheck-baseline", line: 1 },
+    ],
+  );
+});
+
+test("scans TypeScript project inputs outside src", () => {
+  const root = mkdtempSync(join(tmpdir(), "ironclaw-source-conventions-"));
+  temporaryRoots.push(root);
+  mkdirSync(join(root, "scripts"));
+  mkdirSync(join(root, "src"));
+  writeFileSync(
+    join(root, "tsconfig.json"),
+    JSON.stringify({ include: ["scripts", "src", "vite.config.ts"] }),
+  );
+  writeFileSync(join(root, "src", "valid.ts"), "export {};\n");
+  writeFileSync(
+    join(root, "scripts", "unchecked.ts"),
+    "// @ts-nocheck\nconst value: string = 1;\n",
+  );
+  writeFileSync(join(root, "vite.config.ts"), "export {};\n");
+
+  const violations = checkTypeScriptProject(root);
+
+  assert.deepEqual(
+    violations.map(({ file, kind, line }) => ({ file, kind, line })),
+    [
+      {
+        file: "scripts/unchecked.ts",
+        kind: "unbaselined-ts-nocheck",
+        line: 1,
+      },
     ],
   );
 });
