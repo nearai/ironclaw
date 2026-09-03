@@ -202,6 +202,35 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages[1].content, "hello model");
 }
 
+/// A `HostManagedModelRequest` with no thread id (legacy replay wire shapes
+/// recorded before the field existed) must not carry any prompt-cache key
+/// metadata at all — no fallback to `run_id`, no stale entry left behind.
+#[tokio::test]
+async fn gateway_omits_thread_cache_key_when_thread_id_is_none() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let policy = LlmModelProfilePolicy::new()
+        .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    let mut request = model_request(interactive_model());
+    request.thread_id = None;
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0]
+            .metadata
+            .contains_key(ironclaw_llm::PROMPT_CACHE_KEY_METADATA),
+        "no thread id means no prompt-cache key metadata at all"
+    );
+}
+
 #[tokio::test]
 async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
