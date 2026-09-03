@@ -299,14 +299,8 @@ impl SetupHint {
 /// Only allows: "temperature", "max_tokens", "stop_sequences", "prompt_cache_key".
 /// Invalid parameter names cause a deserialization error.
 mod unsupported_params_de {
+    use crate::provider::UnsupportedParam;
     use serde::{Deserialize, Deserializer};
-
-    const VALID_PARAMS: &[&str] = &[
-        "temperature",
-        "max_tokens",
-        "stop_sequences",
-        "prompt_cache_key",
-    ];
 
     pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
     where
@@ -314,11 +308,11 @@ mod unsupported_params_de {
     {
         let params: Vec<String> = Deserialize::deserialize(deserializer)?;
         for param in &params {
-            if !VALID_PARAMS.contains(&param.as_str()) {
+            if !UnsupportedParam::is_valid_name(param) {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported parameter name '{}': must be one of: {}",
                     param,
-                    VALID_PARAMS.join(", ")
+                    UnsupportedParam::VALID_NAMES.join(", ")
                 )));
             }
         }
@@ -1166,10 +1160,7 @@ mod tests {
                     def.id
                 );
                 assert!(
-                    matches!(
-                        param.as_str(),
-                        "temperature" | "max_tokens" | "stop_sequences"
-                    ),
+                    crate::provider::UnsupportedParam::is_valid_name(param),
                     "{}: unsupported_params contains invalid parameter '{}'",
                     def.id,
                     param

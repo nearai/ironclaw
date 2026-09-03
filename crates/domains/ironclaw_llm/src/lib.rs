@@ -689,6 +689,7 @@ fn create_deepseek_from_registry(
             // `output_schema`; reject structured-output requests at the
             // provider boundary instead of claiming the contract was sent.
             .with_structured_output_support(false)
+            .with_prompt_cache_key_support(true)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -785,6 +786,7 @@ fn create_openrouter_from_registry(
             // `output_schema`; reject structured-output requests at the
             // provider boundary instead of claiming the contract was sent.
             .with_structured_output_support(false)
+            .with_prompt_cache_key_support(true)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -2032,6 +2034,100 @@ mod tests {
                 "{provider_id} must not use rig-core streaming until terminal events are observable"
             );
             assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    /// DeepSeek and OpenRouter use dedicated rig clients to preserve their
+    /// reasoning artifacts, but both clients still serialize OpenAI Chat
+    /// Completions requests. Their factory paths must therefore carry the
+    /// shared prompt-cache key just like the generic compatible factory.
+    #[tokio::test]
+    async fn dedicated_chat_completions_factories_send_prompt_cache_key() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn capture_request_body(listener: TcpListener) -> String {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let (body_start, content_length) = loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert!(read > 0, "connection closed before request body arrived");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let body_start = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .expect("content-length header");
+                    break (body_start, content_length);
+                }
+            };
+            while request.len() < body_start + content_length {
+                let read = socket.read(&mut buffer).await.expect("read request body");
+                assert!(read > 0, "connection closed before request body completed");
+                request.extend_from_slice(&buffer[..read]);
+            }
+
+            let response_body = r#"{"error":{"message":"test rejection"}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                .expect("request body is UTF-8 JSON")
+        }
+
+        for (protocol, provider_id) in [
+            (ProviderProtocol::DeepSeek, "deepseek"),
+            (ProviderProtocol::OpenRouter, "openrouter"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback listener");
+            let address = listener.local_addr().expect("loopback address");
+            let server = tokio::spawn(capture_request_body(listener));
+            let config = RegistryProviderConfig::generic(
+                protocol,
+                provider_id,
+                Some(secrecy::SecretString::from("test-key".to_string())),
+                format!("http://{address}"),
+                "test-model",
+            );
+            let provider = create_registry_provider_inner(&config, 5)
+                .expect("registry provider construction succeeds");
+            let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+            request.metadata.insert(
+                PROMPT_CACHE_KEY_METADATA.to_string(),
+                "thread-cache-key-abc".to_string(),
+            );
+
+            provider
+                .complete(request)
+                .await
+                .expect_err("loopback server intentionally rejects the request");
+            let body = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+                .await
+                .expect("loopback server must observe a request")
+                .expect("loopback server task");
+            let body: serde_json::Value =
+                serde_json::from_str(&body).expect("request body is valid JSON");
+            assert_eq!(
+                body["prompt_cache_key"], "thread-cache-key-abc",
+                "{provider_id} must carry the shared cache key",
+            );
         }
     }
 

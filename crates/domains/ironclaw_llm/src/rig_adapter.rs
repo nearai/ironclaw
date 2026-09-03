@@ -33,8 +33,8 @@ use crate::provider::{
     CompletionStreamSink, FinishReason, LlmProvider, ReasoningDetail as IronReasoningDetail,
     ReasoningDetails as IronReasoningDetails, ToolCall as IronToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition as IronToolDefinition, map_provider_finish_token,
-    normalized_model_override, resolve_finish_reason, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    normalized_model_override, prompt_cache_key_from_metadata, resolve_finish_reason,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
@@ -83,8 +83,9 @@ pub struct RigAdapter<M: CompletionModel> {
     /// adapter that should carry the derived `prompt_cache_key` metadata
     /// value (`crate::provider::PROMPT_CACHE_KEY_METADATA`) onto the wire.
     /// `prompt_cache_key` is an OpenAI-specific concept — Anthropic-protocol
-    /// requests use `cache_control` instead — so this stays `false` outside
-    /// the generic OpenAI-compatible factory. See `prompt_cache_key`.
+    /// requests use `cache_control` instead — so factories enable this only
+    /// for generic OpenAI-compatible, DeepSeek, and OpenRouter clients. See
+    /// `prompt_cache_key`.
     prompt_cache_key_supported: bool,
     /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
     /// issues a `GET` instead of returning the empty default. rig-core's
@@ -408,16 +409,10 @@ impl<M: CompletionModel> RigAdapter<M> {
         &self,
         metadata: &std::collections::HashMap<String, String>,
     ) -> Option<String> {
-        if !self.prompt_cache_key_supported
-            || self
-                .unsupported_params
-                .contains(crate::provider::PROMPT_CACHE_KEY_METADATA)
-        {
+        if !self.prompt_cache_key_supported {
             return None;
         }
-        metadata
-            .get(crate::provider::PROMPT_CACHE_KEY_METADATA)
-            .cloned()
+        prompt_cache_key_from_metadata(&self.unsupported_params, metadata)
     }
 
     fn ensure_structured_output_supported(

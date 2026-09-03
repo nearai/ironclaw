@@ -1296,17 +1296,45 @@ pub(crate) enum UnsupportedParam {
     Temperature,
     MaxTokens,
     StopSequences,
+    PromptCacheKey,
 }
 
 impl UnsupportedParam {
+    pub(crate) const VALID_NAMES: &[&str] = &[
+        "temperature",
+        "max_tokens",
+        "stop_sequences",
+        PROMPT_CACHE_KEY_METADATA,
+    ];
+
     /// Get the string name of this parameter for config/error messages.
     pub(crate) fn name(&self) -> &'static str {
         match self {
             UnsupportedParam::Temperature => "temperature",
             UnsupportedParam::MaxTokens => "max_tokens",
             UnsupportedParam::StopSequences => "stop_sequences",
+            UnsupportedParam::PromptCacheKey => PROMPT_CACHE_KEY_METADATA,
         }
     }
+
+    pub(crate) fn is_valid_name(name: &str) -> bool {
+        Self::VALID_NAMES.contains(&name)
+    }
+}
+
+/// Resolve the shared prompt-cache-key request metadata unless the provider
+/// explicitly disables that OpenAI-compatible extension.
+pub(crate) fn prompt_cache_key_from_metadata<'a>(
+    unsupported: impl IntoIterator<Item = &'a String>,
+    metadata: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if unsupported
+        .into_iter()
+        .any(|param| param == UnsupportedParam::PromptCacheKey.name())
+    {
+        return None;
+    }
+    metadata.get(PROMPT_CACHE_KEY_METADATA).cloned()
 }
 
 /// Strip unsupported parameters from a `CompletionRequest` in place.

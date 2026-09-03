@@ -33,6 +33,7 @@ pub struct ResolvedDedicatedProviderConfig {
     pub api_key: Option<SecretString>,
     pub base_url: String,
     pub model: String,
+    pub unsupported_params: Vec<String>,
 }
 
 impl ResolvedProviderConfig {
@@ -347,6 +348,7 @@ fn resolve_provider_definition(
         api_key,
         base_url,
         model,
+        unsupported_params: provider.unsupported_params.clone(),
     };
 
     if is_registry_protocol(provider.protocol) {
@@ -440,6 +442,7 @@ fn nearai_config_from_env(chain: &ChainSettings) -> Result<NearAiConfig, LlmErro
             base_url,
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
+            unsupported_params: Vec::new(),
         },
         chain,
     ))
@@ -466,6 +469,7 @@ fn nearai_config_from_dedicated(
                 .unwrap_or(300),
             failover_cooldown_threshold: parse_optional_u32("LLM_FAILOVER_THRESHOLD", "nearai")?
                 .unwrap_or(3),
+            unsupported_params: resolved.unsupported_params.clone(),
         },
         chain,
     ))
@@ -477,6 +481,7 @@ struct NearAiRuntimeFields {
     base_url: String,
     failover_cooldown_secs: u64,
     failover_cooldown_threshold: u32,
+    unsupported_params: Vec<String>,
 }
 
 fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> NearAiConfig {
@@ -495,12 +500,7 @@ fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> Ne
         failover_cooldown_secs: fields.failover_cooldown_secs,
         failover_cooldown_threshold: fields.failover_cooldown_threshold,
         smart_routing_cascade: chain.smart_routing_cascade,
-        // NEAR AI is a dedicated-config backend (`ProviderProtocol::NearAi`),
-        // so `ResolvedDedicatedProviderConfig` — unlike `RegistryProviderConfig`
-        // — carries no catalog-driven `unsupported_params` today; the kill
-        // switch is real (see `NearAiChatProvider::prompt_cache_key`) but not
-        // yet operator-configurable via `providers.json` for this backend.
-        unsupported_params: Vec::new(),
+        unsupported_params: fields.unsupported_params,
     }
 }
 
@@ -939,6 +939,39 @@ mod tests {
         };
         assert_eq!(dedicated.model, "deepseek-ai/DeepSeek-V4-Flash");
         assert_eq!(dedicated.base_url, "https://cloud-api.near.ai");
+    }
+
+    /// A NEAR AI catalog override may need to disable an OpenAI-compatible
+    /// request extension that its deployment rejects. The resolved dedicated
+    /// config must preserve that operator control all the way into the live
+    /// `NearAiConfig`; dropping it makes the advertised kill switch inert.
+    #[test]
+    fn nearai_selection_preserves_catalog_unsupported_params() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let _env = EnvGuard::clear(CHAIN_ENV_VARS);
+
+        let builtins =
+            ProviderRegistry::try_load_from_path(None).expect("builtin registry should load");
+        let mut nearai = builtins.find("nearai").expect("nearai definition").clone();
+        nearai.unsupported_params = vec!["prompt_cache_key".to_string()];
+        let registry = ProviderRegistry::new(vec![nearai]);
+
+        let config = resolve_llm_config_from_selection(
+            ProviderSelection {
+                provider_id: "nearai".to_string(),
+                api_key_env: None,
+                base_url: None,
+                model: None,
+            },
+            &registry,
+        )
+        .expect("nearai selection should resolve");
+
+        assert_eq!(
+            config.nearai.unsupported_params,
+            vec!["prompt_cache_key".to_string()],
+            "the dedicated NEAR AI path must retain the catalog kill switch",
+        );
     }
 
     /// The pure-env path (no explicit selection override) must keep its

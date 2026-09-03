@@ -27,7 +27,7 @@ use crate::models::{DiscoveredModel, ModelModality};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    openai_json_schema_response_format,
+    openai_json_schema_response_format, prompt_cache_key_from_metadata,
 };
 use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
@@ -392,17 +392,7 @@ impl NearAiChatProvider {
     /// `config.unsupported_params` to suppress it (e.g. a NEAR AI-compatible
     /// deployment that 400s on unknown fields).
     fn prompt_cache_key(&self, metadata: &HashMap<String, String>) -> Option<String> {
-        if self
-            .config
-            .unsupported_params
-            .iter()
-            .any(|param| param == crate::provider::PROMPT_CACHE_KEY_METADATA)
-        {
-            return None;
-        }
-        metadata
-            .get(crate::provider::PROMPT_CACHE_KEY_METADATA)
-            .cloned()
+        prompt_cache_key_from_metadata(&self.config.unsupported_params, metadata)
     }
 
     /// Resolve the Bearer token for the current auth mode.
@@ -3707,6 +3697,56 @@ data: [DONE]
         let body: serde_json::Value =
             serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
         assert_eq!(body["prompt_cache_key"], "thread-cache-key-abc");
+    }
+
+    /// The four public completion entry points build distinct request values;
+    /// keep the shared cache key pinned across plain/tool and buffered/native
+    /// streaming calls so a future builder cannot silently omit it.
+    #[tokio::test]
+    async fn every_completion_method_sends_prompt_cache_key() {
+        for method in 0..4 {
+            let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+            let mut completion = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+            completion.metadata.insert(
+                crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+                "thread-cache-key-all-methods".to_string(),
+            );
+            let mut tool_completion = ToolCompletionRequest::new(
+                vec![ChatMessage::user("search")],
+                vec![search_tool_definition()],
+            );
+            tool_completion.metadata = completion.metadata.clone();
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let sink = Arc::new(RecordingCompletionStreamSink { sender });
+
+            match method {
+                0 => {
+                    provider.complete(completion).await.expect("completion");
+                }
+                1 => {
+                    provider
+                        .complete_with_tools(tool_completion)
+                        .await
+                        .expect("tool completion");
+                }
+                2 => {
+                    let _ = provider.complete_streaming(completion, sink).await;
+                }
+                3 => {
+                    let _ = provider
+                        .complete_with_tools_streaming(tool_completion, sink)
+                        .await;
+                }
+                _ => unreachable!("four completion methods"),
+            }
+
+            let body: serde_json::Value =
+                serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+            assert_eq!(
+                body["prompt_cache_key"], "thread-cache-key-all-methods",
+                "completion method {method} must carry the shared cache key",
+            );
+        }
     }
 
     /// Absent metadata must not synthesize the field.

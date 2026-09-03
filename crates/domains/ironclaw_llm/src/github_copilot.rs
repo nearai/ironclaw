@@ -21,11 +21,13 @@ use serde::{Deserialize, Serialize};
 use crate::config::RegistryProviderConfig;
 use crate::error::LlmError;
 use crate::github_copilot_auth::CopilotTokenManager;
+#[cfg(test)]
+use crate::provider::PROMPT_CACHE_KEY_METADATA;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    PROMPT_CACHE_KEY_METADATA, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, openai_json_schema_response_format, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    openai_json_schema_response_format, prompt_cache_key_from_metadata,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
@@ -123,10 +125,7 @@ impl GithubCopilotProvider {
         &self,
         metadata: &std::collections::HashMap<String, String>,
     ) -> Option<String> {
-        if self.unsupported_params.contains(PROMPT_CACHE_KEY_METADATA) {
-            return None;
-        }
-        metadata.get(PROMPT_CACHE_KEY_METADATA).cloned()
+        prompt_cache_key_from_metadata(&self.unsupported_params, metadata)
     }
 
     fn map_token_error(error: crate::github_copilot_auth::GithubCopilotAuthError) -> LlmError {

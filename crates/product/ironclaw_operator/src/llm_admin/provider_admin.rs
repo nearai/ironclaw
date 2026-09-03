@@ -699,6 +699,7 @@ mod tests {
             api_key: None,
             base_url: base_url.to_string(),
             model: model.to_string(),
+            unsupported_params: Vec::new(),
         })
     }
 
