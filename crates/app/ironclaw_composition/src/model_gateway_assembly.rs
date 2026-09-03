@@ -49,6 +49,7 @@ impl SkillLearnedNotifier for LiveSkillLearnedNotifier {
 
 pub(crate) async fn build_production_model_gateway(
     provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
+    prompt_cache_subkey: Option<[u8; 32]>,
 ) -> Result<
     (
         Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
@@ -59,7 +60,7 @@ pub(crate) async fn build_production_model_gateway(
 > {
     let LlmGatewayBundle {
         gateway, reload, ..
-    } = build_placeholder_llm_gateway(provider_factory).await?;
+    } = build_placeholder_llm_gateway(provider_factory, prompt_cache_subkey).await?;
     Ok((gateway, None, Some(reload)))
 }
 
@@ -106,18 +107,28 @@ pub(crate) struct RebornLlmReloadParts {
 
 async fn build_placeholder_llm_gateway(
     provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
+    prompt_cache_subkey: Option<[u8; 32]>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, session, provider_factory)
+    wrap_swappable_gateway(raw, session, provider_factory, prompt_cache_subkey)
 }
 
 /// Apply instrumentation outside the swappable provider so it survives reloads.
+///
+/// `prompt_cache_subkey` is `ironclaw_secrets::SecretsCrypto::derive_subkey`
+/// output under the deployment master key (see
+/// `RebornRuntimeStores::prompt_cache_subkey`); `None` when no master key was
+/// resolved. The gateway keys `derive_prompt_cache_key` HMAC-SHA-256 under it
+/// and, when `None`, omits `prompt_cache_key` from provider requests
+/// entirely rather than falling back to an unkeyed digest — see
+/// `ironclaw_loop_host::model_gateway::add_request_metadata`.
 pub(crate) fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
     provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
+    prompt_cache_subkey: Option<[u8; 32]>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
     use ironclaw_loop_contracts::ModelProfileId;
@@ -135,7 +146,10 @@ pub(crate) fn wrap_swappable_gateway(
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
     let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
-    let gateway = LlmProviderModelGateway::new(provider, policy);
+    let mut gateway = LlmProviderModelGateway::new(provider, policy);
+    if let Some(subkey) = prompt_cache_subkey {
+        gateway = gateway.with_prompt_cache_subkey(subkey);
+    }
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
         reload: RebornLlmReloadParts {

@@ -3415,11 +3415,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
     #[cfg(any(test, feature = "test-support"))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
-        None => build_production_model_gateway(boot_provider_factory).await?,
+        None => {
+            build_production_model_gateway(
+                boot_provider_factory,
+                Some(services.prompt_cache_subkey),
+            )
+            .await?
+        }
     };
     #[cfg(not(any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) =
-        build_production_model_gateway(boot_provider_factory).await?;
+        build_production_model_gateway(boot_provider_factory, Some(services.prompt_cache_subkey))
+            .await?;
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic

@@ -3,6 +3,12 @@ use super::*;
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
 use ironclaw_product_contracts::operator_tools::RebornOperatorToolCatalog;
 
+/// HKDF `info` domain separator for
+/// `RebornRuntimeStores::prompt_cache_subkey` — distinct from every other
+/// `SecretsCrypto::derive_subkey` caller so a subkey minted for this purpose
+/// can never be reused for another.
+const PROMPT_CACHE_SUBKEY_INFO: &[u8] = b"ironclaw.prompt-cache-key.v1";
+
 pub(crate) async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
     config: crate::LibSqlProductionSubstrateConfig<TPolicy, TWake>,
 ) -> Result<crate::LibSqlProductionHostRuntimeServices, crate::RebornCompositionError>
@@ -394,6 +400,15 @@ pub(super) async fn build_backend_production(
         }
     };
     let secret_store: Arc<dyn SecretStorePort> = stores.secret_credentials.secret_store.clone();
+    // The model gateway HMAC-keys its provider-visible `prompt_cache_key`
+    // hint under this subkey instead of hashing the caller-authoritative
+    // thread id unkeyed (CWE-359 confirmation oracle fix). Derived here,
+    // once, from the same crypto authority every other secret in this build
+    // shares — never a second, independently-sourced key.
+    let prompt_cache_subkey = stores
+        .secret_credentials
+        .crypto
+        .derive_subkey(PROMPT_CACHE_SUBKEY_INFO);
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         owner_user_id.clone(),
@@ -1474,6 +1489,7 @@ pub(super) async fn build_backend_production(
         trigger_conversation_services,
         production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
+        prompt_cache_subkey,
         #[cfg(test)]
         standalone_wasm_runtime_credential_provider_captured,
         credential_refresh_worker,
