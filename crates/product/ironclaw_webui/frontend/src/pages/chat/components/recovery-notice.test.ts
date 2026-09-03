@@ -1,11 +1,10 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
 import { componentSourceForTest } from "../../../lib/vm-component-harness";
 
 test("RecoveryNotice routes its recovery action through i18n", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     useT: () => (key) => `translated:${key}`,
   };

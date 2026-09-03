@@ -5,8 +5,9 @@ and an optional personal account linked as a Telegram device over MTProto. The
 package remains first-party and native; there is no WASM module or companion
 linked-account extension id. Extension id: `telegram`.
 
-- **Surfaces:** channel (`messages`: webhook `ChannelIngress`, message
-  `ChannelReply`, message `ChannelDelivery`) plus 15 tools for the linked
+- **Surfaces:** channel (`messages`: webhook `ChannelIngress`, a
+  `message`-cadence `ReplySink` that materializes a run's terminal reply as
+  Bot API messages, message `ChannelDelivery`) plus 15 tools for the linked
   account: send/edit/delete, add/remove reaction, open/list/inspect/read/search
   conversations and messages, and inspect/resolve/list Telegram identities.
 - **Setup:** deployment credentials (bot token, webhook secret, MTProto
@@ -17,8 +18,9 @@ linked-account extension id. Extension id: `telegram`.
   package.
 - **Runtime:** `first_party`
 - **Code:** crate `ironclaw_telegram_extension` (`src/`: Bot API channel
-  mapping plus `linked/` for MTProto login, transport, session handling,
-  mappings, pooling, and tool operations) + `manifest.toml`
+  mapping, the reply sink in `reply.rs`, plus `linked/` for MTProto login,
+  transport, session handling, mappings, pooling, and tool operations) +
+  `manifest.toml`
 - **Depends on:** contracts tier only — dependency-set parity with Slack (`host_api`, `extension_contracts`, `product_contracts`, `attachments`), pinned by `telegram_extension_gates.rs`; linked only by the binary and tests
 - **Tests:** `cargo test -p ironclaw_telegram_extension` — `tests/channel_conformance.rs`
   runs the exported channel-capability conformance suite (+ proptest fixtures)
@@ -29,6 +31,19 @@ validation, through restricted egress. The package never sees raw token bytes:
 the host runs the manifest-declared
 `shared_secret_header` verification and injects credentials on mediated
 egress.
+
+The reply half is a `message`-cadence `ReplySink` (`src/reply.rs`): the host
+asks it to reconcile only at the terminal point, where it renders the reply
+document through the same send path `deliver` uses — a completed answer as
+text split at Telegram's 4096-UTF-16-unit limit followed by the materialized
+attachments as `sendDocument`, a failure summary or a cancellation as one
+line. Idempotency rides its checkpoint (version 1,
+`{"terminal_applied": bool, "message_refs": [..]}`): a repeated terminal
+reconcile with an applied checkpoint answers `Applied` without a provider
+call, a partial render stays `Permanent` so accepted messages are never
+re-posted (OUT-7), and a checkpoint of an unknown version is treated as
+"not applied". A rate-limited first message is `Retryable` carrying the
+provider's `Retry-After` hint.
 
 Linked-account reads are live against Telegram rather than a mirrored inbox;
 writes act as the linked user. The package owns Telegram-specific login and

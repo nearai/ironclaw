@@ -388,6 +388,7 @@ async fn finalized_reply_projection_item(
         run_id: Some(event.run_id),
         body,
         finalized: true,
+        narration: false,
     }))
 }
 

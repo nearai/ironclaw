@@ -1,7 +1,7 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 
 const COPY = {
@@ -69,7 +69,9 @@ function componentProps(rendered, component, allComponents) {
   return props;
 }
 
-function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
+function createHarness({
+  onInstall = async () => ({ success: true }),
+}: DynamicTestOptions = {}) {
   const state = [];
   let cursor = 0;
 

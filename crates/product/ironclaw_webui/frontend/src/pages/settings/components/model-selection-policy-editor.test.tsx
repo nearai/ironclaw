@@ -16,7 +16,7 @@ const requests = vi.hoisted(() => ({
   setPolicy: vi.fn(),
 }));
 
-vi.mock("../lib/settings-api", () => ({
+vi.mock("../lib/llm-api", () => ({
   setUserModelPolicy: requests.setPolicy,
 }));
 

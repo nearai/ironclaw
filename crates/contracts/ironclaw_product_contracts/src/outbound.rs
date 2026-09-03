@@ -982,6 +982,12 @@ pub enum ProductProjectionItem {
         /// Live projection text leaves this false and cannot prove delivery.
         #[serde(default, skip_serializing_if = "is_false")]
         finalized: bool,
+        /// True once the loop went on past the model call that produced this
+        /// text ("Let me check the workspace." before a tool call): it is
+        /// progress narration that belongs with the run's activity, not the
+        /// answer. Live projection only; a finalized row is never narration.
+        #[serde(default, skip_serializing_if = "is_false")]
+        narration: bool,
     },
     Thinking {
         id: String,
@@ -1045,7 +1051,24 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body, .. } | Self::Thinking { id, body, .. } => {
+            Self::Text {
+                id,
+                body,
+                finalized,
+                narration,
+                ..
+            } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)?;
+                if *finalized && *narration {
+                    return Err(invalid(
+                        "projection_text",
+                        "a finalized transcript row is never narration",
+                    ));
+                }
+                Ok(())
+            }
+            Self::Thinking { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -1164,6 +1187,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 body: String,
                 #[serde(default)]
                 finalized: bool,
+                #[serde(default)]
+                narration: bool,
             },
             Thinking {
                 id: String,
@@ -1215,11 +1240,13 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 run_id,
                 body,
                 finalized,
+                narration,
             } => ProductProjectionItem::Text {
                 id,
                 run_id,
                 body,
                 finalized,
+                narration,
             },
             Wire::Thinking { id, run_id, body } => {
                 ProductProjectionItem::Thinking { id, run_id, body }

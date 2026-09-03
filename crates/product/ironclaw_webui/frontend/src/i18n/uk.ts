@@ -205,7 +205,6 @@ registerPack("uk", {
   "activity.separator": ", ",
   "tool.tabDetails": "Деталі",
   "tool.tabParameters": "Параметри",
-  "tool.tabResult": "Результат",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Відхилено",
   "tool.noDetail": "Без додаткових деталей.",
@@ -1194,6 +1193,7 @@ registerPack("uk", {
   "common.deleteChat": "Видалити чат",
   "chat.deleteFailed": "Не вдалося видалити цю розмову.",
   "chat.cancelFailed": "Не вдалося зупинити цей запуск. Можливо, він усе ще виконується. Спробуйте ще раз.",
+  "chat.runStopped": "Зупинено",
   "chat.deleteBusy": "Неможливо видалити розмову, поки вона виконується. Спочатку зупиніть її, а потім спробуйте ще раз.",
   "command.placeholder": "Введіть команду або пошук...",
   "routine.searchPlaceholder": "Назва процедури пошуку, тригер або дія",
@@ -1403,7 +1403,6 @@ registerPack("uk", {
   "common.file": "файл",
   "chat.previewAttachment": "Переглянути {name}",
   "chat.downloadAttachment": "Завантажити {name}",
-  "tool.resultAlt": "Результат інструмента"
 });
 
 registerPack("uk", {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -81,7 +80,7 @@ function extensionCardSourceForTest() {
  *     with no drift risk
  *   - primaryExtensionAction — the REAL export of extension-actions
  */
-function makeContext() {
+function makeContext(): vm.Context {
   // Minimal React stub — useState returns [initial, noop]; refs and effects are ignored.
   const React = {
     useState: (initial) => [initial, () => {}],

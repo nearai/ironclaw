@@ -1,8 +1,14 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import {
+  runVmModuleForTest,
+  type VmModuleExports,
+} from "../../../test-support/vm-module-harness";
+import type {
+  DynamicTestOptions,
+  DynamicTestValue,
+} from "../../../test-support/dynamic-test-types";
 
 function visit(node, fn) {
   if (Array.isArray(node)) {
@@ -81,7 +87,7 @@ function createReactHarness() {
   };
 }
 
-function translate(key, params = {}) {
+function translate(key, params: DynamicTestOptions = {}) {
   if (params.message) return `${key}:${params.message}`;
   return params.name ? `${key}:${params.name}` : key;
 }
@@ -132,7 +138,7 @@ function baseAdminState(overrides = {}) {
   };
 }
 
-function loadUsersView(harness) {
+function loadUsersView(harness): VmModuleExports {
   function Button() {}
   function ConfirmDialog() {}
   function FormField() {}
@@ -177,7 +183,7 @@ function loadUsersView(harness) {
   return { ...module, Button, ConfirmDialog, FormField, Input, SearchField };
 }
 
-function loadDetailModule(harness) {
+function loadDetailModule(harness): VmModuleExports {
   function ConfirmDialog() {}
   function ThreadScrapingPanel() {}
   const module = runVmModuleForTest(
@@ -215,7 +221,7 @@ function loadDetailModule(harness) {
   return { ...module, ConfirmDialog, ThreadScrapingPanel };
 }
 
-function loadDetailView(harness) {
+function loadDetailView(harness): DynamicTestValue {
   return loadDetailModule(harness).UserDetailView;
 }
 
@@ -286,7 +292,7 @@ test("admin users compose shared form and search controls without changing their
       required: undefined,
     },
   ]);
-  const inputProps = [...inputs];
+  const inputProps: DynamicTestOptions[] = [...inputs];
   assert.deepEqual(inputProps.map(({ id, required, size, type, value }) => ({ id, required, size, type, value })), [
     {
       id: "admin-user-display-name",

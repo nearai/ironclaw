@@ -176,6 +176,11 @@ pub enum ThreadLiveProjectionItem {
         id: String,
         run_id: TurnRunId,
         body: String,
+        /// True once the loop went on past the model call that produced this
+        /// text: it is narration inside the run's activity, not the answer.
+        /// Additive; absent for pre-existing producers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        narration: bool,
     },
     Thinking {
         id: String,
@@ -201,6 +206,11 @@ pub enum ThreadLiveProjectionItem {
         /// non-failures and pre-existing producers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_detail: Option<String>,
+        /// Bounded, sanitized input summary the producer already had in hand
+        /// (a reply document's activity detail). Additive; when absent the
+        /// product conversion falls back to the display-preview source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_summary: Option<String>,
     },
     WorkSummary {
         id: String,

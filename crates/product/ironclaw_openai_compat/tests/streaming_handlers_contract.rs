@@ -60,6 +60,235 @@ async fn chat_stream_emits_openai_chunks_without_projection_cursor() {
     assert_eq!(streamer.chat_calls(), 1);
 }
 
+/// Live text arrives one item per model call (the phase in the item id). A
+/// call the loop went on past is republished flagged as narration — already
+/// streamed, nothing more goes out — and the next call's text is a new
+/// phase: the completion stays one message, so the phases read as
+/// paragraphs, never as a rewrite.
+#[tokio::test]
+async fn chat_stream_carries_each_answer_phase_as_a_paragraph_of_one_completion() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![
+        projection_phase_envelope("chat-1", "text:run-1:1", "Let me look.", false),
+        projection_phase_envelope("chat-2", "text:run-1:1", "Let me look.", true),
+        projection_phase_envelope("chat-3", "text:run-1:2", "Here you go.", false),
+        run_status_envelope("chat-4", "completed"),
+    ]);
+    let router = router(streamer.clone());
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "look"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = response_body(response).await;
+    let contents = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        contents,
+        ["Let me look.", "\n\nHere you go."],
+        "raw SSE: {raw}"
+    );
+    assert!(raw.contains("[DONE]"), "raw SSE: {raw}");
+}
+
+/// The narration republish carries the document's bounded copy of the
+/// phase, which can be shorter than what already streamed. It confirms the
+/// phase and adds nothing; it is never the rewrite that ends the stream.
+#[tokio::test]
+async fn chat_stream_ignores_a_shorter_narration_republish_of_the_current_phase() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![
+        projection_phase_envelope(
+            "chat-1",
+            "text:run-1:1",
+            "Let me look at the long thing.",
+            false,
+        ),
+        projection_phase_envelope("chat-2", "text:run-1:1", "Let me look", true),
+        projection_phase_envelope("chat-3", "text:run-1:2", "Here you go.", false),
+        run_status_envelope("chat-4", "completed"),
+    ]);
+    let router = router(streamer.clone());
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "look"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = response_body(response).await;
+    assert!(!raw.contains("event: error"), "raw SSE: {raw}");
+    let contents = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        contents,
+        ["Let me look at the long thing.", "\n\nHere you go."],
+        "raw SSE: {raw}"
+    );
+    assert!(raw.contains("[DONE]"), "raw SSE: {raw}");
+}
+
+/// The durable transcript row arrives under the transcript's own id, never
+/// a phase id: it confirms the current phase and never starts one, so the
+/// completion carries no second copy of the answer.
+#[tokio::test]
+async fn chat_stream_a_finalized_transcript_row_confirms_the_current_phase() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![
+        projection_phase_envelope("chat-1", "text:run-1:1", "Let me look.", false),
+        projection_phase_envelope("chat-2", "text:run-1:1", "Let me look.", true),
+        projection_phase_envelope("chat-3", "text:run-1:2", "Here you go.", false),
+        finalized_text_envelope("chat-4", "message-7", "Here you go."),
+        run_status_envelope("chat-5", "completed"),
+    ]);
+    assert_eq!(
+        chat_delta_contents(streamer).await,
+        ["Let me look.", "\n\nHere you go."]
+    );
+}
+
+/// A republish of a phase the lane already moved past (a late narration
+/// flag, a replayed frame) changes nothing: no third paragraph, no extra
+/// separator.
+#[tokio::test]
+async fn chat_stream_ignores_a_late_republish_of_a_closed_phase() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![
+        projection_phase_envelope("chat-1", "text:run-1:1", "Let me look.", false),
+        projection_phase_envelope("chat-2", "text:run-1:2", "Here you go.", false),
+        projection_phase_envelope("chat-3", "text:run-1:1", "Let me look.", true),
+        run_status_envelope("chat-4", "completed"),
+    ]);
+    assert_eq!(
+        chat_delta_contents(streamer).await,
+        ["Let me look.", "\n\nHere you go."]
+    );
+}
+
+/// The Responses lane through the same calls: each delta, then
+/// `response.output_text.done` and `response.completed` carrying the
+/// accumulated text with exactly one separator.
+#[tokio::test]
+async fn responses_stream_carries_each_answer_call_as_a_paragraph_of_one_message() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_response(vec![
+        projection_phase_envelope(
+            "resp-1",
+            "text:run-1:1",
+            "Let me look at the long thing.",
+            false,
+        ),
+        projection_phase_envelope("resp-2", "text:run-1:1", "Let me look", true),
+        projection_phase_envelope("resp-3", "text:run-1:2", "Here you go.", false),
+        run_status_envelope("resp-4", "completed"),
+    ]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "look"}),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = response_body(response).await;
+    assert!(!raw.contains("event: error"), "raw SSE: {raw}");
+    let events = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .collect::<Vec<_>>();
+    let deltas = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_text.delta")
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deltas,
+        ["Let me look at the long thing.", "\n\nHere you go."],
+        "raw SSE: {raw}"
+    );
+    let accumulated = "Let me look at the long thing.\n\nHere you go.";
+    let done = events
+        .iter()
+        .find(|event| event["type"] == "response.output_text.done")
+        .expect("output_text.done");
+    assert_eq!(done["text"].as_str(), Some(accumulated), "raw SSE: {raw}");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response.completed");
+    assert!(
+        completed
+            .to_string()
+            .contains(&accumulated.replace('\n', "\\n")),
+        "response.completed carries the accumulated text: {completed}"
+    );
+}
+
+/// Drive one streamed chat completion and return its content deltas in
+/// order, asserting the stream ended cleanly.
+async fn chat_delta_contents(streamer: Arc<QueuedStreamer>) -> Vec<String> {
+    let router = router(streamer);
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "look"}]
+            }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = response_body(response).await;
+    assert!(!raw.contains("event: error"), "raw SSE: {raw}");
+    assert!(raw.contains("[DONE]"), "raw SSE: {raw}");
+    raw.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn responses_stream_emits_response_events_without_projection_cursor() {
     let streamer = Arc::new(QueuedStreamer::new());
@@ -90,8 +319,19 @@ async fn responses_stream_emits_response_events_without_projection_cursor() {
 async fn keepalive_is_suppressed_and_non_monotonic_rebase_fails_safely() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_response(vec![keepalive_envelope("keepalive")]);
-    streamer.push_response(vec![projection_text_envelope("first", "hello")]);
-    streamer.push_response(vec![projection_text_envelope("rebase", "he")]);
+    // The same phase going backwards: a rewrite the client cannot express.
+    streamer.push_response(vec![projection_phase_envelope(
+        "first",
+        "text:run-1:1",
+        "hello",
+        false,
+    )]);
+    streamer.push_response(vec![projection_phase_envelope(
+        "rebase",
+        "text:run-1:1",
+        "he",
+        false,
+    )]);
     let router = router(streamer);
 
     let response = router
@@ -119,8 +359,19 @@ async fn keepalive_is_suppressed_and_non_monotonic_rebase_fails_safely() {
 #[tokio::test]
 async fn chat_stream_non_monotonic_rebase_fails_safely() {
     let streamer = Arc::new(QueuedStreamer::new());
-    streamer.push_chat(vec![projection_text_envelope("first", "hello")]);
-    streamer.push_chat(vec![projection_text_envelope("rebase", "jello")]);
+    // The same phase rewritten: a rewrite the client cannot express.
+    streamer.push_chat(vec![projection_phase_envelope(
+        "first",
+        "text:run-1:1",
+        "hello",
+        false,
+    )]);
+    streamer.push_chat(vec![projection_phase_envelope(
+        "rebase",
+        "text:run-1:1",
+        "jello",
+        false,
+    )]);
     let router = router(streamer);
 
     let response = router
@@ -869,6 +1120,50 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
                     run_id: None,
                     body: text.to_string(),
                     finalized: false,
+                    narration: false,
+                }],
+            )
+            .expect("projection state"),
+        },
+    )
+}
+
+fn projection_phase_envelope(
+    cursor: &str,
+    id: &str,
+    text: &str,
+    narration: bool,
+) -> ProductOutboundEnvelope {
+    envelope(
+        cursor,
+        ProductOutboundPayload::ProjectionUpdate {
+            state: ProductProjectionState::new(
+                "thread-a",
+                vec![ProductProjectionItem::Text {
+                    id: id.to_string(),
+                    run_id: None,
+                    body: text.to_string(),
+                    finalized: false,
+                    narration,
+                }],
+            )
+            .expect("projection state"),
+        },
+    )
+}
+
+fn finalized_text_envelope(cursor: &str, id: &str, text: &str) -> ProductOutboundEnvelope {
+    envelope(
+        cursor,
+        ProductOutboundPayload::ProjectionUpdate {
+            state: ProductProjectionState::new(
+                "thread-a",
+                vec![ProductProjectionItem::Text {
+                    id: id.to_string(),
+                    run_id: None,
+                    body: text.to_string(),
+                    finalized: true,
+                    narration: false,
                 }],
             )
             .expect("projection state"),

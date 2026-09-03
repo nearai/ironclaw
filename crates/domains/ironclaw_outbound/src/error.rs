@@ -35,4 +35,34 @@ pub enum OutboundError {
     /// bounded retry budget is exhausted.
     #[error("outbound state compare-and-swap conflict")]
     CasConflict,
+    /// A guarded reply publication write carried a fence other than the
+    /// current one: another publisher claimed the lease since. `expected_fence`
+    /// is the fence the caller wrote with; `actual_fence` the stored one.
+    #[error(
+        "reply publisher is stale: wrote with fence {expected_fence}, current fence is {actual_fence}"
+    )]
+    StaleReplyPublisher {
+        expected_fence: u64,
+        actual_fence: u64,
+    },
+    /// The publication already settled; settlement is one-way.
+    #[error("reply publication is already settled")]
+    ReplyPublicationSettled,
+    /// A revision counter would move backwards or cross: `published` is the
+    /// durable (or limiting) value, `requested` the offending one.
+    #[error("reply publication revision regressed: durable {published}, requested {requested}")]
+    ReplyPublicationRevisionRegressed { published: u64, requested: u64 },
+    /// No publication substate exists under that delivery id.
+    #[error("reply publication not found")]
+    ReplyPublicationNotFound,
+    /// The delivery id already carries a publication for another target, or a
+    /// plain one-shot attempt that cannot be adopted.
+    #[error("reply publication target does not match the existing attempt")]
+    ReplyPublicationTargetMismatch,
+    /// `Delivered` was requested before the terminal revision was applied.
+    #[error("reply publication has not applied its terminal revision")]
+    ReplyPublicationNotTerminal,
+    /// A guarded write needs a lease (claim first).
+    #[error("reply publication lease is required")]
+    ReplyPublicationLeaseRequired,
 }

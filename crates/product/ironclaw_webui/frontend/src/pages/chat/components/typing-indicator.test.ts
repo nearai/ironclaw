@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -19,7 +18,7 @@ test("TypingIndicator keeps the brief action label beside the working indicator"
   const components = {
     NearProcessIndicator() {},
   };
-  const context = {
+  const context: vm.Context = {
     ...components,
     useT: () => (key, params) =>
       params ? `${key}:${JSON.stringify(params)}` : key,
@@ -43,7 +42,7 @@ test("TypingIndicator keeps the static mark with elapsed time after completion",
   const components = {
     NearProcessIndicator() {},
   };
-  const context = {
+  const context: vm.Context = {
     ...components,
     useT: () => (key, params) =>
       params ? `${key}:${JSON.stringify(params)}` : key,
@@ -75,7 +74,7 @@ test.each([
     const components = {
       NearProcessIndicator() {},
     };
-    const context = {
+    const context: vm.Context = {
       ...components,
       useT: () => (key, params) =>
         params ? `${key}:${JSON.stringify(params)}` : key,

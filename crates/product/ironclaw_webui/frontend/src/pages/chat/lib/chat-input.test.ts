@@ -1,7 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
+import { domFixture } from "../../../test-support/browser-mocks";
 
 import {
   INITIAL_COMMAND_MENU_SELECTION,
@@ -18,6 +20,7 @@ import {
   componentProps,
   componentSourceForTest,
   findComponent,
+  type VmComponentProps,
 } from "../../../lib/vm-component-harness";
 
 // Wire shape from `GET /api/webchat/v2/commands`. Two commands share the
@@ -51,7 +54,7 @@ function chatInputSourceForTest() {
 }
 
 function templateProps(node) {
-  const props = {};
+  const props: VmComponentProps = {};
   for (let index = 0; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(HTML_ATTRIBUTE_PATTERN)?.[1];
     if (name) props[name] = node.values[index];
@@ -97,13 +100,13 @@ function renderChatInput({
   authScopeFn = () => "test-scope",
   setDraftCalls = [],
   commands = [],
-} = {}) {
+}: DynamicTestOptions = {}) {
   const components = {
     Button() {},
     Icon() {},
   };
   let stateIndex = 0;
-  const context = {
+  const context: vm.Context = {
     ...components,
     React: {
       useCallback: (fn) => fn,
@@ -722,10 +725,12 @@ function createChatInputHookHost() {
   } };
 }
 
-function renderChatInputStateful({ getDraftByKey = {} } = {}) {
+function renderChatInputStateful(
+  { getDraftByKey = {} }: DynamicTestOptions = {},
+) {
   const host = createChatInputHookHost();
   const components = { Button() {}, Icon() {} };
-  const context = {
+  const context: vm.Context = {
     ...components,
     React: host.React,
     globalThis: {},
@@ -829,16 +834,17 @@ test("canStealFocus takes focus from the control that navigated here", () => {
   // clicking "+ New" or a sidebar thread row that button IS document
   // .activeElement when the composer's rAF runs. Refusing to steal from it
   // meant the composer was never focused on the two paths #7204 is about.
-  const child = { tagName: "BUTTON", closest: () => null };
-  const composer = {
+  const child = domFixture<Element>({ tagName: "BUTTON", closest: () => null });
+  const composer = domFixture<HTMLTextAreaElement>({
     tagName: "TEXTAREA",
     contains: (node) => node === child,
-  };
-  const outside = (tagName, extra = {}) => ({
-    tagName,
-    closest: () => null,
-    ...extra,
   });
+  const outside = (tagName, extra = {}) =>
+    domFixture<Element>({
+      tagName,
+      closest: () => null,
+      ...extra,
+    });
 
   assert.strictEqual(canStealFocus(null, composer), true);
   assert.strictEqual(canStealFocus(outside("BODY"), composer), true);
@@ -857,7 +863,10 @@ test("canStealFocus takes focus from the control that navigated here", () => {
   );
   assert.strictEqual(
     canStealFocus(
-      { tagName: "BUTTON", closest: (selector) => ({ selector }) },
+      domFixture<Element>({
+        tagName: "BUTTON",
+        closest: (selector) => domFixture<Element>({ id: selector }),
+      }),
       composer,
     ),
     false,

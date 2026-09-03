@@ -790,6 +790,7 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
+            session_reply_channel,
             extra_first_party_bundles,
             recording_network_egress,
             google_oauth_backend_for_test,
@@ -888,7 +889,9 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_native_extension_factories(native_extension_factories);
         }
         if !channel_extension_bindings.is_empty() {
-            input = input.with_channel_extension_bindings(channel_extension_bindings);
+            input = input
+                .with_channel_extension_bindings(channel_extension_bindings)
+                .with_session_reply_channel(session_reply_channel);
         }
         if has_fixture_extensions {
             // Fixture packages model HOST-BUNDLED extensions (overview §8), so
@@ -916,6 +919,12 @@ impl HostRuntimeCapabilityHarness {
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
         let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        // The harness's runs execute on the test group's own turn runtime,
+        // not this composed runtime's, so the coordinator's ONE reply
+        // publication start must carry the group's kernel handles — the
+        // group wires it (channel-host-for-test or the builder helper)
+        // instead of the build.
+        ironclaw_composition::test_support::defer_reply_publication_for_test(&mut runtime_input);
         if workspace_scoped_per_caller {
             // The same raise `serve` applies unconditionally: agent tool
             // grants, approval leases, and attachment handles resolve the

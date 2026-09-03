@@ -1,6 +1,7 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
+
+import { createMemoryStorage } from "../test-support/browser-mocks";
 
 import {
   DESKTOP_SIDEBAR_STORAGE_KEY,
@@ -11,28 +12,18 @@ import {
   writeDesktopSidebarOpen,
 } from "../lib/sidebar-state";
 
-function createLocalStorage(initial = {}) {
-  const values = new Map(Object.entries(initial));
-  return {
-    getItem: (key) => (values.has(key) ? values.get(key) : null),
-    setItem: (key, value) => values.set(key, String(value)),
-    removeItem: (key) => values.delete(key),
-    dump: () => Object.fromEntries(values.entries()),
-  };
-}
-
 test("readDesktopSidebarOpen defaults to open unless the stored value is false", () => {
-  assert.equal(readDesktopSidebarOpen(createLocalStorage()), true);
+  assert.equal(readDesktopSidebarOpen(createMemoryStorage()), true);
   assert.equal(
     readDesktopSidebarOpen(
-      createLocalStorage({ [DESKTOP_SIDEBAR_STORAGE_KEY]: "false" })
+      createMemoryStorage({ [DESKTOP_SIDEBAR_STORAGE_KEY]: "false" })
     ),
     false
   );
 });
 
 test("writeDesktopSidebarOpen persists the desktop preference", () => {
-  const storage = createLocalStorage();
+  const storage = createMemoryStorage();
 
   writeDesktopSidebarOpen(false, storage);
   assert.equal(storage.dump()[DESKTOP_SIDEBAR_STORAGE_KEY], "false");

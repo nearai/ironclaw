@@ -2272,8 +2272,21 @@ impl ExtensionInstallationStore {
                             installation_id,
                         });
                     }
+                    let mut changed = false;
                     if record.legacy_tenant_owner {
                         record.legacy_tenant_owner = false;
+                        changed = true;
+                    }
+                    // Incarnations were added after v2 installation rows
+                    // shipped. A lifecycle write is the safe compatibility
+                    // point to give an older live row its stable identity;
+                    // without one, hosted-MCP preparation cannot checkpoint
+                    // or finalize the discovery that follows installation.
+                    if record.incarnation_id.is_none() {
+                        record.incarnation_id = Some(InstallationIncarnationId::fresh());
+                        changed = true;
+                    }
+                    if changed {
                         record.updated_at = now;
                     }
                     Ok(CasApply::new(record.clone(), record))

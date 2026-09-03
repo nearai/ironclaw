@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Panel } from "../../../design-system/primitives";

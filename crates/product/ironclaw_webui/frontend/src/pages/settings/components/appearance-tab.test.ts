@@ -1,8 +1,10 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import {
+  runVmModuleForTest,
+  type VmComponentProps,
+} from "../../../test-support/vm-module-harness";
 
 function visit(node, fn) {
   if (Array.isArray(node)) {
@@ -50,7 +52,7 @@ function findComponentNodes(root, component) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];

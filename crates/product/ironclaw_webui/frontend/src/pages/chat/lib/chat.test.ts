@@ -1,10 +1,14 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
 
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
+
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
-import { componentSourceForTest } from "../../../lib/vm-component-harness";
+import {
+  componentSourceForTest,
+  type VmComponentProps,
+} from "../../../lib/vm-component-harness";
 import "../../../test/vm-tsx-setup";
 import { channelConnectionFromGate, gateIsDeviceLink } from "./gates";
 import { messageBelongsToActiveRun } from "./message-types";
@@ -61,7 +65,7 @@ function findNode(node, predicate) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   assert.ok(node, "expected component node");
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
@@ -91,7 +95,7 @@ function renderChat({
   // React would. Left undefined by default: each call gets fresh refs,
   // matching every existing single-render test.
   refs = [],
-}) {
+}: DynamicTestOptions) {
   let refSlot = 0;
   const components = {
     ApprovalCard() {},
@@ -110,7 +114,7 @@ function renderChat({
     SuggestionChips() {},
     TypingIndicator() {},
   };
-  const context = {
+  const context: vm.Context = {
     ...components,
     React: {
       // The device-link card is `React.lazy`'d from chat.tsx so its flow never

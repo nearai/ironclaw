@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -9,9 +8,17 @@ import {
 } from "../lib/jobs-api";
 import { truncateJobId } from "../lib/jobs-presenters";
 
+type JobActionVariables = { jobId: string };
+type RestartJobResult = {
+  success: boolean;
+  message: string;
+  new_job_id?: string;
+};
+type JobActionResult = { type: "success" | "error"; message: string };
+
 export function useJobs() {
   const queryClient = useQueryClient();
-  const [actionResult, setActionResult] = React.useState(null);
+  const [actionResult, setActionResult] = React.useState<JobActionResult | null>(null);
 
   const summaryQuery = useQuery({
     queryKey: ["jobs-summary"],
@@ -30,7 +37,7 @@ export function useJobs() {
     queryClient.invalidateQueries({ queryKey: ["jobs-summary"] });
   }, [queryClient]);
 
-  const cancelMutation = useMutation({
+  const cancelMutation = useMutation<unknown, Error, JobActionVariables>({
     mutationFn: ({ jobId }) => cancelJobRequest(jobId),
     onSuccess: (_data, { jobId }) => {
       setActionResult({
@@ -47,7 +54,11 @@ export function useJobs() {
     },
   });
 
-  const restartMutation = useMutation({
+  const restartMutation = useMutation<
+    RestartJobResult,
+    Error,
+    JobActionVariables
+  >({
     mutationFn: ({ jobId }) => restartJobRequest(jobId),
     onSuccess: (data) => {
       setActionResult({

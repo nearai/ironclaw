@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import "streamdown/styles.css";
 import { toast } from "../../../lib/toast";
@@ -25,8 +24,8 @@ function codeBlockLabels(t) {
 function enhanceCodeBlocks(root, t) {
   if (!root) return () => {};
   const labels = codeBlockLabels(t);
-  const cleanups = [];
-  const resetTimers = new Set();
+  const cleanups: Array<() => void> = [];
+  const resetTimers = new Set<ReturnType<typeof setTimeout>>();
   const listen = (target, type, handler) => {
     target.addEventListener(type, handler);
     cleanups.push(() => target.removeEventListener(type, handler));
@@ -180,7 +179,7 @@ function MarkdownRendererImpl({
   const mountedRef = React.useRef(true);
   const renderInFlightRef = React.useRef(false);
   const markdownLoadFailedRef = React.useRef(false);
-  const requestRenderRef = React.useRef(() => false);
+  const requestRenderRef = React.useRef<() => boolean>(() => false);
   const wasStreamingRef = React.useRef(streaming);
   if (streaming) wasStreamingRef.current = true;
   const handleClick = React.useCallback(

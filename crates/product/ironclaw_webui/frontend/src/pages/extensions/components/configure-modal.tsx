@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
@@ -27,20 +26,21 @@ import type { FocusTarget } from "../lib/focus-target";
 import { DeviceLinkPanel } from "../../../components/device-link-panel";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
-/**
- * @param {{
- *   extension: {
- *     displayName?: string;
- *     packageRef?: string | { id?: string };
- *     surfaces?: unknown[];
- *     channel?: unknown;
- *     installation_state?: string;
- *   };
- *   onClose: () => void;
- *   onSaved?: (result?: unknown) => void;
- *   returnFocusTo?: FocusTarget | null;
- * }} props
- */
+type ExtensionPackageRef = string | { id?: string };
+type ConfigureModalProps = {
+  extension: {
+    displayName?: string;
+    packageRef?: ExtensionPackageRef;
+    surfaces?: unknown[];
+    channel?: unknown;
+    installation_state?: string;
+  };
+  onClose: () => void;
+  onSaved?: (result?: unknown) => void;
+  returnFocusTo?: FocusTarget | null;
+  initialConnection?: "workspace_bot" | "personal_account" | null;
+};
+
 export function ConfigureModal({
   extension,
   onClose,
@@ -50,9 +50,14 @@ export function ConfigureModal({
   // the ceremony it named instead of the choice screen. `null` keeps the
   // choice screen, which is what the Configure button has always shown.
   initialConnection = null,
-}) {
+}: ConfigureModalProps) {
   const t = useT();
-  const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
+  const extensionName =
+    extension?.displayName ||
+    (typeof extension?.packageRef === "string"
+      ? extension.packageRef
+      : extension?.packageRef?.id) ||
+    t("extensions.defaultName");
   const {
     phase,
     blockers = [],
@@ -64,9 +69,13 @@ export function ConfigureModal({
     error,
   } =
     useExtensionSetup(extension?.packageRef);
-  const [values, setValues] = React.useState({});
-  const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
-  const [connectionChoice, setConnectionChoice] = React.useState(null);
+  const [values, setValues] = React.useState<Record<string, string>>({});
+  const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState<
+    "bearer" | "oauth" | "no_auth" | null
+  >(null);
+  const [connectionChoice, setConnectionChoice] = React.useState<
+    "workspace_bot" | "personal_account" | null
+  >(null);
   const [activeConnection, setActiveConnection] = React.useState(initialConnection);
   const queryClient = useQueryClient();
   const packageId =
@@ -122,7 +131,7 @@ export function ConfigureModal({
   );
 
   const handleSubmit = React.useCallback(() => {
-    const secretPayload = {};
+    const secretPayload: Record<string, string> = {};
     for (const [key, val] of Object.entries(values)) {
       const trimmed = (val || "").trim();
       if (trimmed) secretPayload[key] = trimmed;
@@ -348,7 +357,7 @@ export function ConfigureModal({
   }
 
   if (hostedMcpAuthSelectionRequired) {
-    const authChoices = ["bearer", "oauth", "no_auth"];
+    const authChoices = ["bearer", "oauth", "no_auth"] as const;
     return (
       <ModalShell
         onClose={onClose}
@@ -658,7 +667,7 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex^='-'])",
 ].join(",");
 
-function isVisible(element) {
+function isVisible(element: HTMLElement) {
   if (typeof element.checkVisibility === "function") {
     return element.checkVisibility({
       checkOpacity: true,
@@ -675,9 +684,9 @@ function isVisible(element) {
   );
 }
 
-function focusableElements(container) {
+function focusableElements(container: HTMLElement | null) {
   if (!container) return [];
-  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (element) =>
       element.tabIndex >= 0 &&
       !element.hidden &&
@@ -697,7 +706,7 @@ function focusableElements(container) {
 function ModalShell({ onClose, returnFocusTo, title, children }) {
   const t = useT();
   const titleId = React.useId();
-  const dialogRef = React.useRef(null);
+  const dialogRef = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => {
     const returnTarget = returnFocusTo || document.activeElement;
     const dialog = dialogRef.current;

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Navigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
@@ -8,6 +7,7 @@ import { PageScroll, PageStack } from "../../layout/page-shell";
 import { RestartBanner } from "./components/restart-banner";
 import { SettingsToolbar } from "./components/settings-toolbar";
 import { useSettings } from "./hooks/useSettings";
+import type { GatewayOutletContext } from "../../layout/gateway-layout";
 
 const AppearanceTab = React.lazy(() =>
   import("./components/appearance-tab").then(({ AppearanceTab }) => ({ default: AppearanceTab }))
@@ -39,7 +39,7 @@ export function SettingsPage() {
     isAdmin = false,
     theme,
     setTheme,
-  } = useOutletContext();
+  } = useOutletContext<GatewayOutletContext>();
   const defaultTab = isAdmin ? "inference" : "language";
   const tab = requestedTab || defaultTab;
   const {

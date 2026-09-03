@@ -331,10 +331,28 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
             .map_err(map_runtime_http_error)?;
 
         Ok(RestrictedEgressResponse {
+            retry_after: retry_after_hint(&response.headers),
             status: response.status,
             body: response.body,
         })
     }
+}
+
+/// The longest `Retry-After` a provider may park a publisher for. A hostile
+/// or misconfigured provider sending an enormous value would otherwise stall
+/// a reply indefinitely; anything above the cap is clamped to it.
+const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Parse the delta-seconds form of `Retry-After` (RFC 9110 §10.2.3) into the
+/// one typed response-header hint adapters may see. The HTTP-date form is
+/// deliberately not parsed: it needs a clock the adapter cannot verify, and
+/// every rate-limiting provider this host talks to sends delta-seconds.
+fn retry_after_hint(headers: &[(String, String)]) -> Option<std::time::Duration> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .map(|seconds| std::time::Duration::from_secs(seconds).min(RETRY_AFTER_CAP))
 }
 
 fn credential_target_with_body_limit(
@@ -405,6 +423,14 @@ mod tests {
     }
 
     impl RecordingNetworkHttpEgress {
+        fn with_response_headers(headers: Vec<(String, String)>) -> Self {
+            let mut fake = Self::ok();
+            if let Ok(response) = &mut fake.response {
+                response.headers = headers;
+            }
+            fake
+        }
+
         fn ok() -> Self {
             Self {
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -701,6 +727,65 @@ mod tests {
         assert!(
             requests.lock().unwrap().is_empty(),
             "no network activity without credential material"
+        );
+    }
+
+    #[test]
+    fn retry_after_hint_parses_delta_seconds_case_insensitively_and_caps() {
+        let header = |name: &str, value: &str| vec![(name.to_string(), value.to_string())];
+        assert_eq!(
+            retry_after_hint(&header("Retry-After", "3")),
+            Some(std::time::Duration::from_secs(3))
+        );
+        assert_eq!(
+            retry_after_hint(&header("retry-after", " 12 ")),
+            Some(std::time::Duration::from_secs(12))
+        );
+        assert_eq!(
+            retry_after_hint(&header("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT")),
+            None,
+            "the HTTP-date form is deliberately not parsed"
+        );
+        assert_eq!(
+            retry_after_hint(&header("Retry-After", "999999999")),
+            Some(RETRY_AFTER_CAP),
+            "a hostile value is clamped, never honoured"
+        );
+        assert_eq!(retry_after_hint(&[]), None);
+    }
+
+    /// The caller-level proof for the retry hint: `execute` transfers the
+    /// provider's `Retry-After` response header into
+    /// `RestrictedEgressResponse::retry_after`, capped — not just the parser
+    /// helper in isolation.
+    #[tokio::test]
+    async fn execute_carries_the_capped_retry_after_hint_onto_the_response() {
+        let scope = test_scope();
+        let (port, _requests) =
+            host_egress_port(RecordingNetworkHttpEgress::with_response_headers(vec![(
+                "Retry-After".to_string(),
+                "7".to_string(),
+            )]));
+        let credentials = seeded_credentials(
+            &scope,
+            &SecretHandle::new("vendor_bot_token").unwrap(),
+            "unused",
+        )
+        .await;
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        let response = transport
+            .execute(approved(
+                "https://vendor.example/api/chat.postMessage",
+                "vendor.example",
+                None,
+            ))
+            .await
+            .expect("transport executes");
+        assert_eq!(
+            response.retry_after,
+            Some(std::time::Duration::from_secs(7)),
+            "the provider's Retry-After rides the restricted-egress response"
         );
     }
 }

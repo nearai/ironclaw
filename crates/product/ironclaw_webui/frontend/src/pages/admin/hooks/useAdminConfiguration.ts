@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchExtensionAdminConfiguration,
@@ -7,13 +6,54 @@ import {
 
 const queryKey = ["admin", "extension-configuration"];
 
+type ConfigurationField = {
+  handle: string;
+  label?: string;
+  value?: string;
+  description?: string;
+  secret?: boolean;
+  provided?: boolean;
+  required?: boolean;
+};
+
+type ConfigurationGroup = {
+  group_id: string;
+  revision: number;
+  display_name?: string;
+  description?: string;
+  complete?: boolean;
+  fields: ConfigurationField[];
+  used_by: Array<{
+    package_id: string;
+    display_name?: string;
+    installed?: boolean;
+  }>;
+};
+
+type SaveConfigurationVariables = {
+  groupId: string;
+  values: Array<{ handle: string; value: string }>;
+  expectedRevision: number;
+  idempotencyKey: string;
+};
+
+function apiErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const status = Reflect.get(error, "status");
+  return typeof status === "number" ? status : undefined;
+}
+
 export function useAdminConfiguration() {
   const queryClient = useQueryClient();
-  const query = useQuery({
+  const query = useQuery<ConfigurationGroup[]>({
     queryKey,
     queryFn: fetchExtensionAdminConfiguration,
   });
-  const mutation = useMutation({
+  const mutation = useMutation<
+    ConfigurationGroup,
+    Error,
+    SaveConfigurationVariables
+  >({
     mutationFn: ({ groupId, values, expectedRevision, idempotencyKey }) =>
       replaceExtensionAdminConfiguration(
         groupId,
@@ -22,12 +62,12 @@ export function useAdminConfiguration() {
         idempotencyKey,
       ),
     onSuccess: (saved) => {
-      queryClient.setQueryData(queryKey, (groups = []) =>
+      queryClient.setQueryData<ConfigurationGroup[]>(queryKey, (groups = []) =>
         groups.map((group) => group.group_id === saved.group_id ? saved : group),
       );
     },
     onError: (error) => {
-      if (error?.status === 409) {
+      if (apiErrorStatus(error) === 409) {
         return queryClient.invalidateQueries({ queryKey });
       }
       return undefined;

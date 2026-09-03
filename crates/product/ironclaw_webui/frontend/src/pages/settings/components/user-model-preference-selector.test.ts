@@ -1,8 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import type { VmComponentProps } from "../../../test-support/vm-module-harness";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -50,7 +50,7 @@ function collectRenderedText(root) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
@@ -89,7 +89,7 @@ test("model preference selector contains long model names inside its card", () =
       Card: "Card",
       SelectMenu,
       html,
-      useT: () => (key, params = {}) =>
+      useT: () => (key, params: VmComponentProps = {}) =>
         key === "llm.followWorkspaceDefault"
           ? `Workspace default (${params.model})`
           : key,
@@ -149,7 +149,7 @@ test("stale model preference can be reset when selection policy is unavailable",
       Card: "Card",
       SelectMenu,
       html,
-      useT: () => (key, params = {}) =>
+      useT: () => (key, params: VmComponentProps = {}) =>
         key === "llm.followWorkspaceDefault"
           ? `Workspace default (${params.model})`
           : key === "llm.unavailableModel"

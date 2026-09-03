@@ -13,6 +13,16 @@ import { ModelSelectionPolicyEditor } from "./model-selection-policy-editor";
 import { modelEntryFor, normalizeModelCatalog } from "../lib/model-capabilities";
 import { ModelCapabilityBadges } from "./model-capability-badges";
 
+type InferenceTabProps = {
+  isAdmin?: boolean;
+  settings: Record<string, unknown> & { selected_model?: string };
+  gatewayStatus?: { llm_backend?: string; llm_model?: string } | null;
+  onSave: (key: string, value: unknown) => void;
+  savedKeys: Record<string, boolean>;
+  isLoading: boolean;
+  searchQuery?: string;
+};
+
 export function InferenceTab({
   isAdmin = false,
   settings,
@@ -21,7 +31,7 @@ export function InferenceTab({
   savedKeys,
   isLoading,
   searchQuery = "",
-}) {
+}: InferenceTabProps) {
   const t = useT();
   // Source the active backend/model from the `/llm/providers` snapshot (the
   // same query the provider list below renders from) rather than the empty

@@ -1,9 +1,10 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { EventSourcePlus as PackagedEventSourcePlus } from "event-source-plus";
 import { test, vi } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import { CONNECTION_STATUS } from "./connection-status";
 
@@ -42,7 +43,7 @@ function createHarness({
   navigationType = "navigate",
   sessionStorage = createSessionStorage(),
   random = () => 0.5,
-} = {}) {
+}: DynamicTestOptions = {}) {
   const statuses = [];
   const streams = [];
   const timers = [];
@@ -57,6 +58,13 @@ function createHarness({
   const effects = [];
 
   class EventSourcePlus {
+    url;
+    options;
+    lastEventId;
+    requestOptions;
+    hooks;
+    controller;
+
     constructor(url, options) {
       this.url = url;
       this.options = options;
@@ -65,7 +73,7 @@ function createHarness({
       streams.push(this);
     }
 
-    listen(hooks) {
+    listen(hooks: DynamicTestOptions) {
       this.hooks = hooks;
       const stream = this;
       this.controller = {
@@ -125,7 +133,7 @@ function createHarness({
     }
   }
 
-  const context = {
+  const context: vm.Context = {
     CONNECTION_STATUS,
     clientActionId: () => connectionId,
     EventSourcePlus,
@@ -541,7 +549,7 @@ test("the packaged client yields mid-stream body failures to the coordinator ins
     });
     const abortEvents = [];
 
-    controller = stream.listen({});
+    controller = stream.listen({ onMessage() {} });
     controller.onAbort((event) => abortEvents.push(event));
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -576,6 +584,7 @@ test("the packaged client yields retry ownership when an error hook aborts", asy
 
   try {
     controller = stream.listen({
+      onMessage() {},
       onResponseError() {
         controller.abort("IronClaw retry coordinator owns recovery");
       },

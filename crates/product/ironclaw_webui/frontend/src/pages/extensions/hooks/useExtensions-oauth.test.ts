@@ -1,8 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 
 // The origin-independent flow-status poll is fire-and-forget: the interval
@@ -36,7 +36,7 @@ function useExtensionsOauthSourceForTest() {
 }
 
 test("OAuth completion uses the canonical three-state lifecycle predicate", () => {
-  const context = { globalThis: {} };
+  const context: vm.Context = { globalThis: {} };
   vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
   const { extensionListItemIsConfigured } = context.globalThis.__testExports;
 
@@ -46,7 +46,7 @@ test("OAuth completion uses the canonical three-state lifecycle predicate", () =
 });
 
 test("useExtensionSetup derives hosted MCP auth recovery from the typed setup blocker", () => {
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     useQuery: () => ({
       data: {
@@ -75,7 +75,7 @@ test("useExtensionSetup preserves the authoritative setup phase, blockers, field
     fields: [{ name: "public_url", prompt: "Public webhook URL" }],
     onboarding: { setup_url: "https://example.test/setup" },
   };
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     useQuery: () => ({ data: response, isLoading: false, error: null }),
   };
@@ -91,7 +91,7 @@ test("useExtensionSetup preserves the authoritative setup phase, blockers, field
 
 function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
   const mutationConfigs = [];
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     Promise,
@@ -170,8 +170,8 @@ test("hosted MCP auth selection submits one selection and refreshes setup state"
   const selections = [];
   const mutationConfigs = [];
   const saved = [];
-  let selectionResponse = { success: true };
-  const context = {
+  let selectionResponse: DynamicTestOptions = { success: true };
+  const context: vm.Context = {
     Error,
     React: {
       useCallback: (fn) => fn,
@@ -257,7 +257,7 @@ test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
   let mutationConfig = null;
   let stateIndex = 0;
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -329,7 +329,7 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
   let stateIndex = 0;
   let configuredCount = 0;
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -466,7 +466,7 @@ test("useOauthSetup does not treat persisted first-time OAuth credentials as act
     installation_state: "setup_needed",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -593,7 +593,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     installation_state: "setup_needed",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -712,7 +712,7 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
   let stateIndex = 0;
   let configuredCount = 0;
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -863,7 +863,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     installation_state: "active",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -988,7 +988,7 @@ test("useOauthSetup ignores a stale OAuth callback when the flow response carrie
   let stateIndex = 0;
   let configuredCount = 0;
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     React: {
@@ -1104,7 +1104,7 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
   let configuredCount = 0;
   const flowStatusCalls = [];
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     Promise,
@@ -1234,7 +1234,7 @@ test("useOauthSetup translates expired and canceled flow-status failures", async
   let configuredCount = 0;
   let flowStatus = "expired";
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     Promise,
@@ -1400,7 +1400,7 @@ test("useOauthSetup ignores flow A status after flow B becomes current", async (
     },
     location: { href: "about:blank" },
   };
-  const context = {
+  const context: vm.Context = {
     Date,
     Error,
     Promise,
@@ -1507,7 +1507,7 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
   let stateIndex = 0;
   let now = 0;
   const popup = { closed: false, location: { href: "about:blank" } };
-  const context = {
+  const context: vm.Context = {
     Date: { now: () => now },
     Error,
     Promise,

@@ -674,10 +674,10 @@ mod tests {
         assert!(tab.contains("traceCommons.authorize"));
 
         // Authorize calls the POST endpoint and invalidates the credits query.
-        let settings_api = source_text("pages/settings/lib/settings-api.ts");
-        assert!(settings_api.contains("export function authorizeTraceHold"));
-        assert!(settings_api.contains("/authorize"));
-        assert!(settings_api.contains("method: \"POST\""));
+        let trace_api = source_text("pages/settings/lib/trace-api.ts");
+        assert!(trace_api.contains("export function authorizeTraceHold"));
+        assert!(trace_api.contains("/authorize"));
+        assert!(trace_api.contains("method: \"POST\""));
         let trace_hook = source_text("pages/settings/hooks/useTraceCredits.ts");
         assert!(trace_hook.contains("authorizeTraceHold"));
         assert!(trace_hook.contains("invalidateQueries({ queryKey: [\"trace-credits\"] })"));

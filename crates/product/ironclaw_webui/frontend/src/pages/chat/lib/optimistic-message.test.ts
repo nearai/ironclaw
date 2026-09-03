@@ -1,11 +1,12 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import { buildOptimisticMessage } from "./optimistic-message";
 
 test("buildOptimisticMessage carries side metadata through `extra`", () => {
-  const message = buildOptimisticMessage({
+  const message: DynamicTestOptions = buildOptimisticMessage({
     id: "pending-1",
     content: "queued follow-up",
     attachments: [{ id: "att-1" }],

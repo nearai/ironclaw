@@ -661,8 +661,9 @@ fn with_binary_host_extension_bindings_from_bundles(
     crate::first_party::assert_first_party_bundles_present(&first_party_bundles)?;
     let channel_extensions =
         native_extensions::bundled_channel_extensions(web_app_vapid_subject_from_env());
-    let services_input =
-        services_input.with_channel_extension_bindings(channel_extensions.bindings);
+    let services_input = services_input
+        .with_channel_extension_bindings(channel_extensions.bindings)
+        .with_session_reply_channel(channel_extensions.session_reply_channel);
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_first_party_bundles(first_party_bundles)

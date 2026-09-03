@@ -148,16 +148,20 @@ fn chat_sse_stream(
                         let payload_view = payload_view(envelope.payload());
                         match payload_view.text {
                             PayloadText::None => {}
-                            PayloadText::Update(text) => match state.delta_for(text) {
-                                Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
-                                Ok(None) => {}
-                                Err(error) => {
-                                    yield Ok(openai_error_event(error));
-                                    return;
+                            PayloadText::Updates(updates) => {
+                                for update in updates {
+                                    match state.delta_for(update) {
+                                        Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            yield Ok(openai_error_event(error));
+                                            return;
+                                        }
+                                    }
                                 }
-                            },
+                            }
                             PayloadText::Final(text) => {
-                                match state.delta_for(text) {
+                                match state.delta_for(TextUpdate::Confirm { body: text }) {
                                     Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
                                     Ok(None) => {}
                                     Err(error) => {
@@ -245,24 +249,28 @@ fn response_sse_stream(
                         let payload_view = payload_view(envelope.payload());
                         match payload_view.text {
                             PayloadText::None => {}
-                            PayloadText::Update(text) => match state.delta_for(text) {
-                                Ok(Some(delta)) => {
-                                    yield Ok(response_text_delta_event(
-                                        &public_id,
-                                        &item_id,
-                                        sequence_number,
-                                        delta,
-                                    ));
-                                    sequence_number += 1;
+                            PayloadText::Updates(updates) => {
+                                for update in updates {
+                                    match state.delta_for(update) {
+                                        Ok(Some(delta)) => {
+                                            yield Ok(response_text_delta_event(
+                                                &public_id,
+                                                &item_id,
+                                                sequence_number,
+                                                delta,
+                                            ));
+                                            sequence_number += 1;
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            yield Ok(response_stream_error_event(error));
+                                            return;
+                                        }
+                                    }
                                 }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    yield Ok(response_stream_error_event(error));
-                                    return;
-                                }
-                            },
+                            }
                             PayloadText::Final(text) => {
-                                match state.delta_for(text) {
+                                match state.delta_for(TextUpdate::Confirm { body: text }) {
                                     Ok(Some(delta)) => {
                                         yield Ok(response_text_delta_event(
                                             &public_id,
@@ -398,29 +406,72 @@ fn stream_timeout_error() -> OpenAiCompatHttpError {
     OpenAiCompatHttpError::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
 }
 
+/// One text update from the projection.
+enum TextUpdate<'a> {
+    /// A call's cumulative body: one live text item per model call, keyed
+    /// by the item id.
+    Call { id: &'a str, body: &'a str },
+    /// A call the loop went on past, republished flagged. Already streamed
+    /// when it was the current call; its body is bounded by the document
+    /// (it may be shorter than what streamed) and never a rewrite.
+    Narration { id: &'a str, body: &'a str },
+    /// The durable transcript row or the final-reply payload: confirms the
+    /// current call, never starts one.
+    Confirm { body: &'a str },
+}
+
+/// Between two answer calls (a model call the loop went on past, then the
+/// next call): the completion stays one message, so the calls read as
+/// paragraphs rather than as a rewrite the client cannot express.
+const CALL_SEPARATOR: &str = "\n\n";
+
 #[derive(Default)]
 struct TextDeltaState {
-    text: String,
+    /// Everything streamed so far, separators included.
+    streamed: String,
+    /// Where the current call's text begins in `streamed`.
+    call_start: usize,
+    /// The call (live text item id) the text past `call_start` belongs to.
+    call: Option<String>,
+    /// Every call seen, so a republish of a closed one changes nothing.
+    seen: Vec<String>,
 }
 
 impl TextDeltaState {
-    fn delta_for(&mut self, next: &str) -> Result<Option<String>, OpenAiCompatHttpError> {
-        let consumed = self.text.len();
-        if next.len() == consumed {
-            if next.as_bytes() != self.text.as_bytes() {
-                return Err(OpenAiCompatHttpError::from_kind(
-                    500,
-                    false,
-                    OpenAiCompatErrorKind::Internal,
-                    None,
-                ));
-            }
-            return Ok(None);
-        }
-        if next.len() < consumed
-            || !next.is_char_boundary(consumed)
-            || !next.as_bytes().starts_with(self.text.as_bytes())
+    fn delta_for(
+        &mut self,
+        update: TextUpdate<'_>,
+    ) -> Result<Option<String>, OpenAiCompatHttpError> {
+        let (id, body, lenient) = match update {
+            TextUpdate::Call { id, body } => (Some(id), body, false),
+            TextUpdate::Narration { id, body } => (Some(id), body, true),
+            TextUpdate::Confirm { body } => (None, body, false),
+        };
+        let mut separator = "";
+        if let Some(id) = id
+            && self.call.as_deref() != Some(id)
         {
+            if self.seen.iter().any(|seen| seen == id) {
+                return Ok(None);
+            }
+            if self.call_start < self.streamed.len() {
+                self.streamed.push_str(CALL_SEPARATOR);
+                separator = CALL_SEPARATOR;
+            }
+            self.seen.push(id.to_string());
+            self.call = Some(id.to_string());
+            self.call_start = self.streamed.len();
+        }
+        let current = &self.streamed[self.call_start..];
+        let consumed = current.len();
+        let extends = body.len() >= consumed
+            && body.is_char_boundary(consumed)
+            && body.as_bytes().starts_with(current.as_bytes());
+        if !extends {
+            if lenient {
+                // A bounded republish of text this stream already carried.
+                return Ok(None);
+            }
             return Err(OpenAiCompatHttpError::from_kind(
                 500,
                 false,
@@ -428,17 +479,21 @@ impl TextDeltaState {
                 None,
             ));
         }
-        let delta = &next[consumed..];
-        self.text.push_str(delta);
-        Ok(Some(delta.to_string()))
+        if body.len() == consumed {
+            return Ok(None);
+        }
+        let delta = &body[consumed..];
+        self.streamed.push_str(delta);
+        Ok(Some(format!("{separator}{delta}")))
     }
 
+    /// Everything streamed so far.
     fn text(&self) -> &str {
-        &self.text
+        &self.streamed
     }
 
     fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.streamed.is_empty()
     }
 }
 
@@ -452,7 +507,7 @@ enum TerminalStatus {
 
 enum PayloadText<'a> {
     None,
-    Update(&'a str),
+    Updates(Vec<TextUpdate<'a>>),
     Final(&'a str),
 }
 
@@ -482,31 +537,48 @@ fn payload_view(payload: &ProductOutboundPayload) -> PayloadView<'_> {
 }
 
 fn projection_state_view(state: &ProductProjectionState) -> PayloadView<'_> {
-    let mut text = PayloadText::None;
+    let mut updates = Vec::new();
     let mut terminal_status = TerminalStatus::None;
-    for item in state.items.iter().rev() {
+    for item in &state.items {
         match item {
-            ProductProjectionItem::Text { body, .. } if matches!(text, PayloadText::None) => {
-                text = PayloadText::Update(body.as_str());
-            }
-            ProductProjectionItem::RunStatus { status, .. }
-                if matches!(terminal_status, TerminalStatus::None) =>
-            {
+            ProductProjectionItem::Text {
+                id,
+                body,
+                finalized,
+                narration,
+                ..
+            } => updates.push(if *finalized {
+                TextUpdate::Confirm {
+                    body: body.as_str(),
+                }
+            } else if *narration {
+                TextUpdate::Narration {
+                    id: id.as_str(),
+                    body: body.as_str(),
+                }
+            } else {
+                TextUpdate::Call {
+                    id: id.as_str(),
+                    body: body.as_str(),
+                }
+            }),
+            ProductProjectionItem::RunStatus { status, .. } => {
                 terminal_status = match status.as_str() {
                     "completed" => TerminalStatus::Completed,
                     "failed" | "killed" => TerminalStatus::Failed,
                     "cancelled" => TerminalStatus::Cancelled,
-                    _ => TerminalStatus::None,
+                    _ => terminal_status,
                 };
             }
             _ => {}
         }
-        if !matches!(text, PayloadText::None) && !matches!(terminal_status, TerminalStatus::None) {
-            break;
-        }
     }
     PayloadView {
-        text,
+        text: if updates.is_empty() {
+            PayloadText::None
+        } else {
+            PayloadText::Updates(updates)
+        },
         terminal_status,
     }
 }
