@@ -957,7 +957,7 @@ test("mergeFullRefresh keeps run failures beside the prompt that failed", () => 
 });
 
 test("mergeFullRefresh keeps a stopped notice when the durable timeline refreshes", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context: vm.Context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 

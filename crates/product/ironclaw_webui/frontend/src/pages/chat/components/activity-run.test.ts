@@ -182,7 +182,7 @@ function containsScalar(node, expected) {
 
 test("ActivityRun renders a narration phase as a settled note inside the run", () => {
   const rendered = [];
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     Icon(props) {
