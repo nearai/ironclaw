@@ -574,19 +574,34 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
-    /// How many messages the model actually received on its `index`-th call;
-    /// `0` when no such call was captured.
+    /// How many messages the model actually received on its LAST captured
+    /// call. Panics if no request was captured — a run that has not yet
+    /// dispatched a model call has nothing to report here, and returning `0`
+    /// would silently pass a budget assertion that should not run yet.
     ///
     /// This is the observable the model-derived context budget governs
     /// (`visible_transcript_tokens()` bounds both compaction and outbound
     /// request sizing), so a run whose model advertises a smaller window
     /// must be sent fewer messages.
-    pub fn captured_request_message_count(&self, index: usize) -> usize {
+    pub fn captured_last_request_message_count(&self) -> usize {
         self.scripted_llm
             .captured_requests()
-            .get(index)
-            .map(Vec::len)
-            .unwrap_or(0)
+            .last()
+            .expect("no model request was captured")
+            .len()
+    }
+
+    /// The textual `content` of every message in the LAST captured model
+    /// request, in order. Panics if no request was captured, for the same
+    /// reason as [`captured_last_request_message_count`].
+    pub fn captured_last_request_contents(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .last()
+            .expect("no model request was captured")
+            .iter()
+            .map(|message| message.content.clone())
+            .collect()
     }
 
     /// Assert every captured model request carried a byte-identical system

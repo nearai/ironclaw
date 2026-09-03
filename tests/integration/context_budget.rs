@@ -46,9 +46,12 @@ fn bulky_message(tag: &str) -> String {
     format!("{tag} {}", "context padding. ".repeat(2_500))
 }
 
-/// Seeds a transcript, then returns how many messages the model received on
-/// its final call.
-async fn messages_sent_on_last_call(advertised_window: Option<u32>) -> usize {
+/// Builds a harness, seeds a six-turn bulky transcript on it, and returns it
+/// so the caller can inspect whatever it needs about the last captured
+/// model request.
+async fn harness_with_seeded_transcript(
+    advertised_window: Option<u32>,
+) -> RebornIntegrationHarness {
     // One script entry per MODEL CALL, not per turn: the advertised run
     // compacts, and each compaction is an extra summarization call. Script
     // generously so the FIFO is never the thing that ends a run; unconsumed
@@ -69,9 +72,16 @@ async fn messages_sent_on_last_call(advertised_window: Option<u32>) -> usize {
             .expect("turn completes");
     }
 
-    // The last call sees the largest transcript, so it is where the two
-    // budgets diverge most.
-    harness.captured_request_message_count(5)
+    harness
+}
+
+/// Seeds a transcript, then returns how many messages the model received on
+/// its final captured call — the largest transcript, so it is where the two
+/// budgets diverge most.
+async fn messages_sent_on_last_call(advertised_window: Option<u32>) -> usize {
+    harness_with_seeded_transcript(advertised_window)
+        .await
+        .captured_last_request_message_count()
 }
 
 #[tokio::test]
@@ -90,11 +100,18 @@ async fn small_advertised_window_shrinks_what_the_model_receives() {
 async fn unadvertised_window_keeps_the_compiled_in_ceiling() {
     // The complement of the test above: with nothing advertised the run must
     // behave exactly as it did before this feature existed, so the whole
-    // seeded transcript still fits.
-    let wide = messages_sent_on_last_call(None).await;
+    // seeded transcript still fits — prove it by finding every one of the six
+    // seeded turn markers still present in the last captured request, not
+    // just a message count that a truncation bug could still satisfy.
+    let harness = harness_with_seeded_transcript(None).await;
+    let contents = harness.captured_last_request_contents();
 
-    assert!(
-        wide > 1,
-        "an unadvertised run must still carry its full transcript; got {wide}"
-    );
+    for turn in 1..=6 {
+        let marker = format!("turn-{turn}");
+        assert!(
+            contents.iter().any(|content| content.contains(&marker)),
+            "an unadvertised run must still carry its full transcript; \
+             missing seeded marker {marker:?} from the last captured request: {contents:?}"
+        );
+    }
 }

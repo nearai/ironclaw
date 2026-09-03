@@ -2306,8 +2306,8 @@ pub trait HostManagedModelGateway: Send + Sync {
         resolved_model_route.and_then(|route| ProviderModelId::new(route.model_id()).ok())
     }
 
-    /// Best-effort provider-advertised total input context window, in tokens,
-    /// for the route this run will use.
+    /// Best-effort provider-advertised total context window (input and
+    /// output), in tokens, for the route this run will use.
     ///
     /// Gateways that own provider selection should override this. The default
     /// returns `None`, which keeps the compiled-in budget — a gateway that
