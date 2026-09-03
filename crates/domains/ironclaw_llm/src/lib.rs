@@ -449,6 +449,7 @@ fn create_openai_compat_from_registry(
         .with_provider_id(config.provider_id.clone())
         .with_structured_output_support(true)
         .with_json_object_support(true)
+        .with_prompt_cache_key_support(true)
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))

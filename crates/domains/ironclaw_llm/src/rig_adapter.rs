@@ -79,6 +79,13 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Whether this rig-core path is an OpenAI-compatible Chat Completions
     /// adapter that can preserve native `json_object` mode.
     json_object_supported: bool,
+    /// Whether this rig-core path is an OpenAI-compatible Chat Completions
+    /// adapter that should carry the derived `prompt_cache_key` metadata
+    /// value (`crate::provider::PROMPT_CACHE_KEY_METADATA`) onto the wire.
+    /// `prompt_cache_key` is an OpenAI-specific concept — Anthropic-protocol
+    /// requests use `cache_control` instead — so this stays `false` outside
+    /// the generic OpenAI-compatible factory. See `prompt_cache_key`.
+    prompt_cache_key_supported: bool,
     /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
     /// issues a `GET` instead of returning the empty default. rig-core's
     /// `CompletionModel` does not expose model discovery, so this is wired
@@ -281,6 +288,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             native_streaming: false,
             structured_output_supported: false,
             json_object_supported: false,
+            prompt_cache_key_supported: false,
             models_endpoint: None,
         }
     }
@@ -306,6 +314,16 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// can serialize the native JSON-object response mode.
     pub(crate) fn with_json_object_support(mut self, supported: bool) -> Self {
         self.json_object_supported = supported;
+        self
+    }
+
+    /// Mark this adapter as an OpenAI-compatible Chat Completions path that
+    /// should carry the derived `prompt_cache_key` metadata value onto the
+    /// wire. Must stay `false` for Anthropic-protocol adapters (and any
+    /// other non-OpenAI-shape rig client) — `prompt_cache_key` is an OpenAI
+    /// concept, unrelated to Anthropic's `cache_control` markers.
+    pub(crate) fn with_prompt_cache_key_support(mut self, supported: bool) -> Self {
+        self.prompt_cache_key_supported = supported;
         self
     }
 
@@ -344,7 +362,8 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Set the list of unsupported parameter names for this provider.
     ///
     /// Parameters in this set are stripped from requests before sending.
-    /// Supported parameter names: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
+    /// Supported parameter names: `"temperature"`, `"max_tokens"`,
+    /// `"stop_sequences"`, `"prompt_cache_key"`.
     pub fn with_unsupported_params(mut self, params: Vec<String>) -> Self {
         self.unsupported_params = params.into_iter().collect();
         self
@@ -378,6 +397,27 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
         strip_unsupported_tool_params(&self.unsupported_params, req);
+    }
+
+    /// Resolve the derived prompt-cache-key value for this request, gated on
+    /// `prompt_cache_key_supported` (OpenAI-compatible Chat Completions only,
+    /// never Anthropic) and the `unsupported_params` kill switch — an
+    /// operator can list `"prompt_cache_key"` there when a server rejects
+    /// the field.
+    fn prompt_cache_key(
+        &self,
+        metadata: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        if !self.prompt_cache_key_supported
+            || self
+                .unsupported_params
+                .contains(crate::provider::PROMPT_CACHE_KEY_METADATA)
+        {
+            return None;
+        }
+        metadata
+            .get(crate::provider::PROMPT_CACHE_KEY_METADATA)
+            .cloned()
     }
 
     fn ensure_structured_output_supported(
@@ -1379,6 +1419,14 @@ where
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        if let Some(cache_key) = self.prompt_cache_key(&request.metadata) {
+            merge_additional_params(
+                &mut rig_req,
+                Some(&serde_json::json!({
+                    crate::provider::PROMPT_CACHE_KEY_METADATA: cache_key
+                })),
+            );
+        }
         inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response = self
@@ -1451,6 +1499,14 @@ where
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        if let Some(cache_key) = self.prompt_cache_key(&request.metadata) {
+            merge_additional_params(
+                &mut rig_req,
+                Some(&serde_json::json!({
+                    crate::provider::PROMPT_CACHE_KEY_METADATA: cache_key
+                })),
+            );
+        }
         inject_model_override(&mut rig_req, model_override.as_deref());
 
         let stream = self
@@ -1519,6 +1575,14 @@ where
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        if let Some(cache_key) = self.prompt_cache_key(&request.metadata) {
+            merge_additional_params(
+                &mut rig_req,
+                Some(&serde_json::json!({
+                    crate::provider::PROMPT_CACHE_KEY_METADATA: cache_key
+                })),
+            );
+        }
         inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response = self
@@ -1621,6 +1685,14 @@ where
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        if let Some(cache_key) = self.prompt_cache_key(&request.metadata) {
+            merge_additional_params(
+                &mut rig_req,
+                Some(&serde_json::json!({
+                    crate::provider::PROMPT_CACHE_KEY_METADATA: cache_key
+                })),
+            );
+        }
         inject_model_override(&mut rig_req, model_override.as_deref());
 
         let stream = self
@@ -2050,6 +2122,154 @@ mod tests {
             body["response_format"],
             serde_json::json!({"type": "json_object"})
         );
+    }
+
+    /// When the request carries [`crate::provider::PROMPT_CACHE_KEY_METADATA`]
+    /// and the adapter is marked as an OpenAI-compatible Chat Completions
+    /// path (`with_prompt_cache_key_support(true)`, matching
+    /// `create_openai_compat_from_registry`'s wiring), the serialized body
+    /// carries a top-level `prompt_cache_key` with that exact value.
+    #[tokio::test]
+    async fn completion_request_serializes_prompt_cache_key_when_metadata_present() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        )
+        .with_prompt_cache_key_support(true);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        adapter
+            .complete(request)
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        let body: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+        assert_eq!(body["prompt_cache_key"], "thread-cache-key-abc");
+    }
+
+    /// Absent metadata must not synthesize the field.
+    #[tokio::test]
+    async fn completion_request_omits_prompt_cache_key_when_metadata_absent() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        )
+        .with_prompt_cache_key_support(true);
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        adapter
+            .complete(request)
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        let body: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "no prompt_cache_key may be emitted when no metadata was supplied: {body}"
+        );
+    }
+
+    /// The kill switch: listing `"prompt_cache_key"` in `unsupported_params`
+    /// suppresses the field even though metadata carries a value and the
+    /// adapter is otherwise OpenAI-compatible-Chat-Completions-shaped.
+    #[tokio::test]
+    async fn completion_request_omits_prompt_cache_key_when_in_unsupported_params() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        )
+        .with_prompt_cache_key_support(true)
+        .with_unsupported_params(vec!["prompt_cache_key".to_string()]);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        adapter
+            .complete(request)
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        let body: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "unsupported_params must suppress prompt_cache_key: {body}"
+        );
+    }
+
+    /// `prompt_cache_key` is an OpenAI concept. An Anthropic-protocol
+    /// request (`prompt_cache_key_supported` stays `false` by default —
+    /// `create_anthropic_from_registry` never calls
+    /// `with_prompt_cache_key_support`) must not gain a top-level
+    /// `prompt_cache_key`, and its `cache_control` markers must remain
+    /// unchanged.
+    #[tokio::test]
+    async fn anthropic_request_does_not_gain_prompt_cache_key() {
+        use rig::client::CompletionClient;
+        use rig::providers::anthropic;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build Anthropic client");
+        let model = client.completion_model("claude-opus-4-6");
+        let adapter =
+            RigAdapter::new(model, "claude-opus-4-6").with_cache_retention(CacheRetention::Short);
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        adapter
+            .complete(request)
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        let body: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "Anthropic-protocol requests must never carry prompt_cache_key: {body}"
+        );
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
     }
 
     #[derive(Clone)]

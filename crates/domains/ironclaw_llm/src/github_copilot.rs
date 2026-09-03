@@ -23,8 +23,8 @@ use crate::error::LlmError;
 use crate::github_copilot_auth::CopilotTokenManager;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
-    openai_json_schema_response_format, strip_unsupported_completion_params,
+    PROMPT_CACHE_KEY_METADATA, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, openai_json_schema_response_format, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
@@ -113,6 +113,20 @@ impl GithubCopilotProvider {
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
         strip_unsupported_tool_params(&self.unsupported_params, req);
+    }
+
+    /// Resolve the derived prompt-cache-key value for this request's
+    /// metadata, unless an operator listed `"prompt_cache_key"` in
+    /// `unsupported_params` to suppress it (e.g. a Copilot-compatible proxy
+    /// that 400s on unknown fields).
+    fn prompt_cache_key(
+        &self,
+        metadata: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        if self.unsupported_params.contains(PROMPT_CACHE_KEY_METADATA) {
+            return None;
+        }
+        metadata.get(PROMPT_CACHE_KEY_METADATA).cloned()
     }
 
     fn map_token_error(error: crate::github_copilot_auth::GithubCopilotAuthError) -> LlmError {
@@ -246,6 +260,7 @@ impl LlmProvider for GithubCopilotProvider {
         self.strip_unsupported_completion_params(&mut req);
         let messages = convert_messages(req.messages);
 
+        let prompt_cache_key = self.prompt_cache_key(&req.metadata);
         let request = OpenAiRequest {
             model,
             messages,
@@ -255,6 +270,7 @@ impl LlmProvider for GithubCopilotProvider {
             response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
+            prompt_cache_key,
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
@@ -316,6 +332,7 @@ impl LlmProvider for GithubCopilotProvider {
             }),
         });
 
+        let prompt_cache_key = self.prompt_cache_key(&req.metadata);
         let request = OpenAiRequest {
             model,
             messages,
@@ -325,6 +342,7 @@ impl LlmProvider for GithubCopilotProvider {
             response_format: req.response_format.map(openai_json_schema_response_format),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
+            prompt_cache_key,
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
@@ -421,6 +439,10 @@ struct OpenAiRequest {
     tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
+    /// Stable per-conversation routing key for the Copilot backend's
+    /// OpenAI-compatible prompt cache (`crate::provider::PROMPT_CACHE_KEY_METADATA`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -751,6 +773,7 @@ mod tests {
             )),
             tools: None,
             tool_choice: None,
+            prompt_cache_key: None,
         };
         let json = serde_json::to_value(request).expect("serialize Copilot request");
         assert_eq!(
@@ -779,12 +802,113 @@ mod tests {
             )),
             tools: None,
             tool_choice: None,
+            prompt_cache_key: None,
         };
         let json = serde_json::to_value(request).expect("serialize Copilot request");
         assert_eq!(
             json["response_format"],
             serde_json::json!({"type": "json_object"})
         );
+    }
+
+    /// Wire-shape pin: `OpenAiRequest::prompt_cache_key` serializes to a
+    /// top-level `prompt_cache_key` field with the exact value when present.
+    #[test]
+    fn copilot_request_serializes_prompt_cache_key_when_present() {
+        let request = OpenAiRequest {
+            model: "gpt-4o".to_string(),
+            messages: convert_messages(vec![ChatMessage::user("hello")]),
+            max_tokens: None,
+            temperature: None,
+            stop: None,
+            response_format: None,
+            tools: None,
+            tool_choice: None,
+            prompt_cache_key: Some("thread-cache-key-abc".to_string()),
+        };
+        let json = serde_json::to_value(request).expect("serialize Copilot request");
+        assert_eq!(json["prompt_cache_key"], "thread-cache-key-abc");
+    }
+
+    /// Absent metadata must not synthesize the field on the wire.
+    #[test]
+    fn copilot_request_omits_prompt_cache_key_when_absent() {
+        let request = OpenAiRequest {
+            model: "gpt-4o".to_string(),
+            messages: convert_messages(vec![ChatMessage::user("hello")]),
+            max_tokens: None,
+            temperature: None,
+            stop: None,
+            response_format: None,
+            tools: None,
+            tool_choice: None,
+            prompt_cache_key: None,
+        };
+        let json = serde_json::to_value(request).expect("serialize Copilot request");
+        assert!(
+            json.as_object()
+                .expect("object")
+                .get("prompt_cache_key")
+                .is_none(),
+            "no prompt_cache_key field may be emitted when None: {json}"
+        );
+    }
+
+    /// Build a provider for testing the `prompt_cache_key` gate directly —
+    /// `complete()`/`complete_with_tools()` cannot be driven through a local
+    /// capture server here because Copilot's token exchange targets a
+    /// hardcoded live GitHub endpoint (`GITHUB_COPILOT_TOKEN_URL`), so the
+    /// gating method itself (the same one both call sites use) is the
+    /// wire-shape-adjacent seam this file can test in isolation.
+    fn test_provider(unsupported_params: Vec<&str>) -> GithubCopilotProvider {
+        let config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::GithubCopilot,
+            "github_copilot",
+            Some(SecretString::from("test-oauth-token".to_string())),
+            "",
+            "gpt-4o",
+        )
+        .with_unsupported_params(unsupported_params.into_iter().map(String::from).collect());
+        GithubCopilotProvider::new(&config, 30).expect("build GithubCopilotProvider")
+    }
+
+    /// With `PROMPT_CACHE_KEY_METADATA` present in the request metadata and
+    /// no kill switch set, the resolved value matches exactly.
+    #[test]
+    fn prompt_cache_key_resolves_from_metadata_when_supported() {
+        let provider = test_provider(vec![]);
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        assert_eq!(
+            provider.prompt_cache_key(&metadata),
+            Some("thread-cache-key-abc".to_string())
+        );
+    }
+
+    /// With no metadata entry, resolution returns `None` (field omitted).
+    #[test]
+    fn prompt_cache_key_absent_without_metadata() {
+        let provider = test_provider(vec![]);
+        assert_eq!(
+            provider.prompt_cache_key(&std::collections::HashMap::new()),
+            None
+        );
+    }
+
+    /// The kill switch: listing `"prompt_cache_key"` in `unsupported_params`
+    /// suppresses the field even though metadata carries a value.
+    #[test]
+    fn prompt_cache_key_suppressed_when_in_unsupported_params() {
+        let provider = test_provider(vec!["prompt_cache_key"]);
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        assert_eq!(provider.prompt_cache_key(&metadata), None);
     }
 
     #[test]
