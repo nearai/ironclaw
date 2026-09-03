@@ -139,6 +139,7 @@ struct StaticCoordinator;
 
 struct StaticAgentTurnRuntime {
     record: Option<TurnRunRecord>,
+    children: Vec<TurnRunRecord>,
     cancels: std::sync::Mutex<Vec<CancelRunRequest>>,
     releases: std::sync::Mutex<Vec<(TurnScope, TurnRunId, u32)>>,
 }
@@ -157,9 +158,15 @@ impl StaticAgentTurnRuntime {
     fn new(record: Option<TurnRunRecord>) -> Self {
         Self {
             record,
+            children: Vec::new(),
             cancels: std::sync::Mutex::new(Vec::new()),
             releases: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_children(mut self, children: Vec<TurnRunRecord>) -> Self {
+        self.children = children;
+        self
     }
 
     fn cancels(&self) -> Vec<CancelRunRequest> {
@@ -991,7 +998,7 @@ impl AgentTurnSpawnTreeRuntimePort for StaticAgentTurnRuntime {
         _scope: &TurnScope,
         _run_id: TurnRunId,
     ) -> Result<Vec<TurnRunRecord>, TurnError> {
-        Ok(Vec::new())
+        Ok(self.children.clone())
     }
 
     async fn get_run_record(
@@ -2833,6 +2840,106 @@ async fn invoke_spawn_rejects_depth_cap() {
         denied_reason(invoke_spawn(&port).await),
         "depth_cap_exceeded"
     );
+}
+
+fn child_record_with_status(run_context: &LoopRunContext, status: TurnStatus) -> TurnRunRecord {
+    TurnRunRecord {
+        run_id: TurnRunId::new(),
+        status,
+        ..turn_record(run_context, 0)
+    }
+}
+
+#[tokio::test]
+async fn invoke_spawn_rejects_when_concurrent_children_cap_is_exceeded() {
+    let context = test_run_context_with_agent_actor("spawn-concurrent-children").await;
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let running_children = vec![
+        child_record_with_status(&context, TurnStatus::Running),
+        child_record_with_status(&context, TurnStatus::Running),
+    ];
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        agent_turn_runtime: Arc::new(
+            StaticAgentTurnRuntime::new(Some(turn_record(&context, 0)))
+                .with_children(running_children),
+        ),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits {
+            max_concurrent_children: 2,
+            ..SubagentSpawnLimits::default()
+        },
+        deps,
+        Vec::new(),
+    );
+    authorize_spawn_input(&port);
+
+    assert_eq!(
+        denied_reason(invoke_spawn(&port).await),
+        "concurrent_children_cap_exceeded"
+    );
+    assert!(child_runs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn invoke_spawn_allows_a_child_when_earlier_children_are_terminal() {
+    let context = test_run_context_with_agent_actor("spawn-concurrent-children-terminal").await;
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let mixed_children = vec![
+        child_record_with_status(&context, TurnStatus::Completed),
+        child_record_with_status(&context, TurnStatus::Failed),
+    ];
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        agent_turn_runtime: Arc::new(
+            StaticAgentTurnRuntime::new(Some(turn_record(&context, 0)))
+                .with_children(mixed_children),
+        ),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits {
+            max_concurrent_children: 2,
+            ..SubagentSpawnLimits::default()
+        },
+        deps,
+        Vec::new(),
+    );
+    authorize_spawn_input(&port);
+
+    assert!(matches!(
+        invoke_spawn(&port).await,
+        Resolution::Suspended(Suspension::DependentRun { .. })
+    ));
+    assert_eq!(child_runs.requests().len(), 1);
 }
 
 #[tokio::test]

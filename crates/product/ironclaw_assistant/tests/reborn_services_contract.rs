@@ -119,6 +119,7 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
     CredentialAccountId, CredentialAccountProjection, CredentialAccountStatus,
 };
+use ironclaw_event_log::{DurableEventLog, InMemoryDurableEventLog};
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_contracts::{
@@ -229,7 +230,9 @@ use ironclaw_turns::{
     AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,
     DefaultTurnCoordinator, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCapacityResource, TurnCoordinator, TurnError, TurnOriginKind, TurnRunState,
+    TurnBlockedGateKind, TurnBlockedGateMetadata, TurnCapacityResource, TurnCoordinator, TurnError,
+    TurnEventKind, TurnEventPage, TurnEventProjectionSource, TurnLifecycleEvent, TurnOriginKind,
+    TurnRunState,
 };
 use secrecy::SecretString;
 use serde::Serialize;
@@ -14891,6 +14894,185 @@ async fn list_threads_hides_automation_trigger_threads() {
         !thread_ids.contains(&automation_thread_id),
         "automation trigger threads should be accessible by direct id but hidden from the chat list",
     );
+}
+
+/// Fake `TurnEventProjectionSource` carrying exactly one pre-recorded
+/// `TurnEventKind::Blocked` event — standing in for the durable turn-lifecycle
+/// log a real subagent run's gate would already have committed to before any
+/// reader ever subscribes. Only `read_turn_events_after` matters:
+/// `TurnEventBridge::drain`
+/// (`crates/product/ironclaw_assistant/src/projection/turn_events.rs`) never
+/// calls the doc-hidden `read_turn_event_log_after` sibling.
+struct PreRecordedBlockedEventSource {
+    event: TurnLifecycleEvent,
+}
+
+#[async_trait]
+impl TurnEventProjectionSource for PreRecordedBlockedEventSource {
+    async fn read_turn_events_after(
+        &self,
+        _scope: &TurnScope,
+        _owner_user_id: Option<&UserId>,
+        after: Option<EventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        let entries = match after {
+            Some(cursor) if cursor >= self.event.cursor => Vec::new(),
+            _ => vec![self.event.clone()],
+        };
+        Ok(TurnEventPage {
+            entries,
+            next_cursor: self.event.cursor,
+            truncated: false,
+            rebase_required: None,
+        })
+    }
+
+    async fn read_turn_event_log_after(
+        &self,
+        _after: Option<EventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Ok(TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: EventCursor::default(),
+            truncated: false,
+            rebase_required: None,
+        })
+    }
+}
+
+/// The crux of subagent R3 slice 3b: a human opens a hidden child thread
+/// *after* the block already happened, so the gate card served to a cold
+/// reader must come from a durable replay, not a live-only push.
+///
+/// Pins two things through the real production seam
+/// (`RebornProjectionServices` -> `TurnEventBridge::drain`, not a
+/// `ProjectionStream` test double): a subagent's hidden child thread is
+/// listing-only hidden (absent from `list_threads`, reachable by direct id),
+/// and a `TurnEventKind::Blocked` event recorded on that thread *before* any
+/// subscriber exists still replays as a `GatePrompt` when a cold reader
+/// drains from `after_cursor: None` — exactly what a cold SSE connection
+/// sends (no `Last-Event-ID`), per
+/// `crates/product/ironclaw_webui/src/webui_v2/handlers.rs`.
+#[tokio::test]
+async fn a_hidden_child_thread_replays_its_pending_gate_to_a_cold_reader() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let child_thread_id = ThreadId::new("thread-subagent-child").expect("child thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(child_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Child agent run".to_string()),
+            metadata_json: Some(json!({ "kind": "subagent" }).to_string()),
+        })
+        .await
+        .expect("hidden child thread");
+
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = session_services(thread_service.clone(), coordinator.clone());
+
+    // Hidden is listing-only: the child thread never appears in the owner's
+    // chat list...
+    let listed = query_threads(
+        &services,
+        caller.clone(),
+        ProductListThreadsRequest::default(),
+    )
+    .await
+    .expect("list threads");
+    assert!(
+        !listed
+            .threads
+            .iter()
+            .any(|thread| thread.thread_id == child_thread_id),
+        "a hidden child thread must not appear in the owner's chat list"
+    );
+
+    // ...yet a direct-id read succeeds: hidden is a listing predicate, not an
+    // access boundary.
+    services
+        .get_timeline(
+            caller.clone(),
+            RebornTimelineRequest::new(child_thread_id.as_str()),
+        )
+        .await
+        .expect("a hidden child thread is reachable by direct id");
+
+    // The crux: record the run's Blocked gate on the durable turn-lifecycle
+    // log before any subscription exists, then drain from after=None (a cold
+    // reader) and prove the gate replays.
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    coordinator.set_parked_approval_gate(gate_ref.clone());
+    let run_id = TurnRunId::new();
+    let scope = caller.turn_scope(child_thread_id.clone());
+    let blocked_event = TurnLifecycleEvent {
+        // Matches `FakeTurnCoordinator::get_run_state`'s fixed
+        // `event_cursor: EventCursor(17)` — `blocked_prompt_payload` only
+        // renders a gate prompt when the durable event's cursor still agrees
+        // with the coordinator's current run state.
+        cursor: EventCursor(17),
+        scope: scope.clone(),
+        occurred_at: None,
+        owner_user_id: Some(caller.user_id.clone()),
+        run_id,
+        status: TurnStatus::BlockedApproval,
+        kind: TurnEventKind::Blocked,
+        blocked_gate: Some(TurnBlockedGateMetadata {
+            gate_ref: gate_ref.clone(),
+            gate_kind: TurnBlockedGateKind::Approval,
+            activity_id: None,
+            credential_requirements: Vec::new(),
+        }),
+        sanitized_reason: Some("approval_required".to_string()),
+        retryable: None,
+        detail: None,
+    };
+
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> =
+        Arc::new(PreRecordedBlockedEventSource {
+            event: blocked_event,
+        });
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let reply_target_binding_ref =
+        ReplyTargetBindingRef::new("webui-test").expect("reply target binding ref");
+    let event_stream = ironclaw_assistant::projection::build_reborn_projection_services(
+        event_log,
+        reply_target_binding_ref,
+    )
+    .with_turn_events(turn_event_source, coordinator.clone())
+    .product_event_stream();
+
+    let services = services.with_event_stream(event_stream);
+
+    let drained = services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: child_thread_id.to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("a cold reader can drain a hidden child thread's projection");
+
+    let gate_view = drained
+        .events
+        .iter()
+        .find_map(|envelope| match &envelope.payload {
+            ProductOutboundPayload::GatePrompt(view) => Some(view.clone()),
+            _ => None,
+        })
+        .expect(
+            "a drain starting from after_cursor=None must replay the pending gate from the \
+             durable projection, not require a live push",
+        );
+
+    assert_eq!(gate_view.turn_run_id, run_id);
+    assert_eq!(gate_view.gate_ref, gate_ref.as_str());
 }
 
 #[tokio::test]
