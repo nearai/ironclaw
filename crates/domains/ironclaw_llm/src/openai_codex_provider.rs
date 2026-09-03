@@ -1611,6 +1611,125 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
         assert_eq!(body["prompt_cache_key"], "thread-abc-123");
     }
 
+    /// One-shot loopback capture server: returns the base URL and a handle
+    /// resolving to the captured request body. Replies 400 — these tests
+    /// assert the request wire shape, not response handling. Mirrors
+    /// `anthropic_oauth::tests::capture_one_request`.
+    async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) =
+                    request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end])
+                    .expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                tx.send(
+                    String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                        .expect("request body is UTF-8"),
+                )
+                .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (base_url, rx)
+    }
+
+    async fn captured_json(rx: tokio::sync::oneshot::Receiver<String>) -> serde_json::Value {
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("request capture timed out")
+            .expect("captured request body");
+        serde_json::from_str(&body).expect("captured body is JSON")
+    }
+
+    /// Wire-level pin: the public `complete()` path must carry the
+    /// `prompt_cache_key` metadata all the way onto the wire, not just
+    /// through `build_request_body` called directly.
+    #[tokio::test]
+    async fn complete_public_path_sends_prompt_cache_key_metadata_on_the_wire() {
+        let (base_url, captured) = capture_one_request().await;
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new("gpt-5.3-codex", &base_url, &jwt, 5).unwrap();
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        let _ = provider.complete(request).await;
+        let body = captured_json(captured).await;
+
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-abc");
+    }
+
+    /// Same wire-level pin for the tool-use entry point: `complete_with_tools`
+    /// builds its request body through a different call site than `complete`,
+    /// so it needs its own coverage.
+    #[tokio::test]
+    async fn complete_with_tools_public_path_sends_prompt_cache_key_metadata_on_the_wire() {
+        let (base_url, captured) = capture_one_request().await;
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new("gpt-5.3-codex", &base_url, &jwt, 5).unwrap();
+
+        let mut request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search for x")],
+            vec![ToolDefinition {
+                name: "search".to_string(),
+                description: "Search for things".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        );
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-xyz".to_string(),
+        );
+
+        let _ = provider.complete_with_tools(request).await;
+        let body = captured_json(captured).await;
+
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
+    }
+
     #[test]
     fn test_build_request_body_with_tools() {
         let jwt = make_test_jwt("acct_test");
