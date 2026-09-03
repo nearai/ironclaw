@@ -1383,7 +1383,7 @@ impl ProviderStreamSink {
         if !self.inner.accepts_safe_text_updates() {
             return;
         }
-        let safe_text = {
+        let accumulated_text = {
             let mut guard = match self.state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1394,8 +1394,9 @@ impl ProviderStreamSink {
             guard.pending_deltas = 0;
             guard.pending_bytes = 0;
             guard.last_emit = Instant::now();
-            sanitize_model_visible_text(guard.accumulated_text.clone())
+            guard.accumulated_text.clone()
         };
+        let safe_text = sanitize_model_visible_text(accumulated_text);
         self.inner.safe_text_update(safe_text).await;
     }
 }
@@ -1406,7 +1407,7 @@ impl CompletionStreamSink for ProviderStreamSink {
         if delta.is_empty() || !self.inner.accepts_safe_text_updates() {
             return;
         }
-        let emit = {
+        let pending_text = {
             let mut guard = match self.state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1434,12 +1435,13 @@ impl CompletionStreamSink for ProviderStreamSink {
                 guard.pending_deltas = 0;
                 guard.pending_bytes = 0;
                 guard.last_emit = Instant::now();
-                Some(sanitize_model_visible_text(guard.accumulated_text.clone()))
+                Some(guard.accumulated_text.clone())
             } else {
                 None
             }
         };
-        if let Some(safe_text) = emit {
+        if let Some(accumulated_text) = pending_text {
+            let safe_text = sanitize_model_visible_text(accumulated_text);
             self.inner.safe_text_update(safe_text).await;
         }
     }
