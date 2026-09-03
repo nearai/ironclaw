@@ -651,7 +651,7 @@ work, in order — names map to the retired shape doc's slices for continuity:
 
 | # | Work | Contents | Was |
 | --- | --- | --- | --- |
-| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal, crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real — **shipped 2026-08 except the concurrent-running-children cap (open debt, own slice) and the boot pass (moved to R4, §4.2)** | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
+| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal (sweep-based), crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real — **shipped 2026-08 except the concurrent-running-children cap (open debt, own slice) and the boot pass (moved to R4, §4.2)** | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
 | R3 | **Gate escalation walk** | 3a: a blocked child's approval/auth gate reaches the parent's owner as an actionable inbox item opening the child thread (shipped 2026-09); 3b: verify/land the WebUI gate card on a hidden child thread opened by URL; R3 is a prerequisite of the R9 enable, not the enable itself | slice 4 |
 | R4 | **Counters, operator command, e2e revival** | `ResolveReport` counters; `ironclaw subagent edges`; un-ignore the five e2e tests via harness-side enablement; boot-recovery fairness | slice 5 |
 | R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override. Plus the **degraded-result taxonomy**: `child_terminal_output` distinguishes clean success / partial-on-forced-cutoff / provider error — Claude Code shipped three separate fixes for children returning empty on rate-limit cutoff or fabricating success on API error; D10's lifecycle-taxonomy line; the parent model learns of a blocked child here | slice 6 |
@@ -754,9 +754,12 @@ change.
 
 ## 9. Part II — pending work
 
-R3 slice 3a shipped (2026-09; PR number recorded at merge). Next: 3b (WebUI
+R3 slice 3a shipped 2026-09, PR #8046. Next: 3b (WebUI
 gate card on a hidden child thread opened by URL — verify first, it may
 already render), then the two R2 debts as their own slices
-(concurrent-running-children cap at spawn admission; `ThreadBusy` re-enqueue
-in `activate_parked_parent`). Plans are written here, spec-first against
+(concurrent-running-children cap at spawn admission; the `ThreadBusy`
+immediate-re-enqueue optimization in `activate_parked_parent` — R2 already
+ships the sweep-based heal that parks and re-attends the edge; this debt is
+re-enqueueing into the now-live parent's queue right away instead of waiting
+for the next sweep). Plans are written here, spec-first against
 Part I, when a slice starts.
