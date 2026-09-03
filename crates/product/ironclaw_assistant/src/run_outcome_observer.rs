@@ -163,11 +163,19 @@ impl RunOutcomeProcessCommitObserver {
                     thread_id: Some(thread_id.clone()),
                     turn_run_id: Some(run_id),
                     lifecycle_ref: Some(lifecycle_ref),
-                    credential_providers: suspension
-                        .credential_requirements
-                        .iter()
-                        .map(|requirement| requirement.provider.clone())
-                        .collect(),
+                    // `NotificationSource::credential_providers` is contracted
+                    // (`ironclaw_notifications::types`) to stay empty for
+                    // non-auth notifications and legacy records; populate it
+                    // only for the auth-gate kind.
+                    credential_providers: if kind == NotificationKind::AuthenticationRequired {
+                        suspension
+                            .credential_requirements
+                            .iter()
+                            .map(|requirement| requirement.provider.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 initial_state: NotificationInitialState::Open,
@@ -272,7 +280,7 @@ impl RunOutcomeProcessCommitObserver {
         &self,
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
-        kind: NotificationKind,
+        kinds: &[NotificationKind],
         occurred_at: Timestamp,
     ) -> Result<(), String> {
         // Reconcile by the notification's stable run identity; paging preserves
@@ -284,15 +292,20 @@ impl RunOutcomeProcessCommitObserver {
             tenant_id: snapshot.scope.tenant_id.clone(),
             user_id: owner_user_id,
         };
-        // A later auth gate can already be current by the time an older
-        // Resumed commit arrives. Only auth reconciliation preserves it;
-        // terminal approval reconciliation closes every open gate for the run.
-        let current_auth_gate_ref = match (kind, self.process_journal_source.as_deref()) {
-            (NotificationKind::AuthenticationRequired, Some(source)) => {
-                Self::current_gate_ref(source, snapshot, kind).await?
-            }
-            _ => None,
-        };
+        // A later gate of a given kind can already be current by the time an
+        // older Resumed commit arrives; preservation applies per kind, to
+        // every kind requested here, not only auth. On a terminal commit the
+        // process is no longer Suspended, so `current_gate_ref` returns None
+        // for every kind and reconciliation still closes every open gate for
+        // the run, exactly as before.
+        let mut current_gate_refs = Vec::with_capacity(kinds.len());
+        for &kind in kinds {
+            let current_gate_ref = match self.process_journal_source.as_deref() {
+                Some(source) => Self::current_gate_ref(source, snapshot, kind).await?,
+                None => None,
+            };
+            current_gate_refs.push((kind, current_gate_ref));
+        }
         let mut cursor = None;
         loop {
             let page = self
@@ -304,19 +317,20 @@ impl RunOutcomeProcessCommitObserver {
                     include_archived: true,
                 })
                 .await
-                .map_err(|error| format!("list {kind:?} notifications for run failed: {error}"))?;
+                .map_err(|error| format!("list {kinds:?} notifications for run failed: {error}"))?;
             for notification in page.notifications {
-                let is_current_auth_gate = current_auth_gate_ref.as_ref().is_some_and(|gate_ref| {
-                    notification
-                        .source
-                        .lifecycle_ref
-                        .as_ref()
-                        .is_some_and(|lifecycle_ref| lifecycle_ref.as_str() == gate_ref.as_str())
+                let is_current_gate = current_gate_refs.iter().any(|(kind, gate_ref)| {
+                    *kind == notification.kind
+                        && gate_ref.as_ref().is_some_and(|gate_ref| {
+                            notification.source.lifecycle_ref.as_ref().is_some_and(
+                                |lifecycle_ref| lifecycle_ref.as_str() == gate_ref.as_str(),
+                            )
+                        })
                 });
-                if notification.kind == kind
+                if kinds.contains(&notification.kind)
                     && notification.source.turn_run_id == Some(run_id)
                     && notification.resolved_at.is_none()
-                    && !is_current_auth_gate
+                    && !is_current_gate
                 {
                     match self
                         .inbox
@@ -330,7 +344,7 @@ impl RunOutcomeProcessCommitObserver {
                         Ok(_) | Err(NotificationInboxError::NotificationNotFound) => {}
                         Err(error) => {
                             return Err(format!(
-                                "resolve {kind:?} notification for run failed: {error}"
+                                "resolve {kinds:?} notification for run failed: {error}"
                             ));
                         }
                     }
@@ -341,7 +355,7 @@ impl RunOutcomeProcessCommitObserver {
             };
             if cursor.as_ref() == Some(&next_cursor) {
                 return Err(format!(
-                    "{kind:?} notification pagination cursor did not advance"
+                    "{kinds:?} notification pagination cursor did not advance"
                 ));
             }
             cursor = Some(next_cursor);
@@ -541,7 +555,7 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
             self.resolve_open_run_notifications(
                 &commit.state,
                 run_id,
-                NotificationKind::AuthenticationRequired,
+                &[NotificationKind::AuthenticationRequired],
                 occurred_at,
             )
             .await?;
@@ -676,31 +690,27 @@ impl RunOutcomeProcessCommitObserver {
         if !resumed && !commit.state.status.is_terminal() {
             return Ok(());
         }
-        // ponytail: two inbox scans per child resume/terminal (the root-run
-        // path pays one per Resumed today). Ceiling: a parent with hundreds of
-        // children scans a large inbox hundreds of times. Upgrade path:
+        // ponytail: one inbox scan per child resume/terminal today (down from
+        // two). Ceiling: reconciliation still pages the recipient's whole
+        // inbox on every child resume/terminal, so a parent with hundreds of
+        // children still scans a large inbox hundreds of times. Upgrade path:
         // resolve by deterministic id (`run_notification_inbox_id`) once the
         // terminal snapshot carries the gate_ref it settled, or an inbox index
         // by run id.
         // An approval is decided either way once the child resumes; a denied
         // auth resume keeps the auth item actionable until a verified recovery,
         // exactly as the root-run path does.
-        self.resolve_open_run_notifications(
-            &commit.state,
-            run_id,
-            NotificationKind::ApprovalRequired,
-            occurred_at,
-        )
-        .await?;
-        if !resumed || metadata.resume_disposition != Some(GateResumeDisposition::Denied) {
-            self.resolve_open_run_notifications(
-                &commit.state,
-                run_id,
-                NotificationKind::AuthenticationRequired,
-                occurred_at,
-            )
+        let kinds: &[NotificationKind] =
+            if resumed && metadata.resume_disposition == Some(GateResumeDisposition::Denied) {
+                &[NotificationKind::ApprovalRequired]
+            } else {
+                &[
+                    NotificationKind::ApprovalRequired,
+                    NotificationKind::AuthenticationRequired,
+                ]
+            };
+        self.resolve_open_run_notifications(&commit.state, run_id, kinds, occurred_at)
             .await?;
-        }
         Ok(())
     }
 }
@@ -743,7 +753,7 @@ impl ProcessJournalCommitObserver for ApprovalNotificationBackfillProcessCommitO
             .resolve_open_run_notifications(
                 &commit.state,
                 run_id,
-                NotificationKind::ApprovalRequired,
+                &[NotificationKind::ApprovalRequired],
                 occurred_at,
             )
             .await
@@ -1069,7 +1079,9 @@ mod tests {
         Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
     };
     use ironclaw_host_api::{
-        ids::{AgentId, ProcessId, TenantId, ThreadId, UserId},
+        capability::RuntimeCredentialAccountSetup,
+        decision::RuntimeCredentialAuthRequirement,
+        ids::{AgentId, ExtensionId, ProcessId, TenantId, ThreadId, UserId, VendorId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
@@ -3181,6 +3193,202 @@ mod tests {
         assert!(
             records(inbox.as_ref()).await.is_empty(),
             "root approval prompts stay with the live projection; this slice only widens child gates"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_child_auth_resume_keeps_the_item_actionable_until_recovery() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let child_run = TurnRunId::new();
+
+        observer
+            .observe_process_commit(child_commit(
+                child_run,
+                ProcessLifecycleStatus::Suspended,
+                ProcessJournalKind::Suspended,
+                Some(gate_suspension(
+                    ProcessSuspensionKind::Authorization,
+                    "gate:child-auth-denied-then-authorized",
+                )),
+            ))
+            .await
+            .expect("publish child auth notification");
+
+        let mut denied = child_commit(
+            child_run,
+            ProcessLifecycleStatus::Queued,
+            ProcessJournalKind::Resumed,
+            None,
+        );
+        denied.state.metadata["agent_turn"]["auth_resume_disposition"] = json!("denied");
+        observer
+            .observe_process_commit(denied)
+            .await
+            .expect("observe denied child auth resume");
+
+        let denied_page = list_all(inbox.as_ref()).await;
+        let denied_item = denied_page
+            .iter()
+            .find(|item| item.kind == NotificationKind::AuthenticationRequired)
+            .expect("auth item present after denial");
+        assert!(
+            denied_item.resolved_at.is_none(),
+            "denial does not prove credential recovery"
+        );
+
+        observer
+            .observe_process_commit(child_commit(
+                child_run,
+                ProcessLifecycleStatus::Queued,
+                ProcessJournalKind::Resumed,
+                None,
+            ))
+            .await
+            .expect("observe verified child auth resume");
+
+        let recovered_page = list_all(inbox.as_ref()).await;
+        let recovered_item = recovered_page
+            .iter()
+            .find(|item| item.kind == NotificationKind::AuthenticationRequired)
+            .expect("auth item present after recovery");
+        assert!(
+            recovered_item.resolved_at.is_some(),
+            "verified recovery closes the notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_child_resume_replay_keeps_the_current_approval_gate_actionable() {
+        let inbox = inbox();
+        let child_run = TurnRunId::new();
+        let gate_a = "gate:child-approval-a";
+        let gate_b = "gate:child-approval-b";
+
+        let suspended_a = child_commit(
+            child_run,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            Some(gate_suspension(ProcessSuspensionKind::Approval, gate_a)),
+        );
+        let mut suspended_b = suspended_a.clone();
+        suspended_b.state.suspension =
+            Some(gate_suspension(ProcessSuspensionKind::Approval, gate_b));
+
+        let publisher = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        publisher
+            .observe_process_commit(suspended_a.clone())
+            .await
+            .expect("publish gate A");
+        publisher
+            .observe_process_commit(suspended_b.clone())
+            .await
+            .expect("publish gate B before the stale resume for gate A is delivered");
+
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::new(CurrentProcessSource::new(suspended_b.state)));
+
+        let mut resumed_stale = suspended_a;
+        resumed_stale.kind = ProcessJournalKind::Resumed;
+        resumed_stale.state.status = ProcessLifecycleStatus::Queued;
+        resumed_stale.state.suspension = None;
+        observer
+            .observe_process_commit(resumed_stale)
+            .await
+            .expect("reconcile the stale resume for gate A");
+
+        let page = list_all(inbox.as_ref()).await;
+        let mut gate_a_resolved = false;
+        let mut gate_b_open = false;
+        for notification in page {
+            let lifecycle_ref = notification
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str);
+            if lifecycle_ref == Some(gate_a) {
+                gate_a_resolved = notification.resolved_at.is_some();
+            }
+            if lifecycle_ref == Some(gate_b) {
+                gate_b_open = notification.resolved_at.is_none();
+            }
+        }
+        assert!(gate_a_resolved, "the stale resumed gate must be closed");
+        assert!(
+            gate_b_open,
+            "a stale resume replay must not close the run's current approval gate"
+        );
+    }
+
+    fn credential_requirement() -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("slack").expect("provider id"),
+            setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            requester_extension: ExtensionId::new("slack").expect("extension id"),
+            provider_scopes: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_approval_gate_notification_carries_no_credential_providers() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+
+        let mut approval_suspension =
+            gate_suspension(ProcessSuspensionKind::Approval, "gate:approval-creds");
+        approval_suspension.credential_requirements = vec![credential_requirement()];
+        observer
+            .observe_process_commit(child_commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::Suspended,
+                ProcessJournalKind::Suspended,
+                Some(approval_suspension),
+            ))
+            .await
+            .expect("child approval suspension with credential requirements");
+
+        let mut auth_suspension =
+            gate_suspension(ProcessSuspensionKind::Authorization, "gate:auth-creds");
+        auth_suspension.credential_requirements = vec![credential_requirement()];
+        observer
+            .observe_process_commit(child_commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::Suspended,
+                ProcessJournalKind::Suspended,
+                Some(auth_suspension),
+            ))
+            .await
+            .expect("child auth suspension with credential requirements");
+
+        let page = list_all(inbox.as_ref()).await;
+        let approval_item = page
+            .iter()
+            .find(|item| item.kind == NotificationKind::ApprovalRequired)
+            .expect("approval item present");
+        assert!(
+            approval_item.source.credential_providers.is_empty(),
+            "approval notifications must not carry credential providers"
+        );
+        let auth_item = page
+            .iter()
+            .find(|item| item.kind == NotificationKind::AuthenticationRequired)
+            .expect("auth item present");
+        assert_eq!(
+            auth_item.source.credential_providers.len(),
+            1,
+            "auth notifications still carry credential providers"
         );
     }
 }
