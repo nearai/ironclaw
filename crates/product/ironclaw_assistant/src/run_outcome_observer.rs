@@ -246,6 +246,35 @@ impl RunOutcomeProcessCommitObserver {
         Ok(suspension.gate_ref)
     }
 
+    /// The gate a run is currently suspended on, as the notification kind that
+    /// announces it. One authoritative read: reconciliation asks about several
+    /// kinds at once and every kind would otherwise re-read the same snapshot.
+    async fn current_gate(
+        source: &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        snapshot: &JournaledProcessSnapshot,
+    ) -> Result<Option<(NotificationKind, ironclaw_host_api::turn::TurnGateRef)>, String> {
+        let current = source
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: snapshot.scope.clone(),
+                process_id: snapshot.process_id,
+            })
+            .await
+            .map_err(|error| format!("read current gate process state failed: {error}"))?;
+        if current.status != ProcessLifecycleStatus::Suspended {
+            return Ok(None);
+        }
+        let Some(suspension) = current.suspension else {
+            return Ok(None);
+        };
+        let Some(kind) = gate_notification_kind(suspension.kind) else {
+            return Ok(None);
+        };
+        let Some(gate_ref) = suspension.gate_ref else {
+            return Ok(None);
+        };
+        Ok(Some((kind, gate_ref)))
+    }
+
     async fn resolve_gate_required(
         inbox: &dyn NotificationInboxStorePort,
         snapshot: &JournaledProcessSnapshot,
@@ -295,17 +324,23 @@ impl RunOutcomeProcessCommitObserver {
         // A later gate of a given kind can already be current by the time an
         // older Resumed commit arrives; preservation applies per kind, to
         // every kind requested here, not only auth. On a terminal commit the
-        // process is no longer Suspended, so `current_gate_ref` returns None
-        // for every kind and reconciliation still closes every open gate for
-        // the run, exactly as before.
-        let mut current_gate_refs = Vec::with_capacity(kinds.len());
-        for &kind in kinds {
-            let current_gate_ref = match self.process_journal_source.as_deref() {
-                Some(source) => Self::current_gate_ref(source, snapshot, kind).await?,
-                None => None,
-            };
-            current_gate_refs.push((kind, current_gate_ref));
-        }
+        // process is no longer Suspended, so `current_gate` returns None and
+        // reconciliation still closes every open gate for the run, exactly as
+        // before. A run is suspended on at most one gate at a time, so one
+        // read of the snapshot is enough to answer every requested kind.
+        let current_gate = match self.process_journal_source.as_deref() {
+            Some(source) => Self::current_gate(source, snapshot).await?,
+            None => None,
+        };
+        let current_gate_refs: Vec<_> = kinds
+            .iter()
+            .map(|&kind| {
+                let gate_ref = current_gate.as_ref().and_then(|(current_kind, gate_ref)| {
+                    (*current_kind == kind).then(|| gate_ref.clone())
+                });
+                (kind, gate_ref)
+            })
+            .collect();
         let mut cursor = None;
         loop {
             let page = self
