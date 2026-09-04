@@ -280,6 +280,13 @@ async fn capture_copilot_request() -> (String, tokio::sync::oneshot::Receiver<se
 }
 
 fn wire_test_provider(base_url: String) -> GithubCopilotProvider {
+    wire_test_provider_with_unsupported_params(base_url, HashSet::new())
+}
+
+fn wire_test_provider_with_unsupported_params(
+    base_url: String,
+    unsupported_params: HashSet<String>,
+) -> GithubCopilotProvider {
     let client = Client::new();
     GithubCopilotProvider {
         token_manager: Arc::new(
@@ -293,7 +300,7 @@ fn wire_test_provider(base_url: String) -> GithubCopilotProvider {
         base_url,
         active_model: std::sync::RwLock::new("gpt-4o".to_string()),
         extra_headers: Vec::new(),
-        unsupported_params: HashSet::new(),
+        unsupported_params,
     }
 }
 
@@ -340,6 +347,57 @@ async fn complete_with_tools_sends_prompt_cache_key_on_the_wire() {
 
     let body = captured.await.expect("captured request");
     assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
+}
+
+#[tokio::test]
+async fn complete_omits_prompt_cache_key_when_unsupported() {
+    let (base_url, captured) = capture_copilot_request().await;
+    let provider = wire_test_provider_with_unsupported_params(
+        base_url,
+        HashSet::from(["prompt_cache_key".to_string()]),
+    );
+    let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+    request.metadata.insert(
+        PROMPT_CACHE_KEY_METADATA.to_string(),
+        "hashed-cache-key-abc".to_string(),
+    );
+
+    provider
+        .complete(request)
+        .await
+        .expect("Copilot completion");
+
+    let body = captured.await.expect("captured request");
+    assert!(body.get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn complete_with_tools_omits_prompt_cache_key_when_unsupported() {
+    let (base_url, captured) = capture_copilot_request().await;
+    let provider = wire_test_provider_with_unsupported_params(
+        base_url,
+        HashSet::from(["prompt_cache_key".to_string()]),
+    );
+    let mut request = ToolCompletionRequest::new(
+        vec![ChatMessage::user("search")],
+        vec![ToolDefinition {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }],
+    );
+    request.metadata.insert(
+        PROMPT_CACHE_KEY_METADATA.to_string(),
+        "hashed-cache-key-xyz".to_string(),
+    );
+
+    provider
+        .complete_with_tools(request)
+        .await
+        .expect("Copilot tool completion");
+
+    let body = captured.await.expect("captured request");
+    assert!(body.get("prompt_cache_key").is_none());
 }
 
 #[test]
