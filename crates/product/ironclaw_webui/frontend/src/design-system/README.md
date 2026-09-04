@@ -5,6 +5,12 @@ shadcn-style primitives layer (equivalent to `components/ui` in many React
 codebases): small, presentational, dependency-light components that everything
 else composes from.
 
+> **Design governance:** the design source of truth is [`../../DESIGN.md`](../../DESIGN.md)
+> (surfaced in Storybook under **Design/Guidelines**); the agent rules live in
+> [`.claude/rules/design-system.md`](../../../../../../.claude/rules/design-system.md).
+> Style token-driven (`--v2-*`), never hardcode hex/px, and ship a story with
+> every component.
+
 Where it sits in the frontend:
 
 ```
@@ -57,6 +63,7 @@ sidebar is organized into five top-level categories via an explicit `meta.title`
 
 | Category | What lives there |
 |----------|------------------|
+| `Design/*` | governance docs pages (MDX) — `Design/Guidelines` |
 | `Primitives/*` | atomic design-system components (Button, Input, Switch, Modal, SelectMenu…) |
 | `Composites/*` | higher-level compositions (`primitives.tsx`: StatCard, EmptyPanel…) |
 | `Components/*` | app-wired shared components (`components/`, `layout/`) — need providers |
