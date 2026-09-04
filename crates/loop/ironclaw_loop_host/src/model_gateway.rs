@@ -1322,9 +1322,39 @@ fn validate_replay_identity_text(
     Ok(())
 }
 
+// Coalescing thresholds for `ProviderStreamSink::text_delta`. Text deltas are
+// advisory UI progress only (ironclaw_llm::CONTRACT.md streaming section) — the
+// returned provider response, not the delta stream, is authoritative for the
+// final text. Sanitizing and forwarding the full accumulated text on every
+// single raw provider chunk is O(N*k) bytes cloned/scanned for a response of
+// N bytes arriving in k deltas; batching bounds that to O(N*k/coalesce).
+//
+// 64 raw deltas: caps CPU work per UI update to a small, constant multiple of
+// one provider chunk even for very high-frequency providers.
+const STREAM_COALESCE_MAX_DELTAS: u32 = 64;
+// 2 KiB of new text: caps the amount of re-sanitized/re-sent text per UI
+// update independent of chunk count (some providers send few, large chunks).
+const STREAM_COALESCE_MAX_BYTES: usize = 2048;
+// 100 ms: while deltas keep arriving, caps perceived staleness of streamed
+// text in the UI even for many small chunks below the size/count
+// thresholds. This bound is evaluated only on delta arrival — there is no
+// background timer — so it does not fire during a mid-stream provider
+// pause; a pause between deltas can leave up to STREAM_COALESCE_MAX_BYTES
+// of already-received text unemitted until the provider sends its next
+// delta (which re-checks the elapsed time) or the streaming call returns
+// and `flush()` runs.
+const STREAM_COALESCE_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct ProviderStreamSinkState {
+    accumulated_text: String,
+    pending_deltas: u32,
+    pending_bytes: usize,
+    last_emit: Instant,
+}
+
 struct ProviderStreamSink {
     inner: Arc<dyn HostManagedModelStreamSink>,
-    accumulated_text: Mutex<String>,
+    state: Mutex<ProviderStreamSinkState>,
     replace_on_next_delta: AtomicBool,
 }
 
@@ -1332,9 +1362,42 @@ impl ProviderStreamSink {
     fn new(inner: Arc<dyn HostManagedModelStreamSink>) -> Self {
         Self {
             inner,
-            accumulated_text: Mutex::new(String::new()),
+            state: Mutex::new(ProviderStreamSinkState {
+                accumulated_text: String::new(),
+                pending_deltas: 0,
+                pending_bytes: 0,
+                last_emit: Instant::now(),
+            }),
             replace_on_next_delta: AtomicBool::new(false),
         }
+    }
+
+    /// Force-emit whatever text is buffered past the last coalesced update,
+    /// regardless of the size/count/time thresholds. Callers must invoke this
+    /// once after the provider's streaming call returns (success or error) so
+    /// the sink's final state always matches the full accumulated, sanitized
+    /// text — exactly what every delta used to send immediately before
+    /// coalescing. A no-op when nothing is pending (the last threshold-driven
+    /// emit already covered it).
+    async fn flush(&self) {
+        if !self.inner.accepts_safe_text_updates() {
+            return;
+        }
+        let accumulated_text = {
+            let mut guard = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.pending_deltas == 0 {
+                return;
+            }
+            guard.pending_deltas = 0;
+            guard.pending_bytes = 0;
+            guard.last_emit = Instant::now();
+            guard.accumulated_text.clone()
+        };
+        let safe_text = sanitize_model_visible_text(accumulated_text);
+        self.inner.safe_text_update(safe_text).await;
     }
 }
 
@@ -1344,18 +1407,43 @@ impl CompletionStreamSink for ProviderStreamSink {
         if delta.is_empty() || !self.inner.accepts_safe_text_updates() {
             return;
         }
-        let safe_text = {
-            let mut guard = match self.accumulated_text.lock() {
+        let pending_text = {
+            let mut guard = match self.state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
-                guard.clear();
+            let is_first_delta_after_replacement =
+                self.replace_on_next_delta.swap(false, Ordering::SeqCst);
+            if is_first_delta_after_replacement {
+                guard.accumulated_text.clear();
+                guard.pending_deltas = 0;
+                guard.pending_bytes = 0;
             }
-            guard.push_str(&delta);
-            sanitize_model_visible_text(guard.clone())
+            guard.accumulated_text.push_str(&delta);
+            guard.pending_deltas = guard.pending_deltas.saturating_add(1);
+            guard.pending_bytes = guard.pending_bytes.saturating_add(delta.len());
+            // The first delta of a retry/failover replacement must emit
+            // immediately, bypassing the coalescing window: the UI is still
+            // showing the previous (failed) attempt's stale text, and
+            // buffering the swap for up to 64 deltas / 2 KiB / 100 ms would
+            // leave that stale text visible for the whole window.
+            let should_emit = is_first_delta_after_replacement
+                || guard.pending_deltas >= STREAM_COALESCE_MAX_DELTAS
+                || guard.pending_bytes >= STREAM_COALESCE_MAX_BYTES
+                || guard.last_emit.elapsed() >= STREAM_COALESCE_MAX_INTERVAL;
+            if should_emit {
+                guard.pending_deltas = 0;
+                guard.pending_bytes = 0;
+                guard.last_emit = Instant::now();
+                Some(guard.accumulated_text.clone())
+            } else {
+                None
+            }
         };
-        self.inner.safe_text_update(safe_text).await;
+        if let Some(accumulated_text) = pending_text {
+            let safe_text = sanitize_model_visible_text(accumulated_text);
+            self.inner.safe_text_update(safe_text).await;
+        }
     }
 
     fn text_is_visible(&self) -> bool {
@@ -1380,11 +1468,14 @@ impl CompletionStreamSink for ProviderStreamSink {
             return;
         }
         {
-            let mut guard = match self.accumulated_text.lock() {
+            let mut guard = match self.state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard.clear();
+            guard.accumulated_text.clear();
+            guard.pending_deltas = 0;
+            guard.pending_bytes = 0;
+            guard.last_emit = Instant::now();
         }
         self.inner.safe_text_update(String::new()).await;
     }
@@ -1512,16 +1603,28 @@ where
             tool_request.tool_choice = forced_provider_tool_name;
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
-            let response = match if let Some(stream_sink) = stream_sink.as_ref() {
-                provider
-                    .complete_with_tools_streaming(
-                        tool_request.clone(),
-                        Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
-                    )
-                    .await
-            } else {
-                provider.complete_with_tools(tool_request.clone()).await
-            } {
+            let provider_stream_sink = stream_sink
+                .as_ref()
+                .map(|sink| Arc::new(ProviderStreamSink::new(Arc::clone(sink))));
+            let completion_result =
+                if let Some(provider_stream_sink) = provider_stream_sink.as_ref() {
+                    provider
+                        .complete_with_tools_streaming(
+                            tool_request.clone(),
+                            Arc::clone(provider_stream_sink) as Arc<dyn CompletionStreamSink>,
+                        )
+                        .await
+                } else {
+                    provider.complete_with_tools(tool_request.clone()).await
+                };
+            // Unconditional flush regardless of Ok/Err: the pre-coalescing
+            // sink emitted the full accumulated text on every delta, so the
+            // final in-flight text must still reach the sink even if the
+            // last few deltas hadn't crossed a coalescing threshold.
+            if let Some(provider_stream_sink) = provider_stream_sink.as_ref() {
+                provider_stream_sink.flush().await;
+            }
+            let response = match completion_result {
                 Ok(response) => {
                     trace_model_latency_ok(
                         "provider_complete_with_tools",
@@ -1691,16 +1794,25 @@ where
     }
 
     let provider_started_at = live_latency_started_at();
-    let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+    let provider_stream_sink = stream_sink
+        .as_ref()
+        .map(|sink| Arc::new(ProviderStreamSink::new(Arc::clone(sink))));
+    let completion_result = if let Some(provider_stream_sink) = provider_stream_sink.as_ref() {
         provider
             .complete_streaming(
                 completion,
-                Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+                Arc::clone(provider_stream_sink) as Arc<dyn CompletionStreamSink>,
             )
             .await
     } else {
         provider.complete(completion).await
-    } {
+    };
+    // Unconditional flush regardless of Ok/Err: see the tool-streaming call
+    // site above for why this must run even on the error path.
+    if let Some(provider_stream_sink) = provider_stream_sink.as_ref() {
+        provider_stream_sink.flush().await;
+    }
+    let response = match completion_result {
         Ok(response) => {
             trace_model_latency_ok(
                 "provider_complete",
@@ -2959,9 +3071,10 @@ mod tests {
         sink.finish_text_replacement().await;
 
         assert!(
-            sink.accumulated_text
+            sink.state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .accumulated_text
                 .is_empty()
         );
         assert!(!sink.replace_on_next_delta.load(Ordering::SeqCst));
@@ -2969,33 +3082,48 @@ mod tests {
 
     #[tokio::test]
     async fn provider_stream_sink_replaces_partial_attempt_on_first_new_delta() {
+        // Retry/failover semantics: `replace_on_next_text_delta` must not
+        // wait for the coalescing window. The UI is still showing the
+        // previous (failed) attempt's stale text, so the new attempt's
+        // first delta must swap it out immediately — exactly as every delta
+        // did before coalescing existed.
         let inner = Arc::new(RecordingSafeTextSink::default());
         let sink = ProviderStreamSink::new(inner.clone());
 
-        sink.text_delta("partial".to_string()).await;
+        // Two deltas, neither crossing the 64-delta / 2 KiB coalescing
+        // thresholds, and no `flush()` in between — this is the real
+        // production access pattern: `complete_model_request` only calls
+        // `flush()` once, after the whole provider call returns. Whether
+        // these land in the sink before the replacement depends on the
+        // 100 ms interval threshold and wall-clock scheduling, which a
+        // loaded CI runner can cross even this early — so the property
+        // under test is NOT "the sink is empty before the replacement";
+        // it's "the replacement delta emits immediately, on its own,
+        // regardless of what came before".
+        sink.text_delta("partial one ".to_string()).await;
+        sink.text_delta("partial two".to_string()).await;
+        let before = inner
+            .updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+
         sink.replace_on_next_text_delta().await;
+        sink.text_delta("Hello".to_string()).await;
 
-        // Replacement is deferred so the UI keeps showing the old draft while
-        // the provider retry is waiting for its first byte.
+        let updates = inner
+            .updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(
-            inner
-                .updates
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_slice(),
-            ["partial"]
+            updates.len(),
+            before + 1,
+            "the first delta after a replacement must emit immediately, exactly once, with no flush() call"
         );
-
-        sink.text_delta("Hel".to_string()).await;
-        sink.text_delta("lo".to_string()).await;
-
         assert_eq!(
-            inner
-                .updates
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_slice(),
-            ["partial", "Hel", "Hello"]
+            updates.last().map(String::as_str),
+            Some("Hello"),
+            "the emitted text must be only the new attempt's text, with the previous attempt's buffered text discarded"
         );
     }
 
@@ -3005,6 +3133,7 @@ mod tests {
         let sink = ProviderStreamSink::new(inner.clone());
 
         sink.text_delta("partial".to_string()).await;
+        sink.flush().await;
         sink.replace_on_next_text_delta().await;
         sink.finish_text_replacement().await;
 
@@ -3016,6 +3145,95 @@ mod tests {
                 .as_slice(),
             ["partial", ""]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_coalesces_streamed_text_updates() {
+        // Regression test for the perf fix (was the MEASUREMENT test that
+        // pinned the defect): ProviderStreamSink used to re-sanitize and
+        // resend the ENTIRE accumulated text on every provider delta.
+        // Measured BEFORE this fix, on this exact 1,000-delta/16-byte
+        // stream: 1000 safe_text_update calls, 8_008_000 total bytes,
+        // ~238ms elapsed (unoptimized build). Coalescing must cut both the
+        // call count and the byte volume by orders of magnitude while still
+        // delivering the exact same final sanitized text.
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        const DELTA_COUNT: usize = 1000;
+        const DELTA_BYTES: usize = 16;
+        const PRE_FIX_CALL_COUNT: usize = DELTA_COUNT;
+        const PRE_FIX_TOTAL_BYTES: usize = DELTA_BYTES * DELTA_COUNT * (DELTA_COUNT + 1) / 2;
+
+        let started_at = std::time::Instant::now();
+        let mut expected_full_text = String::new();
+        for i in 0..DELTA_COUNT {
+            let delta = format!("{i:015} ");
+            assert_eq!(delta.len(), DELTA_BYTES);
+            expected_full_text.push_str(&delta);
+            sink.text_delta(delta).await;
+        }
+        // A redactable provider-token format split across two raw deltas
+        // (neither half alone contains the "sk-ant-" prefix) must still be
+        // redacted once the halves are joined in the accumulated text —
+        // sanitizing only the new delta would miss it (see CONTRACT.md and
+        // the task's rejected-alternative note: delta-only sanitization is
+        // unsafe across chunk boundaries).
+        for split_delta in ["context s", "k-ant-abcdefgh1234 done"] {
+            expected_full_text.push_str(split_delta);
+            sink.text_delta(split_delta.to_string()).await;
+        }
+        sink.flush().await;
+        let elapsed = started_at.elapsed();
+
+        let updates = inner
+            .updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let call_count = updates.len();
+        let total_bytes: usize = updates.iter().map(|update| update.len()).sum();
+        let last_update = updates.last().cloned();
+        drop(updates);
+
+        eprintln!(
+            "provider_stream_sink_coalesces_streamed_text_updates: \
+             {call_count} safe_text_update calls (was {PRE_FIX_CALL_COUNT}), \
+             {total_bytes} total bytes (was {PRE_FIX_TOTAL_BYTES}), elapsed {elapsed:?}"
+        );
+
+        // 64 deltas / 2 KiB coalescing bounds ~1000 sixteen-byte deltas to
+        // roughly 1000/64 ≈ 16 forced emissions purely from the count/byte
+        // thresholds. The 100 ms interval threshold could in principle add
+        // more (an adversarial "every single delta arrives >100 ms after
+        // the last" stream would degenerate to ~1000 emits, one per delta
+        // — there is no bound below the raw delta count that survives
+        // that literal scenario). That is not the realistic CI-jitter
+        // failure mode though: it would take a separate, sustained >100 ms
+        // stall between *each* of many loop iterations, not the single
+        // one-time scheduling delay between sink construction and the
+        // first delta that flaked the replacement test above. 64 is a
+        // generously loose ceiling for this stream (4x the count/byte-
+        // driven baseline) that only a CI runner stalling this synchronous,
+        // no-I/O loop many separate times would exceed.
+        assert!(
+            call_count <= 64,
+            "expected coalesced call count well below the pre-fix {PRE_FIX_CALL_COUNT}, got {call_count}"
+        );
+        // Similarly generous: even several extra interval-triggered
+        // emissions (each resending the full accumulated text) stay far
+        // under a tenth of the pre-fix total.
+        assert!(
+            total_bytes < PRE_FIX_TOTAL_BYTES / 10,
+            "expected coalesced byte volume well below the pre-fix {PRE_FIX_TOTAL_BYTES}, got {total_bytes}"
+        );
+
+        let expected_sanitized = sanitize_model_visible_text(expected_full_text);
+        assert!(
+            expected_sanitized.contains("[redacted]"),
+            "test fixture must actually exercise redaction"
+        );
+        assert!(!expected_sanitized.contains("sk-ant-abcdefgh1234"));
+        assert_eq!(last_update, Some(expected_sanitized));
     }
 
     fn request_failed(reason: &str) -> LlmError {
