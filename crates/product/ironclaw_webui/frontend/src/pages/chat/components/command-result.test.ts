@@ -51,6 +51,13 @@ test("a success result renders a heading, left-aligned field rows, and readable 
     /text-center/,
     "the redesigned result must not regress to centered prose",
   );
+  const shell = html.match(/<div[^>]*data-testid="command-result"[^>]*>/)?.[0];
+  assert.ok(shell, "expected the command-result shell");
+  assert.match(
+    shell,
+    /\bshrink-0\b/,
+    "command-result cards must preserve their intrinsic height inside the transcript flex column",
+  );
 });
 
 test("a run-id-shaped field value renders monospace, truncatable, with a copy affordance", async () => {
@@ -197,6 +204,15 @@ test("a denial rejection renders as a calm inline notice, not the command-list o
   );
 
   assert.match(html, /data-testid="command-result-denial"/);
+  const denialNotice = html.match(
+    /<div[^>]*data-testid="command-result-denial"[^>]*>/,
+  )?.[0];
+  assert.ok(denialNotice, "expected the denial notice root");
+  assert.match(
+    denialNotice,
+    /\bshrink-0\b/,
+    "the denial notice root must preserve its intrinsic height",
+  );
   assert.match(html, /role="status"/);
   assert.match(html, /This command requires an admin account\./);
   assert.match(html, /data-icon="lock"/);
