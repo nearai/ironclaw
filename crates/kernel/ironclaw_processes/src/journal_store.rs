@@ -1313,12 +1313,13 @@ where
         // index, so `request.limit`/`request.after` only bound the in-memory
         // page, not the storage read; a second page costs a second full
         // index read. Acceptable today because the index holds only
-        // *unclosed* rows (bounded by in-flight work, not by history) and
-        // the two pre-existing callers of this same read already pay this
-        // cost. Upgrade path: push `limit`/`after` down into
-        // `query_indexed_collection` the way `dependencies_for_scope_canonical_order`
-        // already does for the scope-bound query, so the storage read is
-        // bounded too.
+        // *unclosed* rows (bounded by in-flight work, not by history), and
+        // the caller (`boot_recovery::sweep_unclosed_background_edges`)
+        // requests its scan cap as a single page, so the common case pays
+        // exactly one full read per pass, not one per page. Upgrade path:
+        // push `limit`/`after` down into `query_indexed_collection` the way
+        // `dependencies_for_scope_canonical_order` already does for the
+        // scope-bound query, so the storage read is bounded too.
         let records = rows::unresolved_dependencies(self.filesystem.as_ref()).await?;
         Ok(state::scan_unclosed_dependencies(records, &request))
     }

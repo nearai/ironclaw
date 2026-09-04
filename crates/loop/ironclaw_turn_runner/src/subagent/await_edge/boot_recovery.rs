@@ -84,13 +84,6 @@ where
     report
 }
 
-/// Page size per `scan_unclosed_process_dependencies` call. Deliberately
-/// smaller than [`BOOT_SWEEP_SCAN_CAP`] so pagination exercises the keyset
-/// cursor on any deployment with more than a handful of unclosed background
-/// edges; unrelated to fairness, which happens after every page is
-/// accumulated (see [`sweep_unclosed_background_edges`]'s doc comment).
-const BOOT_SWEEP_PAGE_SIZE: u32 = 64;
-
 /// Total edges one boot/periodic sweep pass will *drive through delivery*
 /// (`AwaitEdgeResolver::deliver_background`), across every scope, before
 /// returning. `8 * MAX_QUEUED_INPUTS_PER_RUN`: the run-start sweep
@@ -168,6 +161,19 @@ fn boot_sweep_states() -> Vec<ProcessDependencyState> {
 /// idempotent path `recover_scope` and `sweep_thread_on_run_start` call, no
 /// second delivery implementation. One edge's failure is logged and counted;
 /// it never aborts the rest of the pass, mirroring `sweep_thread_on_run_start`.
+///
+/// **One read in the common case.** The underlying
+/// `rows::unresolved_dependencies` read the scan is built on takes no
+/// `limit` — every `scan_unclosed_process_dependencies` call re-reads the
+/// *whole* unclosed-dependency index, regardless of the page size requested
+/// (see the ponytail on that method). Requesting the scan cap as a single
+/// page (below) means one sweep pass costs one full index read whenever the
+/// backlog fits under `BOOT_SWEEP_SCAN_CAP`, instead of paying that cost once
+/// per page. The keyset cursor still runs — and is still exercised, by
+/// `sweep_scan_pages_through_a_backlog_larger_than_one_page` in
+/// `boot_recovery/tests.rs`, which calls the `_bounded` entry point with an
+/// explicit small page size — for the day the underlying read is bounded and
+/// paging stops being a multiplier.
 pub async fn sweep_unclosed_background_edges<S>(
     resolver: &AwaitEdgeResolver<S>,
     store: &AwaitEdgeStore,
@@ -175,26 +181,32 @@ pub async fn sweep_unclosed_background_edges<S>(
 where
     S: SessionThreadService + ?Sized,
 {
+    let page_size = u32::try_from(BOOT_SWEEP_SCAN_CAP).unwrap_or(u32::MAX);
     sweep_unclosed_background_edges_bounded(
         resolver,
         store,
         BOOT_SWEEP_SCAN_CAP,
         MAX_BOOT_SWEEP_EDGES,
+        page_size,
     )
     .await
 }
 
-/// `sweep_unclosed_background_edges` with both caps as parameters instead of
-/// the fixed [`BOOT_SWEEP_SCAN_CAP`]/[`MAX_BOOT_SWEEP_EDGES`] — exists so
-/// `boot_recovery/tests.rs` can prove the round-robin fairness contract with
-/// a handful of edges instead of needing thousands of real journal rows to
-/// force the caps. The public function above is the only production entry
-/// point.
+/// `sweep_unclosed_background_edges` with the scan cap, delivery cap, and
+/// scan page size all as parameters instead of the fixed
+/// [`BOOT_SWEEP_SCAN_CAP`]/[`MAX_BOOT_SWEEP_EDGES`] (and, for page size, the
+/// scan cap itself) — exists so `boot_recovery/tests.rs` can prove the
+/// round-robin fairness contract with a handful of edges instead of needing
+/// thousands of real journal rows to force the caps, and can independently
+/// force multi-page scanning by passing a `page_size` smaller than
+/// `scan_cap` without paying that cost in production. The public function
+/// above is the only production entry point.
 async fn sweep_unclosed_background_edges_bounded<S>(
     resolver: &AwaitEdgeResolver<S>,
     store: &AwaitEdgeStore,
     scan_cap: usize,
     max_delivered: usize,
+    page_size: u32,
 ) -> ResolveReport
 where
     S: SessionThreadService + ?Sized,
@@ -213,8 +225,7 @@ where
         if remaining == 0 {
             break;
         }
-        let page_limit = u32::try_from(remaining.min(BOOT_SWEEP_PAGE_SIZE as usize))
-            .unwrap_or(BOOT_SWEEP_PAGE_SIZE);
+        let page_limit = u32::try_from(remaining.min(page_size as usize)).unwrap_or(page_size);
         let page = match store
             .scan_unclosed_background(boot_sweep_states(), page_limit, after)
             .await

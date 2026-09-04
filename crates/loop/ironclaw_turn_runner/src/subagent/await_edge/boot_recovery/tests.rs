@@ -455,6 +455,22 @@ impl RecoveryFixture {
         TurnRunId,
         ironclaw_loop_contracts::LoopRunContext,
     ) {
+        self.spawn_extra_parent_with_run_id(suffix, TurnRunId::new())
+            .await
+    }
+
+    /// Same as `spawn_extra_parent`, but with the run id supplied by the
+    /// caller instead of generated randomly — see
+    /// `recovery_fixture_with_parent_run_id` for why.
+    async fn spawn_extra_parent_with_run_id(
+        &self,
+        suffix: &str,
+        parent_run_id: TurnRunId,
+    ) -> (
+        TurnScope,
+        TurnRunId,
+        ironclaw_loop_contracts::LoopRunContext,
+    ) {
         let tenant_id = self.parent_scope.tenant_id.clone();
         let agent_id = self.parent_scope.agent_id.clone();
         let owner_user_id =
@@ -468,7 +484,6 @@ impl RecoveryFixture {
             parent_thread_id.clone(),
             Some(owner_user_id.clone()),
         );
-        let parent_run_id = TurnRunId::new();
         let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
         self.process_store
             .submit_process(SubmitProcessRequest {
@@ -521,6 +536,18 @@ impl RecoveryFixture {
 }
 
 async fn recovery_fixture(profile_id: ironclaw_host_api::turn::RunProfileId) -> RecoveryFixture {
+    recovery_fixture_with_parent_run_id(profile_id, TurnRunId::new()).await
+}
+
+/// Same as `recovery_fixture`, but with the fixture's parent run id supplied
+/// by the caller instead of generated randomly — needed by
+/// `sweep_is_fair_across_scopes_when_one_scope_exceeds_the_cap`, which must
+/// control the scan's sort order (`dependent_process_id`, derived from this
+/// run id) rather than leave it to chance.
+async fn recovery_fixture_with_parent_run_id(
+    profile_id: ironclaw_host_api::turn::RunProfileId,
+    parent_run_id: TurnRunId,
+) -> RecoveryFixture {
     let tenant_id = TenantId::new("recovery-tenant").expect("tenant");
     let agent_id = AgentId::new("recovery-agent").expect("agent");
     let owner_user_id = UserId::new("recovery-owner").expect("owner");
@@ -532,7 +559,6 @@ async fn recovery_fixture(profile_id: ironclaw_host_api::turn::RunProfileId) -> 
         parent_thread_id.clone(),
         Some(owner_user_id.clone()),
     );
-    let parent_run_id = TurnRunId::new();
     let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
 
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
@@ -1157,7 +1183,23 @@ async fn sweep_closes_attention_scheduled_edge_without_duplicate_delivery() {
 /// this assertion is exactly what would fail under that regression.
 #[tokio::test]
 async fn sweep_is_fair_across_scopes_when_one_scope_exceeds_the_cap() {
-    let fixture = recovery_fixture(ironclaw_host_api::turn::RunProfileId::default_profile()).await;
+    // Fixed (not `TurnRunId::new()`) run ids: the scan sorts by
+    // `dependent_process_id`, derived from each parent's run id, so which
+    // scope's records come first in scan order is otherwise a coin flip —
+    // when the lone scope B record happened to sort first, a regression to
+    // bucketing by `record.scope` (instead of `group_ref`) would still
+    // deliver it early and this test would pass anyway. Pinning scope A's
+    // (busy) run id below scope B's (lone) run id makes round-robin the only
+    // way B is served within the delivery cap. Do not revert this to random
+    // ids.
+    let busy_parent_run_id = TurnRunId::from_uuid(uuid::Uuid::from_u128(1));
+    let lone_parent_run_id = TurnRunId::from_uuid(uuid::Uuid::from_u128(2));
+
+    let fixture = recovery_fixture_with_parent_run_id(
+        ironclaw_host_api::turn::RunProfileId::default_profile(),
+        busy_parent_run_id,
+    )
+    .await;
 
     let mut scope_a_edges = Vec::new();
     for index in 0..5 {
@@ -1181,8 +1223,9 @@ async fn sweep_is_fair_across_scopes_when_one_scope_exceeds_the_cap() {
         scope_a_edges.push((child_run_id, child_scope));
     }
 
-    let (parent_scope_b, parent_run_id_b, parent_context_b) =
-        fixture.spawn_extra_parent("fair-b").await;
+    let (parent_scope_b, parent_run_id_b, parent_context_b) = fixture
+        .spawn_extra_parent_with_run_id("fair-b", lone_parent_run_id)
+        .await;
     let (child_b, scope_b) = fixture
         .open_edge_for(
             &parent_scope_b,
@@ -1211,7 +1254,7 @@ async fn sweep_is_fair_across_scopes_when_one_scope_exceeds_the_cap() {
     // before bucketing; the delivery cap (3) is what fairness has to work
     // under.
     let report =
-        sweep_unclosed_background_edges_bounded(&fixture.resolver, &fixture.edge_store, 32, 3)
+        sweep_unclosed_background_edges_bounded(&fixture.resolver, &fixture.edge_store, 32, 3, 32)
             .await;
     assert_eq!(report.failed, 0);
     assert_eq!(report.drained, 3, "the delivery cap bounds one pass's work");
@@ -1366,4 +1409,60 @@ async fn sweep_second_pass_over_same_state_is_idempotent() {
         1,
         "a second sweep over an already-closed edge must not activate again"
     );
+}
+
+/// The scan's keyset cursor still works when a backlog spans more than one
+/// page — proven directly through the `_bounded` entry point with an
+/// explicit small `page_size`, independent of the scan cap. See
+/// `sweep_unclosed_background_edges`'s doc comment for why production always
+/// requests one page sized to the scan cap instead.
+#[tokio::test]
+async fn sweep_scan_pages_through_a_backlog_larger_than_one_page() {
+    let fixture = recovery_fixture(ironclaw_host_api::turn::RunProfileId::default_profile()).await;
+
+    let mut edges = Vec::new();
+    for index in 0..5 {
+        let suffix = format!("paged-{index}");
+        let (child_run_id, child_scope) = fixture
+            .open_edge(&suffix, SpawnSubagentMode::Background)
+            .await;
+        fixture
+            .edge_store
+            .settle(
+                &child_scope,
+                fixture.parent_run_id,
+                child_run_id,
+                EdgeTerminalKind::Completed,
+                Some(1),
+                None,
+            )
+            .await
+            .expect("settle")
+            .expect("edge exists");
+        edges.push((child_run_id, child_scope));
+    }
+
+    // page_size (2) is smaller than both the backlog (5 edges) and scan_cap
+    // (32), forcing the scan loop through multiple `scan_unclosed_background`
+    // calls and exercising the keyset cursor.
+    let report =
+        sweep_unclosed_background_edges_bounded(&fixture.resolver, &fixture.edge_store, 32, 32, 2)
+            .await;
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.drained, 5,
+        "every paged-in edge must still be delivered"
+    );
+
+    for (child_run_id, child_scope) in &edges {
+        assert!(
+            fixture
+                .edge_store
+                .peek(child_scope, fixture.parent_run_id, *child_run_id)
+                .await
+                .expect("peek paged edge")
+                .is_none(),
+            "a multi-page scan must still close every backlogged edge"
+        );
+    }
 }

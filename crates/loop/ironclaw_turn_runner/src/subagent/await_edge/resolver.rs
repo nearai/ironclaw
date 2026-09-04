@@ -26,7 +26,7 @@ use ironclaw_loop_contracts::{AgentLoopHostError, LoopInput, LoopInputAckEffect,
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 use ironclaw_loop_host::{
     AwaitEdgeSettler, EnqueueQueuedMessageRequest, HostInputAckEffectHandler, HostInputEnqueuePort,
-    HostInputQueueError, ResolveOutcome, ResolveReport, SpawnSubagentMode,
+    HostInputQueueError, ResolveOutcome, SpawnSubagentMode,
 };
 #[cfg(test)]
 use ironclaw_threads::ThreadHistoryRequest;
@@ -1133,31 +1133,6 @@ where
             })
     }
 
-    /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
-    /// on `scope`'s thread. Queries at most `MAX_QUEUED_INPUTS_PER_RUN`
-    /// background edges (`AwaitEdgeStore::list_background_for_thread`) and
-    /// drives each through `deliver_background`'s idempotent re-drive by
-    /// state:
-    ///
-    /// - `Settled` / `ResultAppended` / `AttentionScheduled` — full re-drive
-    ///   (append is a no-op replay past `Settled`; `AttentionScheduled`
-    ///   closes only, per `deliver_background`'s own re-drive contract).
-    /// - `AttentionDeferredStreakCap` — only when `human_initiated`: drained
-    ///   forward via `retry_deferred`. An autonomous (System/ParentAgent)
-    ///   start leaves it parked.
-    /// - `Open` / `Drained` / `Abandoned` — nothing to do.
-    ///
-    /// One edge's failure is logged and does not stop the sweep from trying
-    /// the rest; the caller (`RebornTurnRunExecutor::execute_claimed_run`)
-    /// treats the whole sweep as non-fatal to the run start.
-    /// Process-lifetime snapshot of the reactive settle path's outcome tally
-    /// (§6, R4). Cheap, lock-free reads (`Ordering::Relaxed`) — safe to call
-    /// from a health/metrics endpoint or a periodic log line without
-    /// contending with the hot settle path.
-    pub fn resolve_counters_snapshot(&self) -> ResolveReport {
-        self.resolve_counters.snapshot()
-    }
-
     /// Records one reactive-settle result into the process-lifetime counters
     /// and emits a `debug!` line for it. Per-outcome (not a coarser cadence):
     /// `debug!` is already opt-in verbosity — nobody pays for this in a
@@ -1179,6 +1154,23 @@ where
         }
     }
 
+    /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
+    /// on `scope`'s thread. Queries at most `MAX_QUEUED_INPUTS_PER_RUN`
+    /// background edges (`AwaitEdgeStore::list_background_for_thread`) and
+    /// drives each through `deliver_background`'s idempotent re-drive by
+    /// state:
+    ///
+    /// - `Settled` / `ResultAppended` / `AttentionScheduled` — full re-drive
+    ///   (append is a no-op replay past `Settled`; `AttentionScheduled`
+    ///   closes only, per `deliver_background`'s own re-drive contract).
+    /// - `AttentionDeferredStreakCap` — only when `human_initiated`: drained
+    ///   forward via `retry_deferred`. An autonomous (System/ParentAgent)
+    ///   start leaves it parked.
+    /// - `Open` / `Drained` / `Abandoned` — nothing to do.
+    ///
+    /// One edge's failure is logged and does not stop the sweep from trying
+    /// the rest; the caller (`RebornTurnRunExecutor::execute_claimed_run`)
+    /// treats the whole sweep as non-fatal to the run start.
     pub async fn sweep_thread_on_run_start(
         &self,
         scope: &TurnScope,
@@ -1256,16 +1248,6 @@ impl ResolveCounters {
 
     fn record_failed(&self) {
         self.failed.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn snapshot(&self) -> ResolveReport {
-        ResolveReport {
-            resumed: self.resumed.load(Ordering::Relaxed),
-            drained: self.drained.load(Ordering::Relaxed),
-            abandoned: self.abandoned.load(Ordering::Relaxed),
-            already_closed: self.already_closed.load(Ordering::Relaxed),
-            failed: self.failed.load(Ordering::Relaxed),
-        }
     }
 }
 
