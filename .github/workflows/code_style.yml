@@ -429,7 +429,7 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: clippy
           # Saved from pushes to main only (merge_group saves land on a queue
@@ -553,7 +553,7 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: windows-${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -576,7 +576,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: reborn-cli-smoke
           # Saved from pushes to main only (merge_group saves land on a queue
