@@ -2,7 +2,7 @@
 
 **Status:** Canonical — the one current document for subagent architecture,
 design decisions, and roadmap.
-**Last verified against code:** 2026-08-21, workspace @ `dba5f41e9`.
+**Last verified against code:** 2026-09-03, workspace @ `8df1f8a24`.
 **Replaces (deleted 2026-08-20, recoverable from git history):**
 `phase-1-contracts.md`, `phase-2-mechanisms.md`, `phase-3-integration.md`,
 `thread-harness-design.md`, `pr2-pr6-shape.md`,
@@ -180,10 +180,19 @@ line numbers; both were test-module lines, not production callers). There is
 no startup caller today — recovery is not a boot pass. A parent blocked on a
 settled-but-undrained edge in a
 scope nothing else touches stays blocked until some later spawn happens to
-touch that scope. A true startup/boot pass for background edges (which need
-one regardless, since they have no gate to block on) is new work owned by
-Part II Task 7; blocking-mode recovery remains lazy as described here.
-(status, 2026-09-02: the boot pass did not ship with R2 — see §4.2 trigger 3.)
+touch that scope. Blocking-mode recovery remains lazy as described here — the
+boot pass below is a background-edge mechanism; it does not add a startup
+caller for `check_scope_recovered`.
+(status, 2026-09-03: the boot pass shipped in R4 — see §4.2 trigger 3. It
+closes the "no startup caller" gap for *background* edges: on boot,
+`ProcessDependencyPort::scan_unclosed_process_dependencies`
+(`crates/kernel/ironclaw_processes/src/journal.rs`) answers "which
+dependencies anywhere are unclosed" — the query `ProcessDependencyQuery`
+itself cannot, since its `scope` field is mandatory — and
+`sweep_unclosed_background_edges`
+(`crates/loop/ironclaw_turn_runner/src/subagent/await_edge/boot_recovery.rs`)
+drives every stranded background edge it finds through the same per-edge
+recovery `recover_scope` uses.)
 
 ### 2.6 Parallel children
 
@@ -353,22 +362,36 @@ substitute for it.
    `group_ref = "bg:{parent_thread_id}"` (§4.3), so the existing
    group-ref dependency query serves it; the batch is capped at
    `MAX_QUEUED_INPUTS_PER_RUN`.
-3. **Boot pass**: **Not shipped (2026-09-02).** R2 landed
-   triggers 1 and 2 only; a restart re-drives nothing by itself. The stranding
-   window is a refusal after a successful observer pass (`ThreadBusy` or a
-   transient activation error leaves the edge `ResultAppended`) on a thread no
-   later run touches — the result row is already in the transcript, only the
-   autonomous wake is lost. A cross-scope re-drive needs a partition-leading
-   dependency query the kernel charter does not have today; it is R4 work
-   alongside boot-recovery fairness. The design intent, once built: restart re-drives every non-closed background edge
+3. **Boot pass**: **Shipped (2026-09-03, R4)**. Composition
+   (`crates/app/ironclaw_composition/src/runtime.rs`) runs one
+   `tokio::time::interval` task whose immediate first tick is the boot pass,
+   then every `SubagentSweepSettings::interval` (default
+   `DEFAULT_SUBAGENT_SWEEP_INTERVAL` = 300s, `runtime_input.rs`); the handle
+   is aborted on shutdown. Restart re-drives every non-closed background edge
    (`Settled`, `ResultAppended`, `AttentionScheduled`) through the same
    recovery logic as the run-start sweep — `Settled`/`ResultAppended`
    re-enter the deliver path, **including activation of parked parents**
    (autonomous delivery is a product promise, so boot may wake; the streak
    cap still applies), while `AttentionScheduled` is simply closed, its
-   attention outcome already durable. Bounded scanning is new work the plan
-   owns (Task 7 adds the limit/continuation to the dependency query);
-   per-tenant fairness lands with the R4 boot-recovery work.
+   attention outcome already durable; `AttentionDeferredStreakCap` is left
+   alone — a streak-capped edge waits for a permitted or human-initiated
+   start, and a boot pass is neither. Bounded scanning is
+   `ProcessDependencyPort::scan_unclosed_process_dependencies`
+   (`crates/kernel/ironclaw_processes/src/journal.rs`): scope-optional, with
+   a `group_ref` prefix filter and a keyset page over the canonical
+   `(dependent_process_id, dependency_process_id)` order — it adds no
+   filesystem enumeration, reusing the same unscoped `unresolved` index read
+   `query_process_dependencies` and `unresolved_process_dependencies`
+   already perform, then filtering and paging in memory, so
+   `reborn_process_storage_scan_gate` stays green. A `ponytail:` at the read
+   site (`crates/kernel/ironclaw_processes/src/journal_store.rs:1311`) names
+   the remaining ceiling: that index read takes no limit, so a page bounds
+   the result but not the I/O; the upgrade path is pushing limit/cursor into
+   the indexed query. Per-tenant fairness (`sweep_unclosed_background_edges`,
+   `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/boot_recovery.rs`):
+   scanned records are bucketed by `group_ref` (`bg:{parent_thread_id}` —
+   the parent's backlog) and drained round-robin under a delivery cap, so one
+   parent cannot consume a pass (§5, D15).
 
 The persisted edge state is the dedupe and the retry ledger: one durable
 obligation per child, retried with bounded backoff until closed or
@@ -644,6 +667,20 @@ the append-model design review.
   rather than a wedged parent run. Reversal: cheap — the no-op is two early
   returns, and the row shape is unchanged.
 
+- **D15 (2026-09-03) Boot-sweep fairness buckets by the parent's `group_ref`,
+  not the child's `scope`.** `sweep_unclosed_background_edges`
+  (`boot_recovery.rs`) drains stranded background edges round-robin so one
+  parent's backlog cannot consume a whole boot pass. The bucket key has to be
+  something shared by every sibling edge under one parent — bucketing by the
+  record's own `scope` looks equivalent and is not: a background edge's
+  `scope` is the *child's*, unique per spawn, so keying on it puts every edge
+  in its own singleton bucket and round-robin silently degenerates into a
+  scope-by-scope drain, the opposite of fairness. `group_ref` is
+  deterministically `bg:{parent_thread_id}` for background edges (§4.2), so
+  it is the one key that actually groups siblings. A test fails
+  deterministically if this regresses. Reversal: cheap — the bucket key is a
+  single expression at one call site.
+
 ## 6. Roadmap
 
 Slice 1 shipped (#7752, plus the #7755/#7758 vocabulary cleanup). Remaining
@@ -653,7 +690,7 @@ work, in order — names map to the retired shape doc's slices for continuity:
 | --- | --- | --- | --- |
 | R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal (sweep-based), crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real — **shipped 2026-08 except the concurrent-running-children cap (open debt, own slice) and the boot pass (moved to R4, §4.2)** | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
 | R3 | **Gate escalation walk** | 3a: a blocked child's approval/auth gate reaches the parent's owner as an actionable inbox item opening the child thread (shipped 2026-09); 3b: verify/land the WebUI gate card on a hidden child thread opened by URL; R3 is a prerequisite of the R9 enable, not the enable itself | slice 4 |
-| R4 | **Counters, operator command, e2e revival** | `ResolveReport` counters; `ironclaw subagent edges`; un-ignore the five e2e tests via harness-side enablement; boot-recovery fairness | slice 5 |
+| R4 | **Counters, operator command, e2e revival** | **Shipped 2026-09-03**: the boot pass (kernel scan + sweep + composition wiring, §4.2 trigger 3), `ResolveReport` counters wired on `AwaitEdgeResolver` (`resolve_counters_snapshot()`), boot-recovery fairness (§5, D15), all five e2e tests un-ignored (`tests/reborn_subagent_spawn_e2e.rs`). **Not shipped**: `ironclaw subagent edges` — the CLI's dependency set excludes `ironclaw_turn_runner` (`reborn_dependency_boundaries.rs`), so the command needs composition to grow a narrow read accessor first; own slice | slice 5 |
 | R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override. Plus the **degraded-result taxonomy**: `child_terminal_output` distinguishes clean success / partial-on-forced-cutoff / provider error — Claude Code shipped three separate fixes for children returning empty on rate-limit cutoff or fabricating success on API error; D10's lifecycle-taxonomy line; the parent model learns of a blocked child here | slice 6 |
 | R6 | **`subagent_extend` + human priority** | `activate(child, …, ParentAgent)` with consent-to-wake + budget window; `human_waiting` reservation marker | slice 7 |
 | R7 | **WebUI child tree** | `GET …/threads/{id}/children` lineage projection; `ThreadTree` sidebar; raw-vs-framed display rule; interrupt & take over | slice 8 |
@@ -671,8 +708,10 @@ Things no slice may break; each is enforced or pinned today.
 - **Deny-filtered until R9.** `builtin.spawn_subagent` sits in
   `disabled_capability_ids` (`turn_runner/src/runtime.rs`,
   `TEMP(disable-spawn-subagents)` markers); `tests/integration/tool_call.rs`
-  pins the disabled behavior; five e2e tests in
-  `tests/reborn_subagent_spawn_e2e.rs` are `#[ignore]`d until R4.
+  pins the disabled behavior; all five e2e tests in
+  `tests/reborn_subagent_spawn_e2e.rs` run today (un-ignored in R4) against
+  the harness-side enablement that lets them exercise the capability while
+  the model-facing filter stays in place.
 - **No stage skipping.** Child runs execute through the standard
   runner/driver/executor path and the capability membrane; spawn only
   creates and wires.
@@ -741,8 +780,12 @@ Things no slice may break; each is enforced or pinned today.
 | Composition wiring | `crates/app/ironclaw_composition/src/runtime.rs` |
 | Integration scenarios (edges) | `tests/integration/subagent_await_edge.rs` (`reborn_integration_subagent_await_edge`) |
 | Disabled-capability pins | `tests/integration/tool_call.rs` |
-| E2E suite (ignored until R4) | `tests/reborn_subagent_spawn_e2e.rs` |
+| E2E suite (all five run, R4) | `tests/reborn_subagent_spawn_e2e.rs` |
 | Child gate → owner inbox (R3 3a) | `crates/product/ironclaw_assistant/src/run_outcome_observer.rs` (`child_gate_run`, `observe_child_gate_commit`) |
+| Boot-recovery scan (kernel) | `crates/kernel/ironclaw_processes/src/journal.rs` (`ProcessDependencyPort::scan_unclosed_process_dependencies`) |
+| Boot-recovery sweep + fairness | `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/boot_recovery.rs` (`sweep_unclosed_background_edges`) |
+| Boot-sweep composition wiring | `crates/app/ironclaw_composition/src/{runtime,runtime_input}.rs` (`SubagentSweepSettings`, `subagent_background_sweep`) |
+| Resolve counters | `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs` (`ResolveCounters`, `resolve_counters_snapshot`) |
 
 Family rules: `crates/loop/AGENTS.md` and per-crate `AGENTS.md`/`README.md`
 files govern placement; `tests/integration/AGENTS.md` governs scenario
@@ -754,12 +797,25 @@ change.
 
 ## 9. Part II — pending work
 
-R3 slice 3a shipped 2026-09, PR #8046. Next: 3b (WebUI
-gate card on a hidden child thread opened by URL — verify first, it may
-already render), then the two R2 debts as their own slices
-(concurrent-running-children cap at spawn admission; the `ThreadBusy`
-immediate-re-enqueue optimization in `activate_parked_parent` — R2 already
-ships the sweep-based heal that parks and re-attends the edge; this debt is
-re-enqueueing into the now-live parent's queue right away instead of waiting
-for the next sweep). Plans are written here, spec-first against
-Part I, when a slice starts.
+R3 slice 3a shipped 2026-09, PR #8046; R4 shipped 2026-09-03 (boot pass,
+counters, boot-recovery fairness, e2e revival — §6). Remaining, in order:
+
+- **3b**: verify/land the WebUI gate card on a hidden child thread opened by
+  URL (may already render — check before building).
+- **The `ThreadBusy` immediate-re-enqueue optimization** in
+  `activate_parked_parent` — R2 already ships the sweep-based heal that parks
+  and re-attends the edge; this debt is re-enqueueing into the now-live
+  parent's queue right away instead of waiting for the next sweep.
+- **`ironclaw subagent edges`** (R4's undelivered piece, §6). Needs
+  composition to grow a narrow read accessor over `AwaitEdgeStore`, itself
+  pinned by the pub-use snapshot, because `crates/app/ironclaw_cli`'s
+  dependency set is pinned exactly by
+  `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
+  and excludes `ironclaw_turn_runner` — the binary enters Reborn only through
+  `ironclaw_composition`, and no CLI subcommand today builds a runtime except
+  `serve`.
+- **The concurrent-running-children cap** at spawn admission (same path as
+  the descendant cap) — open R2 debt (§6 R2 row, §5 D11 correction).
+- Then **R5** (`subagent_inspect` + per-kind config, §6).
+
+Plans are written here, spec-first against Part I, when a slice starts.
