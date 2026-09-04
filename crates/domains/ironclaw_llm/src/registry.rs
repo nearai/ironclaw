@@ -1143,11 +1143,13 @@ mod tests {
             "openai should have 'temperature' in unsupported_params"
         );
 
-        // Providers without the field in JSON should deserialize to empty vec
+        // Groq caching is automatic; its Chat Completions schema does not
+        // accept OpenAI's explicit prompt_cache_key extension.
         let groq = providers.iter().find(|p| p.id == "groq").unwrap();
         assert!(
-            groq.unsupported_params.is_empty(),
-            "groq should have empty unsupported_params (field absent in JSON)"
+            groq.unsupported_params
+                .contains(&"prompt_cache_key".to_string()),
+            "groq should disable the unsupported prompt_cache_key extension"
         );
 
         // All entries should only contain valid param names

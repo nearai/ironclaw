@@ -2103,10 +2103,16 @@ mod tests {
                     break;
                 }
             }
+            let probe_body = r#"{"models":[]}"#;
+            let probe_response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{probe_body}",
+                probe_body.len()
+            );
             socket
-                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .write_all(probe_response.as_bytes())
                 .await
-                .expect("reject model request");
+                .expect("write models probe response");
+            drop(socket);
             capture_request_body(listener).await
         });
 
