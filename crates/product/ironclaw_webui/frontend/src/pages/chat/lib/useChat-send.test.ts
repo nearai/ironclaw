@@ -5735,6 +5735,32 @@ test("useChat.dismissCommandResult removes only the selected ephemeral command r
   );
 });
 
+test("useChat.runCommand keeps command-result IDs unique across hook remounts", async () => {
+  const { context, messages } = createParallelSendContext({
+    threadId: "thread-1",
+  });
+  context.executeChatCommand = async () => ({
+    command: "status",
+    result: { title: "Status", fields: [], lines: [] },
+  });
+  context.renderCommandResultMarkdown = () => "**Status**";
+
+  runUseChatSource(context);
+  const firstMount = context.globalThis.__testExports.useChat("thread-1");
+  await firstMount.runCommand("/status");
+
+  context.React = createReactStub();
+  const secondMount = context.globalThis.__testExports.useChat("thread-1");
+  await secondMount.runCommand("/status");
+
+  assert.equal(messages().length, 2);
+  assert.notEqual(
+    messages()[0].id,
+    messages()[1].id,
+    "a remounted useChat instance must not reuse a cached command result's React key",
+  );
+});
+
 test("useChat.send: starts a new chat while another thread's run is active", async () => {
   // Landing screen (no open thread), but a run on `thread-busy` is still
   // tracked in activeRun. Starting a brand-new chat must create the thread
