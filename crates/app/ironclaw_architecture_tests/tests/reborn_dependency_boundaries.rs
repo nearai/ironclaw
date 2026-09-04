@@ -1302,11 +1302,20 @@ fn reborn_contracts_crates_hold_no_framework_dependencies() {
     );
 }
 
-/// Every memory *provider* crate. Both are packages under
+/// Every memory *provider* crate. All are packages under
 /// `crates/extensions/packages/` since WS2; the contract crate
 /// `ironclaw_memory` is deliberately not here — naming the contract is the
 /// point of having one.
-const MEMORY_PROVIDER_CRATES: &[&str] = &["ironclaw_memory_native", "ironclaw_memory_mem0"];
+///
+/// `ironclaw_memory_mcp` joins the list while nothing yet depends on it, so the
+/// gate covers it from its first commit: the change that wires it into
+/// composition must add a residue row deliberately rather than discovering the
+/// rule afterwards.
+const MEMORY_PROVIDER_CRATES: &[&str] = &[
+    "ironclaw_memory_native",
+    "ironclaw_memory_mem0",
+    "ironclaw_memory_mcp",
+];
 
 /// Crates that still take a normal dependency on a memory provider, with the
 /// row that removes each one. **Shrink-only**: a stale entry fails, so this

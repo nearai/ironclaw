@@ -1,0 +1,47 @@
+[package]
+name = "ironclaw_memory_mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Generic MCP-backed memory provider for IronClaw Reborn: binds ANY memory system that speaks the memory-over-MCP tool contract, without a per-vendor provider crate."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[features]
+default = []
+# Dev-only seam (cargo-features rule bar 4): exposes the scripted
+# `MockMcpMemoryTransport` so downstream crates can drive the provider without a
+# live MCP server. Off by default so the mock is not part of the production
+# surface. The mock is panic-free, so it is safe to compile outside `cfg(test)`.
+test-support = []
+
+[dependencies]
+# Internal IronClaw crates: the neutral memory contract + the host-api id/scope
+# substrate ONLY — the same internal-dependency boundary `ironclaw_memory_mem0`
+# and `ironclaw_memory_native` sit inside, enforced by the architecture boundary
+# test. In particular this crate does NOT depend on `ironclaw_mcp`: that crate is
+# layer `runtimes` (it owns capability adaptation and resource governance, not
+# just the protocol), and `substrates` may only depend on `contracts`/
+# `substrates`. The MCP client is injected through `McpMemoryTransport` by
+# composition, which is the one layer allowed to name both crates.
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_memory = { path = "../../../domains/ironclaw_memory", version = "0.1.0" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+# Self dev-dependency enables `test-support` for this crate's integration tests.
+ironclaw_memory_mcp = { path = ".", features = ["test-support"] }
+# The provider-level MemoryService contract suite wired in
+# tests/memory_service_contract.rs.
+ironclaw_memory = { path = "../../../domains/ironclaw_memory", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt"] }
