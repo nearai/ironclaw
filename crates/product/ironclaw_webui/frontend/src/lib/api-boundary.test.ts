@@ -95,7 +95,7 @@ test("notification setup rejects malformed successful responses", async () => {
   globalThis.fetch = async () =>
     new Response(
       JSON.stringify({
-        extension_id: "web-push",
+        extension_id: "web-app",
         requires_setup: false,
         enabled: "yes",
       }),
@@ -103,7 +103,7 @@ test("notification setup rejects malformed successful responses", async () => {
     );
 
   await assert.rejects(
-    getNotificationSetupStatus({ extensionId: "web-push" }),
+    getNotificationSetupStatus({ extensionId: "web-app" }),
     /invalid notification setup response/,
   );
 });
