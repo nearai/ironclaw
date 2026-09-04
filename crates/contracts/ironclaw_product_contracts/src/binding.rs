@@ -195,13 +195,15 @@ pub trait ProductBindingResolver: Send + Sync {
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure>;
 
-    /// Read-only check that the sending actor is paired for this
-    /// installation; `Err(BindingRequired)` means unpaired. Creates no
-    /// conversation state. Default is a no-op (`resolve_binding` still gates
-    /// dispatch); resolvers with a per-actor identity policy override it.
-    /// A resolver whose pre-check stays a no-op degrades to post-admission
-    /// rejection for unpaired commands (the #7956 inventory reply), never
-    /// to a dispatch bypass.
+    /// Check that the sending actor is paired for this installation;
+    /// `Err(BindingRequired)` means unpaired. Creates no new conversation,
+    /// thread, or binding state; its only permitted mutation is the same
+    /// stale-pairing revocation repair `resolve_binding` performs when the
+    /// freshness recheck finds the binding revoked. Default is a no-op
+    /// (`resolve_binding` still gates dispatch); resolvers with a per-actor
+    /// identity policy override it. A resolver whose pre-check stays a no-op
+    /// degrades to post-admission rejection for unpaired commands (the
+    /// #7956 inventory reply), never to a dispatch bypass.
     async fn ensure_actor_bound(
         &self,
         _request: ResolveBindingRequest,
