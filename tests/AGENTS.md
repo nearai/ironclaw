@@ -233,7 +233,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
-| Context overflow checkpoints one compact-and-resume attempt; a second overflow fails without another compaction or model observation | `model_recovery.rs::context_overflow_compacts_once_and_resumes`, `model_recovery.rs::second_context_overflow_fails_after_one_compaction` |
+| Context overflow checkpoints one compact-and-resume attempt; oversized summarizer input emits typed durable drop evidence while preserving the complete original transcript, and a second overflow fails without another compaction or model observation | `model_recovery.rs::context_overflow_compacts_once_and_resumes`, `model_recovery.rs::second_context_overflow_fails_after_one_compaction` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs::{iteration_limit_warning_reaches_model_with_tools_and_recovers,repeated_call_warning_reaches_model_and_recovers,repeated_calls_after_warning_remain_advisory}` |

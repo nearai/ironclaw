@@ -49,8 +49,9 @@ mod system_inference;
 
 pub use checkpoint_payload::{MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, RedactedCheckpointPayload};
 pub use compaction::{
-    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
-    LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
+    CompactionInitiator, LoopCompactionError, LoopCompactionInputTruncation, LoopCompactionMode,
+    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse,
+    LoopSummaryArtifactId,
 };
 pub use content_digest::{ContentDigest, ContentDigestError, normalize_for_hash};
 pub use context_budget::PromptContextTokenBudget;

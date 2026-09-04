@@ -172,6 +172,7 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
             thread_id,
             last_compacted_through_seq: None,
             drop_through_seq: 1,
+            first_retained_seq: None,
             preserve_tail_tokens: 8_000,
             mode: LoopCompactionMode::Fresh,
             deadline_ms: 1_000,

@@ -639,11 +639,23 @@ where
                         truncation.omitted_through_kind,
                     ),
                 });
-        let messages = prompt_context_budget::select_prompt_context_messages(
+        let selection = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
             accepted_task_message_id(&self.run_context),
         )?;
+        let budget_truncation =
+            selection
+                .truncation
+                .map(|truncation| LoopContextWindowTruncation {
+                    omitted_through_sequence: truncation.omitted_through_sequence,
+                    omitted_through_kind: compaction_kind_for_message(
+                        truncation.omitted_through_kind,
+                    ),
+                });
+        let recent_window_truncation =
+            newest_context_truncation(recent_window_truncation, budget_truncation);
+        let messages = selection;
         trace_loop_host_latency_ok(
             "context_select_messages",
             &self.run_context,
@@ -3352,6 +3364,38 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
         .collect()
 }
 
+fn newest_context_truncation(
+    left: Option<LoopContextWindowTruncation>,
+    right: Option<LoopContextWindowTruncation>,
+) -> Option<LoopContextWindowTruncation> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let left_eligible = context_truncation_is_compactable(&left);
+            let right_eligible = context_truncation_is_compactable(&right);
+            match (left_eligible, right_eligible) {
+                (true, false) => Some(left),
+                (false, true) => Some(right),
+                (true, true) | (false, false) => {
+                    if left.omitted_through_sequence >= right.omitted_through_sequence {
+                        Some(left)
+                    } else {
+                        Some(right)
+                    }
+                }
+            }
+        }
+        (Some(truncation), None) | (None, Some(truncation)) => Some(truncation),
+        (None, None) => None,
+    }
+}
+
+fn context_truncation_is_compactable(truncation: &LoopContextWindowTruncation) -> bool {
+    matches!(
+        truncation.omitted_through_kind,
+        LoopContextCompactionKind::User | LoopContextCompactionKind::ToolResult
+    )
+}
+
 fn context_message_to_compaction_metadata(
     message: &ContextMessage,
 ) -> Option<LoopContextCompactionMetadata> {
@@ -3661,6 +3705,40 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    #[test]
+    fn truncation_merge_preserves_earlier_compactable_watermark() {
+        let tool_result = LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        };
+        let later_assistant = LoopContextWindowTruncation {
+            omitted_through_sequence: 4,
+            omitted_through_kind: LoopContextCompactionKind::Assistant,
+        };
+
+        assert_eq!(
+            newest_context_truncation(Some(tool_result.clone()), Some(later_assistant)),
+            Some(tool_result)
+        );
+    }
+
+    #[test]
+    fn truncation_merge_uses_newest_when_eligibility_matches() {
+        let earlier = LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        };
+        let later = LoopContextWindowTruncation {
+            omitted_through_sequence: 5,
+            omitted_through_kind: LoopContextCompactionKind::User,
+        };
+
+        assert_eq!(
+            newest_context_truncation(Some(earlier), Some(later.clone())),
+            Some(later)
+        );
+    }
 
     struct BlockingPromptDiagnosticSink {
         calls: std::sync::atomic::AtomicUsize,

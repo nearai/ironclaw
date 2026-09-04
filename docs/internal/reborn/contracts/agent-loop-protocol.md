@@ -243,25 +243,47 @@ Private-key patterns cover the complete bounded block (or, within one message,
 the bounded remainder when the matching end sentinel is missing or mislabeled),
 never only the begin sentinel.
 
-The bounded recent-message window reports the exact sequence and typed kind of
-its newest omitted durable message. The canonical loop treats an omitted user
-message or finalized tool-result reference as a forced compaction watermark and
-requests the dedicated `window_eviction` mode. It selects the newest stable user
-or tool-result boundary in the retained prompt, falling back to the reported
-watermark when no later safe boundary remains. The mode may compact through a
-finalized tool result because its durable reference reconstructs the complete
-assistant-call/result exchange; ordinary `fresh` compaction keeps its user-only
-terminal-boundary rule. Assistant, system, summary, checkpoint, ephemeral, and
-unstable terminal boundaries remain invalid or deferred. A deferred eviction is
-not retried against an unchanged prompt fingerprint.
+The bounded recent-message window and token selector report the exact sequence
+and typed kind of their newest omitted durable message. Provider-linked tool
+results carry the provider-call envelope used to replay the assistant call and
+result atomically; standalone tool observations remain valid without that
+envelope. The canonical loop treats an omitted user message or finalized
+tool-result reference as a forced compaction watermark and requests the
+dedicated `window_eviction` mode.
 
-Successful persistence returns an additive `redacted_leak_count`. The field is
-defaulted and omitted at zero so legacy checkpoint and wire shapes remain
-compatible. A nonzero count emits one typed, safe
-`CompactionLeakDetected` progress/milestone per successful compaction response;
-the payload contains only the task id, fixed safe reason, and aggregate count,
-never match names, ranges, previews, or values. Progress publication remains a
-best-effort operator surface rather than a durable exactly-once event log.
+Ordinary compaction chooses the first retained user or assistant message, then
+replaces the complete prefix before it. This keeps normal cuts between user
+turns and permits a split inside one oversized turn at an assistant boundary.
+`LoopCompactionRequest.first_retained_seq` lets the host verify that the
+retained suffix does not start at a tool result and that no model-visible
+message lies between the replaced prefix and retained suffix. Window eviction
+keeps its existing finalized tool-result drop watermark and omits this
+assistant-split field. Legacy requests without the additive field keep the
+prior user-only terminal rule.
+Unstable boundaries remain deferred and are not retried against an unchanged
+prompt fingerprint.
+
+Before truncating summarizer input, the host bounds the selected durable range
+to 129 transcript messages (the 128-message window plus its pinned task), 257
+total messages including carried summaries, and 16 MiB of original text.
+Larger ranges fail as typed `InputTooLarge`
+recovery input before scanning or allocation. Within that
+bound, the host scans every complete untrusted message body for injection and
+cross-message leak ranges. Cross-message leak matches fail closed; matches
+inside one body are redacted on the complete body before slicing, so truncation
+cannot expose a credential prefix that no longer matches the leak scanner.
+Each new transcript message body is then bounded to 32 KiB with UTF-8-safe
+head-and-tail retention and an explicit omission marker. Carried cumulative
+summaries remain intact. This truncation affects only system-inference input;
+the original transcript row remains unchanged and readable.
+
+Successful persistence returns additive `redacted_leak_count` and
+`input_truncation` fields. Both are defaulted and omitted when empty so legacy
+checkpoint and wire shapes remain compatible. `input_truncation` carries only
+the truncated-message count and aggregate omitted bytes. It emits through the
+typed `CompactionCompleted` progress and milestone payload; no omitted content,
+message body, or leak detail enters observability. A nonzero redaction count
+continues to emit one typed, safe `CompactionLeakDetected` payload.
 
 This keeps projections, debugging, and compaction grounded in typed state
 rather than inferences from transcript prose alone.

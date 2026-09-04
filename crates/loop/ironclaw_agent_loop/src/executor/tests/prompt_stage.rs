@@ -44,23 +44,24 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
 }
 
 #[tokio::test]
-async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_final_bundle() {
+async fn prompt_stage_split_turn_retains_assistant_tool_call_with_its_result() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_indexes(vec![
             vec![
                 compaction_metadata(1, LoopContextCompactionKind::User, 10),
                 compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+                compaction_metadata(3, LoopContextCompactionKind::ToolResult, 10),
             ],
-            vec![compaction_metadata(
-                2,
-                LoopContextCompactionKind::Assistant,
-                10,
-            )],
+            vec![
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+                compaction_metadata(3, LoopContextCompactionKind::ToolResult, 10),
+            ],
         ])
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
             redacted_leak_count: 2,
+            input_truncation: None,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
@@ -101,13 +102,24 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
     );
     assert_eq!(
         output.state.compaction_prompt.message_index,
-        vec![MessageIndexEntry {
-            sequence: 2,
-            kind: IndexedMessageKind::Assistant,
-            estimated_tokens: 10,
-        }]
+        vec![
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::ToolResult,
+                estimated_tokens: 10,
+            },
+        ]
     );
-    assert_eq!(output.state.compaction_prompt.observed_prompt_tokens, 10);
+    assert_eq!(output.state.compaction_prompt.observed_prompt_tokens, 20);
+    let compaction_requests = host.compaction_requests();
+    assert_eq!(compaction_requests.len(), 1);
+    assert_eq!(compaction_requests[0].drop_through_seq, 1);
+    assert_eq!(compaction_requests[0].first_retained_seq, Some(2));
     assert_eq!(
         host.checkpoint_kinds(),
         vec![LoopCheckpointKind::BeforeModel]
@@ -162,6 +174,7 @@ async fn prompt_stage_compacts_eviction_through_latest_safe_tool_result_once() {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-window-eviction").unwrap(),
             compression_ratio_ppm: 250_000,
             redacted_leak_count: 0,
+            input_truncation: None,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
@@ -194,6 +207,7 @@ async fn prompt_stage_compacts_eviction_through_latest_safe_tool_result_once() {
     assert_eq!(requests.len(), 1, "the watermark must trigger exactly once");
     assert_eq!(requests[0].drop_through_seq, 9);
     assert_eq!(requests[0].mode, LoopCompactionMode::WindowEviction);
+    assert_eq!(requests[0].first_retained_seq, None);
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
         Some(9)
