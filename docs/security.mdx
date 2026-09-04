@@ -1,25 +1,36 @@
 ---
 title: Security
+sidebarTitle: Overview
 description: IronClaw's defense-in-depth security architecture
 ---
 
-IronClaw is built from the ground up with security as a core principle. We use a defense-in-depth architecture with multiple independent layers of protection to keep your data safe while enabling powerful agent capabilities.
+Equip a language model with the right tools and it can triage your inbox, ship code, run your infrastructure, and even spend your money. Each new model release moves the ceiling on what's possible.
+
+But all of those capabilities are only possible by using **your credentials**.
+
+Your API keys, OAuth tokens, database passwords, and SSH access sit between two untrusted layers: a model that treats its context as instructions, and tools that are arbitrary code. If either the model or a tool can read a credential, that credential is one clever prompt-injected email or one bad dependency away from being turned against you.
+
+IronClaw is built around this problem. Credential handling isn't a feature add-on — it's the core of the system. The principle is simple:
+
+**Models and tools should never see your raw credentials**
+
+Everything listed below exists to make that hold up in practice.
 
 <CardGroup cols={2}>
   <Card title="Encrypted at rest" icon="lock">
-    Secrets rest encrypted, and are injected at the host boundary only for approved endpoints.
+    Every secret is encrypted with AES-256-GCM under a per-secret derived key, and decrypted only inside the host process.
   </Card>
 
   <Card title="Sandboxed execution" icon="cubes">
-    Tool run in containers, are resource limited and can only contact allowlisted endpoints.
+    WASM tools run under wasmtime with no filesystem, no environment, no processes, and a hard memory and instruction budget.
   </Card>
 
-  <Card title="Leak Detection" icon="shield">
-    Outbound traffic is scanned in real time. Secret-like data is blocked before exfiltration.
+  <Card title="Declared network targets" icon="server">
+    A tool reaches only the hosts its manifest declares. Anything else is refused before the connection opens.
   </Card>
 
-  <Card title="Network Allowlisting" icon="server">
-    Tools can reach only pre-approved endpoints. No silent phone-home to unknown hosts.
+  <Card title="Leak detection" icon="shield">
+    Outbound requests and inbound responses are scanned for secret shapes. Matches are blocked or redacted.
   </Card>
 </CardGroup>
 
@@ -27,89 +38,108 @@ IronClaw is built from the ground up with security as a core principle. We use a
 
 ## Data Flow
 
-The security architecture illustrates IronClaw's **defense in depth** approach with four independent protection layers that data flows through before reaching the LLM and external services.
+Every tool call passes through a series of independent checks on its way out and again on its way back. If one layer misses something, the next one is still there.
 
+The key idea: **the tool never holds the credential.** It builds a request with no credential in it. The host adds the credential only after the request has been checked, and only sends it to a destination the tool's manifest declared.
 
-![Data Flow Diagram](/images/security/data-flow.png)
+**On the way out**, before anything leaves the machine:
 
-At all point, secrets are separated from regular data and handled with extra care. They are encrypted at rest, never enter the container, and are injected into outgoing requests at the network proxy layer.
+1. **Reject any credential the tool tried to add itself** — sensitive headers, credential-shaped query parameters, `user:pass@` in the URL. The whole request fails; tools have no business supplying these.
+2. **Scan the request for leaked secrets** — the URL, headers, and body are run through the leak detector.
+3. **Attach the real credential.** This is the only moment the plaintext value exists, and it happens inside the host, not the tool.
+4. **Check the destination** against the tool's declared network targets and the credential's audience, and refuse private IP ranges. If the host isn't on the list, the request never connects.
+
+**On the way back**, before the tool (and then the model) sees anything:
+
+1. **Strip sensitive response headers.**
+2. **Redact the credential** in case the server echoed it back.
+3. **Scan the response body** for secret shapes.
+
+Secrets stay separate from ordinary data throughout: encrypted at rest, never inside the sandbox, attached only at the host boundary, and only for the one call that was authorized.
+
+See [Credential Protection → How a Tool Uses a Secret](/security/secrets-and-sandboxing#how-a-tool-uses-a-secret) for the step-by-step walkthrough.
 
 ---
 
-## Prompt Injection Defense
+## Tool Capability Declarations
 
-Multiple layers protect against prompt injection:
+When you install an extension, you are approving its **manifest** — a file that states, per tool, exactly what that tool may reach. The host enforces it at runtime; a tool cannot quietly do more than its manifest says. Each tool entry answers four questions:
 
-1. **Input validation** — Length, encoding, forbidden patterns
-2. **Sanitizer** — Escapes dangerous content
-3. **Policy engine** — Severity-based actions
-4. **Leak detector** — Scans for 15+ secret patterns
-5. **Tool output wrapping** — XML format with escape hints
+- **Where can it connect?** `network_targets` is an explicit allowlist of hosts. Anything not on it is refused before a connection opens.
+- **Which credential can it use, and where?** Each `[[tools.credentials]]` entry binds one credential to one destination host. The host attaches it in flight; the tool never receives the value.
+- **What is it allowed to do?** `effects` names what the tool claims to do (reach the network, use a secret, write somewhere external, …), and `default_permission` sets whether a call is eligible for an approval prompt. Whether it actually pauses depends on your approval settings — see [Prompt Injection Defense](#prompt-injection-defense).
+- **Who can invoke it?** `origin_gate_matrix` says which kinds of run may reach the tool at all — for example, reachable during an agent turn but forbidden to background automation.
+
+Here is what that looks like, trimmed from the shipped `gmail` package:
+
+```toml
+[[tools]]
+id = "gmail.send_message"
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+network_targets = [
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  # …three more Google hosts
+]
+
+[[tools.credentials]]
+handle = "gmail_account"
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+```
+
+Note what is *absent*: there is no field a tool can set to read a secret. Credential material is only ever attached by the host, to a request the host has already validated.
+
+Field-by-field reference: [WASM Tools → The Manifest](/capabilities/sandboxed-tools#the-manifest).
 
 ---
 
 ## Leak Detector
 
-IronClaw scans all input going to the LLM - be that user input or the result of running a tool - for potential leaks of sensitive information.
+Even though a tool never sees the credential it sent, the **server it called** might echo it back — an error message quoting the token, a debug endpoint reflecting request headers. And a compromised tool may try to smuggle a secret *out* in a URL or body. The leak detector is the pattern-matching layer that catches both directions.
 
-The leak detector uses a combination of regex patterns and heuristic checks to identify potential secrets:
+It recognizes the common secret shapes — provider keys like OpenAI `sk-…` and Anthropic `sk-ant-…`, AWS `AKIA…` and Google `AIza…`, GitHub `ghp_…`, Stripe and Slack tokens, private-key blocks, bearer tokens and JWTs, and IronClaw's own `icsbx_…` sandbox placeholders. Each match triggers one of three responses:
 
-| Pattern            | Example                           |
-|--------------------|-----------------------------------|
-| API keys           | `sk-...`, `ak-...`                |
-| Tokens             | `ghp_...`, `sess-...`             |
-| Private keys       | `-----BEGIN RSA PRIVATE KEY-----` |
-| Connection strings | `postgres://user:pass@...`        |
-| AWS credentials    | `AKIA...`                         |
-| GitHub tokens      | `ghp_...`                         |
+- **Block** — the content is rejected and the call fails. Used for anything that is unambiguously a live credential: provider keys, cloud keys, private keys.
+- **Redact** — the matched span is masked and the rest passes. Used for shapes that are often legitimate in context: bearer tokens, `Authorization` headers, JWTs.
+- **Warn** — logged, and the content passes. Used for one ambiguous shape: 64-character hex, which is as often a hash as a secret.
 
----
+The detector is not one gate. It runs at every boundary where untrusted content changes hands — outbound requests, inbound responses, shell output, error messages, context compaction, traces, and operator logs — so a secret that slips one boundary is caught at the next.
 
-## Command Injection Detection
-
-Shell commands are checked for injection attempts:
-
-```bash
-# BLOCKED: Command chaining
-cat file; rm -rf /
-
-# BLOCKED: Subshell
-echo $(cat /etc/passwd)
-
-# BLOCKED: Path traversal
-cat ../../../etc/passwd
-```
+Full pattern catalog and the exact boundaries: [Credential Protection → The Leak Detector](/security/secrets-and-sandboxing#the-leak-detector).
 
 ---
 
-## Credential Management
+## Prompt Injection Defense
 
-Tools cannot access secrets directly, instead, they define what keys, oauth tokens, or API credential they need. Then they proceed to create the necessary requests, and the network proxy injects these credentials into outgoing requests without exposing them to the container.
+A prompt injection is any external text that tries to turn the model against you — a webhook payload telling the agent to forward your inbox, a fetched page asking it to reveal stored credentials, a tool response pretending to be a system message.
 
-```json
-  "credentials": {
-    "google_oauth_token": {
-      "secret_name": "google_oauth_token",
-      "location": { "type": "bearer" },
-      "host_patterns": ["gmail.googleapis.com"]
-    }
-  }
-```
+IronClaw's honest position: **structural containment, not pattern matching, is what carries the weight.** Detection heuristics are a real layer, but the weakest one; a determined injection will get past a regex. What holds is the set of boundaries an injection cannot talk its way past:
+
+- **Untrusted text is labelled as such.** Error messages and diagnostics from tools and providers are scanned for injection patterns, and anything suspicious is wrapped in explicit "external, untrusted" markers before the model sees it, with an instruction to treat it as data.
+- **Secrets are scrubbed from that text** by the leak detector, so a hijacked tool call cannot turn an error message into an exfiltration channel.
+- **Tools are gated by where the call came from.** A tool the model can use during a conversation can be declared off-limits to routine and heartbeat automation entirely. A run started by a scheduled trigger counts as an agent turn and meets the same approval gates as an interactive one.
+- **Some actions always ask you** — anything financial, anything that changes approvals or budgets, and any tool you have set to ask each time. For everything else, know the default: **auto-approve is on** for new installs, so a tool marked `ask` (Gmail send, for example) runs without a prompt until you turn auto-approve off or set a per-tool override. An injection that convinces the model to send an email only has to convince *you* if you have made that choice.
+
+And underneath all of that is the sandbox — the boundary that does not depend on detecting anything. A fully hijacked tool still cannot read a secret it wasn't granted, reach a host outside its declared targets, or touch your filesystem. See [Credential Protection](/security/secrets-and-sandboxing) for how that holds, and [How to implement a tool](/extensions/building-a-tool) for the origin-gate policies a manifest can declare.
 
 ---
 
-### Limited Network Access
+## Command Execution
 
-Tools must be explicit about which external services they can contact. This is configured in the `capabilities` section of your agent config:
+The shell tool is the highest-risk surface: a prompt-injected model can try to use it to exfiltrate data or do damage. Every command is checked before it runs, and its output is checked before the model sees it.
 
-```json
-{
-  "network": {
-    "allowed_hosts": ["api.example.com"]
-  },
-  "workspace": {
-    "allowed_prefixes": ["telegram/"]
-  }
-}
-```
+- **Known-destructive commands are refused outright** — `rm -rf /`, fork bombs, `mkfs`, writing to raw disks, `curl | sh`. No setting relaxes this list.
+- **Dangerous ingredients are refused too** — privilege escalation (`sudo`), piping anything into a shell, `eval`, and references to system credential files, SSH keys, or shell history. Matching runs on a normalized form of the command, so extra spaces, capitals, or hiding the pattern after another command on the same line do not slip past it.
+- **Obfuscation is detected** — decoding base64, escape sequences, or reversed strings into a shell; DNS or netcat exfiltration; `curl` and `wget` posting local files; null bytes.
+- **Sensitive paths are caught as arguments**, not just as literal substrings. The command is split into shell segments, and the arguments of `cat`, `grep`, `cp`, `tar`, and about thirty other file-reading commands — plus redirection targets — are checked against a sensitive-path list.
+- **Output is leak-scanned** before the model sees it. Secrets are redacted; if the output trips a blocking pattern, the model receives a fixed marker instead of the content, and the saved output holds only that marker. Output from a command run inside a Docker user-sandbox container is not scanned on this path today.
 
+Full lists and examples: [Shell Commands → Command Validation](/extensions/shell#command-validation).
+
+---
+
+<Card title="Deep dive: how credentials are handled at runtime" href="/security/secrets-and-sandboxing" icon="arrow-right">
+  Where the master key lives, the step-by-step credential-injection flow, why the WASM sandbox makes the "tool never sees the credential" guarantee enforceable, and what this model does not defend against.
+</Card>
