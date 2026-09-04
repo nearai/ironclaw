@@ -5615,10 +5615,11 @@ function createParallelSendContext({
   isProcessing,
   createdThreadId = "thread-created",
   stateUpdates = [],
+  initialMessages = [],
 }: DynamicTestOptions = {}) {
   let sentBody = null;
   let createThreadCalls = 0;
-  let currentMessages = [];
+  let currentMessages = [...initialMessages];
   const seededByThread = new Map();
   const initialByIndex = new Map();
   // State slot order: cooldownUntil(0), now(1), activeRun(2),
@@ -5697,8 +5698,68 @@ function createParallelSendContext({
     context,
     sentBody: () => sentBody,
     createThreadCalls: () => createThreadCalls,
+    messages: () => currentMessages,
   };
 }
+
+test("useChat.dismissCommandResult removes only the selected ephemeral command result", () => {
+  const durableMessage = {
+    id: "assistant-1",
+    role: CHAT_MESSAGE_ROLES.ASSISTANT,
+    content: "Durable reply",
+  };
+  const firstCommandResult = {
+    id: "system-command-1",
+    role: CHAT_MESSAGE_ROLES.SYSTEM,
+    content: "Status",
+    commandResult: { command: "status", result: { title: "Status" } },
+  };
+  const secondCommandResult = {
+    id: "system-command-2",
+    role: CHAT_MESSAGE_ROLES.SYSTEM,
+    content: "Model",
+    commandResult: { command: "model", result: { title: "Model" } },
+  };
+  const { context, messages } = createParallelSendContext({
+    threadId: "thread-1",
+    initialMessages: [durableMessage, firstCommandResult, secondCommandResult],
+  });
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat("thread-1");
+  chat.dismissCommandResult("system-command-1");
+
+  assert.deepEqual(
+    messages().map((message) => message.id),
+    ["assistant-1", "system-command-2"],
+  );
+});
+
+test("useChat.runCommand keeps command-result IDs unique across hook remounts", async () => {
+  const { context, messages } = createParallelSendContext({
+    threadId: "thread-1",
+  });
+  context.executeChatCommand = async () => ({
+    command: "status",
+    result: { title: "Status", fields: [], lines: [] },
+  });
+  context.renderCommandResultMarkdown = () => "**Status**";
+
+  runUseChatSource(context);
+  const firstMount = context.globalThis.__testExports.useChat("thread-1");
+  await firstMount.runCommand("/status");
+
+  context.React = createReactStub();
+  const secondMount = context.globalThis.__testExports.useChat("thread-1");
+  await secondMount.runCommand("/status");
+
+  assert.equal(messages().length, 2);
+  assert.notEqual(
+    messages()[0].id,
+    messages()[1].id,
+    "a remounted useChat instance must not reuse a cached command result's React key",
+  );
+});
 
 test("useChat.send: starts a new chat while another thread's run is active", async () => {
   // Landing screen (no open thread), but a run on `thread-busy` is still

@@ -136,6 +136,7 @@ export function Chat({
     activeRun,
     send,
     runCommand,
+    dismissCommandResult,
     cancelRun,
     retryMessage,
     approve,
@@ -518,6 +519,7 @@ export function Chat({
             logsPath={logsPath}
             pending={activeThreadIsProcessing}
             commands={chatCommands}
+            onDismissCommandResult={dismissCommandResult}
           >
             {recoveryNotice &&
             (
