@@ -228,7 +228,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 **Chat & turn lifecycle**
 | Behavior | Evidence |
 |---|---|
-| A plain message gets a persisted reply through the whole real stack | `greeting.rs` |
+| Plain messages get persisted replies through the whole real stack while consecutive turns in one chat reuse one bounded pseudonymous provider cache key | `greeting.rs` |
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
@@ -268,7 +268,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 **Tools**
 | Behavior | Evidence |
 |---|---|
-| An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
+| An HTTP tool call reaches the real egress boundary, the result reaches the model, and all provider iterations retain one prompt cache key | `tool_call.rs`, `http_matcher.rs` |
 | Normalize a >100 KiB provider-heavy Gmail message into selected headers plus decoded safe Markdown before the same staged/durable result path, then round-trip it through `result_read` | `tool_call.rs::gmail_get_message_persists_semantic_markdown_without_provider_noise` |
 | Read GitHub file content as decoded UTF-8 instead of provider base64, then retrieve the saved result later through `result_read` | `tool_call.rs::github_file_content_decodes_before_the_durable_result_path` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |

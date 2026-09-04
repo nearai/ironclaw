@@ -120,8 +120,15 @@ async fn runs_numeric_time_input_through_builtin_tools_group() {
     );
 }
 
-#[tokio::test]
-async fn runs_http_tool_call_through_recorded_egress() {
+#[test]
+fn runs_http_tool_call_through_recorded_egress() {
+    run_async_test_with_stack(
+        "runs_http_tool_call_through_recorded_egress",
+        runs_http_tool_call_through_recorded_egress_impl,
+    );
+}
+
+async fn runs_http_tool_call_through_recorded_egress_impl() {
     let h = RebornIntegrationHarness::test_default()
         .with_durable_capability_io_builtin_http_tools()
         .script([
@@ -144,6 +151,23 @@ async fn runs_http_tool_call_through_recorded_egress() {
     h.assert_latest_result_json_round_trips("builtin.http")
         .await
         .expect("first-party output round-trips through durable result_read");
+
+    let metadata = h.scripted_llm.captured_request_metadata();
+    assert!(
+        metadata.len() >= 2,
+        "tool turn reaches multiple model calls"
+    );
+    let cache_keys = metadata
+        .iter()
+        .map(|request| request.get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA))
+        .collect::<Vec<_>>();
+    let first = cache_keys[0].expect("first tool-loop request carries a prompt cache key");
+    assert!(
+        cache_keys
+            .iter()
+            .all(|cache_key| cache_key.is_some_and(|cache_key| cache_key == first)),
+        "every tool-loop request must preserve one prompt cache key: {cache_keys:?}"
+    );
 }
 
 /// A provider-heavy Gmail response must be normalized by its owning producer
