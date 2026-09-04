@@ -204,7 +204,15 @@ test("a denial rejection renders as a calm inline notice, not the command-list o
   );
 
   assert.match(html, /data-testid="command-result-denial"/);
-  assert.match(html, /\bshrink-0\b/);
+  const denialNotice = html.match(
+    /<div[^>]*data-testid="command-result-denial"[^>]*>/,
+  )?.[0];
+  assert.ok(denialNotice, "expected the denial notice root");
+  assert.match(
+    denialNotice,
+    /\bshrink-0\b/,
+    "the denial notice root must preserve its intrinsic height",
+  );
   assert.match(html, /role="status"/);
   assert.match(html, /This command requires an admin account\./);
   assert.match(html, /data-icon="lock"/);
