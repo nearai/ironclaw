@@ -199,6 +199,9 @@ pub trait ProductBindingResolver: Send + Sync {
     /// installation; `Err(BindingRequired)` means unpaired. Creates no
     /// conversation state. Default is a no-op (`resolve_binding` still gates
     /// dispatch); resolvers with a per-actor identity policy override it.
+    /// A resolver whose pre-check stays a no-op degrades to post-admission
+    /// rejection for unpaired commands (the #7956 inventory reply), never
+    /// to a dispatch bypass.
     async fn ensure_actor_bound(
         &self,
         _request: ResolveBindingRequest,

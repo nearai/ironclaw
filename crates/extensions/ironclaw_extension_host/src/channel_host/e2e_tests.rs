@@ -4748,8 +4748,6 @@ const TOP_LEVEL_MENTION_EVENT: &str = r#"{
   "event":{"type":"app_mention","user":"U123","channel":"C888","text":"<@UBOT> root a thread","ts":"1710000004.000001"}
 }"#;
 
-/// U999 has no identity binding anywhere in the harness; used by
-/// `slack_unpaired_mention_gets_an_ephemeral_pairing_notice`.
 /// An unpaired sender's bare `/start` in a DM (#7956).
 const UNPAIRED_DM_START: &str = r#"{
   "type":"event_callback",
@@ -4759,6 +4757,8 @@ const UNPAIRED_DM_START: &str = r#"{
   "event":{"type":"message","channel_type":"im","user":"U999","channel":"D999","text":"/start","ts":"1710000005.000010"}
 }"#;
 
+/// U999 has no identity binding anywhere in the harness; used by
+/// `slack_unpaired_mention_gets_an_ephemeral_pairing_notice`.
 const UNPAIRED_MENTION_EVENT: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",

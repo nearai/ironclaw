@@ -528,4 +528,15 @@ impl ProductBindingResolver for TriggeredNoopConversationBindingService {
             },
         )
     }
+
+    async fn ensure_actor_bound(
+        &self,
+        _request: ironclaw_product_contracts::binding::ResolveBindingRequest,
+    ) -> Result<(), ironclaw_product_contracts::error::ProductOperationFailure> {
+        Err(
+            ironclaw_product_contracts::error::ProductOperationFailure::BindingResolutionFailed {
+                reason: "conversation bindings are not supported in triggered delivery".to_string(),
+            },
+        )
+    }
 }

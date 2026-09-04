@@ -248,6 +248,13 @@ impl ProductBindingResolver for SessionLaneRejectingBindingResolver {
         Err(ProductOperationFailure::UnknownInstallation)
     }
 
+    async fn ensure_actor_bound(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        Err(ProductOperationFailure::UnknownInstallation)
+    }
+
     async fn reset_binding(
         &self,
         _request: ResetBindingRequest,
