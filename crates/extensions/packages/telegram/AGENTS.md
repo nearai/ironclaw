@@ -35,8 +35,10 @@
   through one shared send path. The sink's checkpoint
   (`{"terminal_applied", "message_refs"}`, version 1) is what makes a repeated
   terminal reconcile idempotent — never the revision number. Webhook
-  registration/deregistration are manifest recipes executed by the generic
-  host. This is a plain native crate (no WASM target), and there is no
+  registration/deregistration and the Bot API command menu
+  (`setMyCommands`/`deleteMyCommands`, `[[channel.ingress.activation_calls]]`
+  / `[[channel.ingress.deactivation_calls]]`) are manifest recipes executed
+  by the generic host. This is a plain native crate (no WASM target), and there is no
   `ProductAdapter` trait in this codebase.
 - Adapter-specific mapping between Telegram shapes and the shared channel DTOs.
 - Staying free of raw token bytes: hosts run the manifest-declared

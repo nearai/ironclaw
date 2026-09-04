@@ -883,6 +883,7 @@ impl EgressFactory for FakeEgressFactory {
 pub struct RecordingEgressFactory {
     pub requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
     status: Arc<AtomicU16>,
+    fail_url: Arc<Mutex<Option<String>>>,
 }
 
 impl RecordingEgressFactory {
@@ -890,6 +891,7 @@ impl RecordingEgressFactory {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(AtomicU16::new(200)),
+            fail_url: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -897,6 +899,7 @@ impl RecordingEgressFactory {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(AtomicU16::new(500)),
+            fail_url: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -910,6 +913,16 @@ impl RecordingEgressFactory {
     pub fn set_status(&self, status: u16) {
         self.status.store(status, Ordering::SeqCst);
     }
+
+    /// Answer 500 to requests whose URL contains `substring`; every other
+    /// request keeps the default status. Lets a test fail one vendor call in
+    /// a multi-call lifecycle sequence.
+    pub fn fail_requests_matching(&self, substring: &str) {
+        *self
+            .fail_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(substring.to_string());
+    }
 }
 
 impl EgressFactory for RecordingEgressFactory {
@@ -922,6 +935,7 @@ impl EgressFactory for RecordingEgressFactory {
         Arc::new(RecordingEgress {
             requests: Arc::clone(&self.requests),
             status: Arc::clone(&self.status),
+            fail_url: Arc::clone(&self.fail_url),
         })
     }
 }
@@ -929,6 +943,7 @@ impl EgressFactory for RecordingEgressFactory {
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
     status: Arc<AtomicU16>,
+    fail_url: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
@@ -937,13 +952,23 @@ impl RestrictedEgress for RecordingEgress {
         &self,
         request: RestrictedEgressRequest,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        let failed = self
+            .fail_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            .is_some_and(|substring| request.url.contains(substring));
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
         Ok(RestrictedEgressResponse {
             retry_after: None,
-            status: self.status.load(Ordering::SeqCst),
+            status: if failed {
+                500
+            } else {
+                self.status.load(Ordering::SeqCst)
+            },
             body: b"{\"ok\":true}".to_vec(),
         })
     }

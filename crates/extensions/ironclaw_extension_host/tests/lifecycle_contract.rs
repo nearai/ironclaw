@@ -553,6 +553,126 @@ async fn a_failing_activation_call_aborts_activation() {
     assert!(stored.last_error.is_some());
 }
 
+/// A later activation call failing after the wiring recipe landed must not
+/// leave the vendor webhook registered against an extension that never
+/// activated: the host best-effort runs the Deregister half before recording
+/// the failure.
+#[tokio::test]
+async fn a_failed_activation_call_unwinds_the_already_registered_webhook() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    egress.fail_requests_matching("/setMyCommands");
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    let mut record = record(
+        "acme-hook",
+        ironclaw_extension_host::test_support::resolve_manifest_toml(COMMAND_MENU_CHANNEL_MANIFEST),
+    );
+    record.config = webhook_config();
+    h.host.install(record).await.unwrap();
+
+    let error = h.host.activate("acme-hook").await.unwrap_err();
+    assert!(
+        matches!(error, LifecycleError::ActivationHook { .. }),
+        "{error:?}"
+    );
+    let urls: Vec<String> = egress.requests().iter().map(|r| r.url.clone()).collect();
+    assert_eq!(
+        urls.len(),
+        4,
+        "wiring, failed call, then the unwind: {urls:?}"
+    );
+    assert!(urls[0].ends_with("/setWebhook"));
+    assert!(urls[1].ends_with("/setMyCommands"));
+    assert!(
+        urls[2].ends_with("/deleteWebhook") && urls[3].ends_with("/deleteMyCommands"),
+        "the registered webhook must be best-effort unwound: {urls:?}"
+    );
+    assert!(h.host.snapshot().await.extension("acme-hook").is_none());
+    let stored = h.store.get("acme-hook").await.unwrap().unwrap();
+    assert_eq!(stored.state, InstallationState::Failed);
+    let last_error = stored.last_error.expect("failure recorded");
+    assert!(
+        last_error.contains("setMyCommands"),
+        "last_error must name WHICH vendor call failed: {last_error}"
+    );
+}
+
+/// Deactivation cleanup is best-effort PER RECIPE: a failing deleteWebhook
+/// must not strand deleteMyCommands, or the vendor command menu outlives the
+/// channel forever (nothing retries after removal).
+#[tokio::test]
+async fn a_failing_deregistration_still_attempts_the_remaining_deactivation_calls() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    let mut record = record(
+        "acme-hook",
+        ironclaw_extension_host::test_support::resolve_manifest_toml(COMMAND_MENU_CHANNEL_MANIFEST),
+    );
+    record.config = webhook_config();
+    h.host.install(record).await.unwrap();
+    h.host.activate("acme-hook").await.unwrap();
+
+    egress.fail_requests_matching("/deleteWebhook");
+    h.host
+        .deactivate("acme-hook")
+        .await
+        .expect("a vendor failure must not block deactivation");
+
+    let urls: Vec<String> = egress.requests().iter().map(|r| r.url.clone()).collect();
+    assert_eq!(urls.len(), 4, "{urls:?}");
+    assert!(urls[2].ends_with("/deleteWebhook"));
+    assert!(
+        urls[3].ends_with("/deleteMyCommands"),
+        "a failed deleteWebhook must not strand the menu cleanup: {urls:?}"
+    );
+    assert_eq!(
+        h.store.get("acme-hook").await.unwrap().unwrap().state,
+        InstallationState::Installed
+    );
+}
+
+/// A mis-declared recipe anywhere in the half fails the transition BEFORE any
+/// call reaches the live vendor — targets resolve as a batch, not lazily.
+#[tokio::test]
+async fn an_unallowlisted_activation_call_fails_before_any_vendor_call_runs() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    let mut manifest =
+        ironclaw_extension_host::test_support::resolve_manifest_toml(COMMAND_MENU_CHANNEL_MANIFEST);
+    let ingress = manifest
+        .channel
+        .as_mut()
+        .expect("channel")
+        .ingress
+        .as_mut()
+        .expect("ingress");
+    ingress.activation_calls[0].path = "/bot{acme_hook_token}/unlisted".to_string();
+    let mut record = record("acme-hook", manifest);
+    record.config = webhook_config();
+    h.host.install(record).await.unwrap();
+
+    let error = h.host.activate("acme-hook").await.unwrap_err();
+    assert!(
+        matches!(error, LifecycleError::ActivationHook { .. }),
+        "{error:?}"
+    );
+    assert!(
+        egress.requests().is_empty(),
+        "no call may reach the vendor when a later recipe cannot resolve"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Happy path activation publishes exactly one generation and resolves tools
 // -------------------------------------------------------------------------

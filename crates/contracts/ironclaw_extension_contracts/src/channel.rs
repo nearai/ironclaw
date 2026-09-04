@@ -16,6 +16,8 @@ use ironclaw_host_api::{
 use crate::recipe::{IngressVerificationRecipe, RecipeValidationError};
 
 const MAX_CHANNEL_COMMANDS: usize = 32;
+/// Per-list cap on `[channel.ingress]` `activation_calls`/`deactivation_calls`.
+const MAX_INGRESS_VENDOR_CALLS: usize = 8;
 const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
 const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
@@ -405,6 +407,14 @@ impl ChannelDescriptor {
                     return Err(ChannelDescriptorError::WebhookIngressWithoutRouteSuffix);
                 }
                 _ => {}
+            }
+            // The recipe lists share ONE lifecycle deadline while the host
+            // holds the global lifecycle lock — bound them so a manifest
+            // cannot declare an unbounded activation-time call sequence.
+            if ingress.activation_calls.len() > MAX_INGRESS_VENDOR_CALLS
+                || ingress.deactivation_calls.len() > MAX_INGRESS_VENDOR_CALLS
+            {
+                return Err(ChannelDescriptorError::TooManyIngressVendorCalls);
             }
         }
         for egress in &self.egress {
@@ -841,6 +851,10 @@ pub enum ChannelDescriptorError {
     #[error("egress target `{host}` declares an invalid path or transfer bound")]
     InvalidEgressConstraint { host: String },
     #[error(
+        "channel ingress activation_calls/deactivation_calls must each declare at most 8 recipes"
+    )]
+    TooManyIngressVendorCalls,
+    #[error(
         "authenticated_session ingress mounts no webhook route and must not declare a route_suffix"
     )]
     SessionIngressWithRouteSuffix,
@@ -1176,6 +1190,37 @@ kind = "authenticated_session"
                 channel.validate().unwrap_err(),
                 ChannelDescriptorError::InvalidCommands,
                 "expected invalid commands: {commands}"
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_vendor_call_lists_are_bounded() {
+        let recipe = ChannelVendorCallRecipe {
+            method: ChannelVendorCallMethod::Post,
+            path: "/wire".to_string(),
+            body: None,
+            body_credentials: Vec::new(),
+        };
+        let mut channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        let ingress = channel.ingress.as_mut().expect("fixture declares ingress");
+        ingress.activation_calls = vec![recipe.clone(); 8];
+        ingress.deactivation_calls = vec![recipe.clone(); 8];
+        channel.validate().unwrap();
+
+        for oversize in [true, false] {
+            let mut channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+            let ingress = channel.ingress.as_mut().expect("fixture declares ingress");
+            let list = if oversize {
+                &mut ingress.activation_calls
+            } else {
+                &mut ingress.deactivation_calls
+            };
+            *list = vec![recipe.clone(); 9];
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::TooManyIngressVendorCalls,
+                "a ninth recipe must fail validation (activation half: {oversize})"
             );
         }
     }

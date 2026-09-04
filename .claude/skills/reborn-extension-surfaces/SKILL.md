@@ -124,6 +124,10 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    not adapter code: the `[channel.ingress.registration]` /
    `[channel.ingress.deregistration]` recipes the host executes (worked
    example: `rg -n "channel.ingress.registration" crates/extensions/packages/telegram/manifest.toml`).
+   Additional activation-time vendor calls (e.g. registering a native command
+   menu) are `[[channel.ingress.activation_calls]]` /
+   `[[channel.ingress.deactivation_calls]]` recipes — never per-vendor host
+   code (worked example: Telegram's `setMyCommands` in the same manifest).
    The binary
    supplies the adapter to composition through the
    `RebornHostBindings::with_channel_extension_bindings` seam

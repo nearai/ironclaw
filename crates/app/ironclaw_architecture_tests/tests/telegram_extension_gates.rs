@@ -447,11 +447,14 @@ fn reborn_context_free_of_v1_pairing_routes() {
 
 /// The Bot API command menu (`setMyCommands`, run as a manifest
 /// `activation_calls` recipe) must publish exactly the commands the channel
-/// declares — same names, same order — so the menu can never advertise a
-/// command the admission list would refuse, or hide one it accepts. Telegram's
-/// own grammar (1-32 chars of `a-z0-9_`, description 3-256 chars) is checked
-/// here too, because a violation only surfaces as a runtime activation
-/// failure otherwise.
+/// declares — same names, same order, and the descriptions the product
+/// command registry owns — so the menu can never advertise a command the
+/// admission list would refuse, hide one it accepts, or carry stale copy
+/// after the registry is reworded. Telegram's own grammar (1-32 chars of
+/// `a-z0-9_`, description 1-256 chars) is checked here too, because a
+/// violation only surfaces as a runtime activation failure otherwise. The
+/// clearing half must exist as a `deactivation_calls` recipe, not merely be
+/// allowlisted.
 #[test]
 fn telegram_command_menu_matches_the_declared_channel_commands() {
     let manifest_path = crate_path(
@@ -494,6 +497,8 @@ fn telegram_command_menu_matches_the_declared_channel_commands() {
         menu_names, declared,
         "the command menu must mirror [channel] commands exactly"
     );
+    let registry: Vec<ironclaw_assistant::ProductCommandDescriptor> =
+        ironclaw_assistant::product_command_descriptors().collect();
     for entry in menu {
         let name = entry["command"].as_str().expect("menu command name");
         assert!(
@@ -505,10 +510,33 @@ fn telegram_command_menu_matches_the_declared_channel_commands() {
         );
         let description = entry["description"].as_str().expect("menu description");
         assert!(
-            (3..=256).contains(&description.chars().count()),
+            (1..=256).contains(&description.chars().count()),
             "Bot API description bounds violated for {name:?}"
         );
+        let owner = registry
+            .iter()
+            .find(|descriptor| descriptor.name == name)
+            .unwrap_or_else(|| panic!("menu command /{name} is not in the product registry"));
+        assert_eq!(
+            description, owner.description,
+            "menu description for /{name} must match the product command registry \
+             (crates/product/ironclaw_assistant/src/commands.rs) — reword both together"
+        );
     }
+
+    // The clearing half must EXIST as a recipe; the egress allowlist alone
+    // (checked below) would keep passing after the recipe was deleted.
+    let deactivation_calls = channel["ingress"]["deactivation_calls"]
+        .as_array()
+        .expect("[[channel.ingress.deactivation_calls]] declared");
+    assert!(
+        deactivation_calls.iter().any(|call| {
+            call["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("/deleteMyCommands"))
+        }),
+        "deactivation must clear the command menu with a deleteMyCommands recipe"
+    );
 
     // Both menu calls must be on the egress allowlist, or activation fails
     // closed at resolve_vendor_call_target.
