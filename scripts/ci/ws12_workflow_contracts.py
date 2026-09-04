@@ -1820,6 +1820,252 @@ def validate_crate_name_residue(
     return errors
 
 
+def _continued_commands(body: str, executable: str) -> list[str]:
+    """Every command in a shell block that STARTS with `executable`, with
+    backslash continuations joined.
+
+    Matching the step's raw text would accept
+    `echo 'pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}" --exit-zero-on-changes'`
+    as the real invocation while a later line floats the version — the decoy
+    class this module keeps re-learning, one layer in.
+    """
+    commands: list[str] = []
+    current: list[str] | None = None
+    for raw in body.splitlines():
+        line = raw.strip()
+        if current is not None:
+            current.append(line.rstrip("\\").strip())
+            if not line.endswith("\\"):
+                commands.append(" ".join(current))
+                current = None
+            continue
+        if line.startswith(executable):
+            current = [line.rstrip("\\").strip()]
+            if not line.endswith("\\"):
+                commands.append(" ".join(current))
+                current = None
+    if current is not None:
+        commands.append(" ".join(current))
+    return commands
+
+
+def _strip_inline_comment(line: str) -> str:
+    """Drop a trailing YAML/shell comment, respecting quotes.
+
+    A whole-line strip is not enough. `if: github.event_name != 'push'  #
+    github.event_name == 'push' && github.ref == 'refs/heads/main'` carries
+    every marker the Chromatic gate looks for inside a comment while the
+    executable condition says the opposite — the decoy class this module keeps
+    re-learning. A `#` inside quotes (`'#0000'`) is data, not a comment.
+    """
+    quote: str | None = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+            continue
+        # A comment starts at a word boundary. YAML wants whitespace before
+        # `#`; Bash also starts one right after a control operator, so
+        # `true;# --exit-zero-on-changes` is a comment, not a command.
+        if char == "#" and (index == 0 or line[index - 1] in " \t;&|(" ):
+            return line[:index]
+    return line
+
+
+def _without_comments(body: str) -> str:
+    """Drop YAML/shell comments — whole-line AND trailing — so a contract
+    cannot be satisfied by prose that merely mentions the marker it pins."""
+    kept: list[str] = []
+    for line in body.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(_strip_inline_comment(line))
+    return "\n".join(kept)
+
+
+def _job_condition(body: str) -> str:
+    """The job-level `if:` expression only, with comments stripped.
+
+    Scanning the whole job body for `github.event_name == 'push'` would let a
+    comment that merely *mentions* the gate satisfy it while the executable
+    condition said something else — the same decoy class this module already
+    guards elsewhere.
+    """
+    lines = _without_comments(body).splitlines()
+    collected: list[str] = []
+    for index, line in enumerate(lines):
+        if not line.startswith("    if:"):
+            continue
+        collected.append(line.split("if:", 1)[1])
+        # A block scalar (`if: >-`) continues while the lines stay more
+        # deeply indented than the `if:` key itself.
+        for following in lines[index + 1 :]:
+            if following.strip() and not following.startswith("      "):
+                break
+            collected.append(following)
+        break
+    return "\n".join(collected)
+
+
+def _step_slice(body: str, step_name: str) -> str | None:
+    """One step's text, bounded by the next `- name:` heading."""
+    start = body.find(f"- name: {step_name}")
+    if start == -1:
+        return None
+    following = body.find("- name: ", start + 1)
+    return body[start : following if following != -1 else len(body)]
+
+
+CHROMATIC_JOB = "webui-v2-chromatic"
+ROLLUP_JOB = "code-style"
+
+
+def validate_chromatic_visual_lane(text: str) -> list[str]:
+    """Pin the Chromatic lane's security and supply-chain properties.
+
+    Four separate promises live in this one job, and until #7831 the only
+    recorded CI evidence was the unset-secret skip path — the publish path has
+    never executed, so nothing but a static check can keep it honest:
+
+    1. It runs ONLY on trusted pushes to `main`. Same-repository PR branches
+       receive repository secrets, and the publish executes the checked-out
+       tree's own `build-storybook` script, so running this on `pull_request`
+       hands `CHROMATIC_PROJECT_TOKEN` to PR-authored code.
+    2. The token is probed before anything is checked out, so an unprovisioned
+       repository pays nothing and the skip stays green.
+    3. The CLI version is an exact pin, never a tag or range.
+    4. It stays OUT of the `code-style` roll-up, which is what makes it
+       non-blocking.
+    """
+    errors: list[str] = []
+    body = job_body(text, CHROMATIC_JOB)
+    if body is None:
+        return [f"{CODE_STYLE_WORKFLOW}: missing the {CHROMATIC_JOB} job"]
+
+    # 1. Trusted-event gating.
+    condition = _job_condition(body)
+    # Substring presence is not enough. `(push && main) || pull_request`
+    # contains both required markers and still runs the token-bearing publish
+    # on PR-authored code — the exact hole the trusted-event gate closes. The
+    # condition for a secret-bearing lane must be a pure conjunction: no
+    # alternate branch, and no mention of `pull_request` at all.
+    if "pull_request" in condition:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} condition must not admit "
+            "pull_request events — the publish runs the checked-out tree's own "
+            "build script with CHROMATIC_PROJECT_TOKEN in scope"
+        )
+    if "||" in condition:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} condition must be a pure "
+            "conjunction — an `||` branch can re-admit untrusted events while "
+            "the required markers still appear"
+        )
+    if "github.event_name == 'push'" not in condition:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "
+            "github.event_name == 'push' — a secret-bearing lane must not run "
+            "PR-authored build scripts"
+        )
+    if "github.ref == 'refs/heads/main'" not in condition:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "
+            "github.ref == 'refs/heads/main'"
+        )
+
+    # 2. Probe ordering: the token step must precede checkout.
+    probe = body.find("id: token")
+    checkout = body.find("uses: actions/checkout")
+    if probe == -1:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its token probe step")
+    elif checkout != -1 and probe > checkout:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} probes the token AFTER checkout — "
+            "gate the checkout on the probe so a disabled lane does no work"
+        )
+    # Scope the gate check to the checkout STEP. The same `if:` appears on
+    # every later step, so scanning the whole job would pass on an ungated
+    # checkout — the one step whose cost this ordering exists to avoid.
+    checkout_step = _step_slice(body, "Checkout repository")
+    if checkout_step and "if: steps.token.outputs.enabled == 'true'" not in checkout_step:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} checkout is not gated on the token probe"
+        )
+
+    # 3. Supply-chain pin: exact version enforced, never a floating tag.
+    publish = _without_comments(_step_slice(body, "Publish Storybook to Chromatic") or "")
+    if not publish:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its publish step")
+    if "CHROMATIC_CLI_VERSION" not in publish:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its CLI version pin")
+    if "[0-9]+\\.[0-9]+\\.[0-9]+" not in publish:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must reject non-exact "
+            "CHROMATIC_CLI_VERSION values with an exact-version regex"
+        )
+    if "chromatic@latest" in publish:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must not float on chromatic@latest")
+    # Bind the pin to the EXECUTABLE command. Two ways this goes wrong: a guard
+    # that validates the variable is worthless if `pnpm dlx` is handed a literal
+    # spec anyway, and searching the step's text would match a `pnpm dlx …`
+    # string sitting inside an `echo` while the real command floats. So the
+    # command is extracted as a command — a line that STARTS with `pnpm dlx`,
+    # continuations joined — and every publish flag is checked on that alone.
+    dlx_commands = _continued_commands(publish, "pnpm dlx")
+    if len(dlx_commands) != 1:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must run exactly one "
+            f"`pnpm dlx` command (found {len(dlx_commands)})"
+        )
+        publish_command = ""
+    else:
+        publish_command = dlx_commands[0]
+        spec = re.search(r"pnpm dlx\s+\"?chromatic@([^\"\s]+)", publish_command)
+        if spec is None:
+            errors.append(
+                f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must invoke chromatic through "
+                "`pnpm dlx \"chromatic@...\"`"
+            )
+        elif spec.group(1) != "${CHROMATIC_CLI_VERSION}":
+            errors.append(
+                f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must install "
+                "chromatic@${CHROMATIC_CLI_VERSION} — the validated variable, not the "
+                f"literal spec {spec.group(1)!r}"
+            )
+
+    # 4. A visual diff is information, not a build failure.
+    # Check the COMMAND, not the prose: the flag is also named in the comment
+    # explaining it, so a comment-inclusive scan would pass on a lane that had
+    # stopped passing the flag.
+    if "--exit-zero-on-changes" not in publish_command:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass --exit-zero-on-changes"
+        )
+    # `main` is the only branch that publishes now, so it is the only place the
+    # accepted baseline can advance. Drop this flag and every later build diffs
+    # against a baseline frozen at whenever it was last accepted by hand.
+    if "--auto-accept-changes main" not in publish_command:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass "
+            "--auto-accept-changes main — it is the only lane that advances the "
+            "accepted Chromatic baseline"
+        )
+
+    # 5. Non-blocking: absent from the roll-up's needs list.
+    rollup = job_body(text, ROLLUP_JOB)
+    if rollup is not None:
+        needs = rollup.split("steps:")[0]
+        if CHROMATIC_JOB in needs:
+            errors.append(
+                f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must stay out of the "
+                f"{ROLLUP_JOB} needs list — that absence is what makes it non-blocking"
+            )
+    return errors
+
+
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
@@ -1843,6 +2089,7 @@ def validate_workflow_texts(
         errors.extend(validate_production_lint_targets(code_style))
         errors.extend(validate_code_style_docs_guard_order(code_style))
         errors.extend(validate_windows_webui_install_shell(code_style))
+        errors.extend(validate_chromatic_visual_lane(code_style))
     stress = workflows.get(STRESS_WORKFLOW)
     if stress is not None:
         errors.extend(validate_libsql_scripted_memory_job(stress))
