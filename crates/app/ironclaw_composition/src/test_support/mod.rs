@@ -117,6 +117,21 @@ pub async fn subagent_delivery_test_parts(
     crate::runtime::subagent_delivery_test_support::parts(runtime).await
 }
 
+/// Whether the composition-owned subagent background-edge sweep task
+/// (`SubagentSweepSettings`, R4) is present and still running. `false`
+/// covers both "disabled" (`None`) and "the spawned task already exited" —
+/// sufficient to pin the enabled/disabled wiring without racing the periodic
+/// tick itself. Reads the `pub(crate)` field directly rather than adding a
+/// `_for_test` accessor to `RebornRuntime`'s own impl block — the frozen
+/// `reborn_struct_test_support_ratchet` inventory is shrink-only for
+/// test-support members on production structs.
+pub fn subagent_background_sweep_is_running_for_test(runtime: &crate::RebornRuntime) -> bool {
+    runtime
+        .subagent_background_sweep
+        .as_ref()
+        .is_some_and(|handle| !handle.is_finished())
+}
+
 mod automation;
 mod budget_gateway;
 mod capability_io;
