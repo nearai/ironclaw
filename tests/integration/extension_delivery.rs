@@ -2254,6 +2254,29 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         !set_webhook_body.contains("secret_token_handle"),
         "the credential handle name must never reach the vendor; got {set_webhook_body}"
     );
+    // The command-menu activation call crossed the same recorded wire with
+    // the manifest-declared command list (`[[channel.ingress.activation_calls]]`).
+    let set_my_commands = requests
+        .iter()
+        .find(|request| request.url.ends_with("/setMyCommands"))
+        .unwrap_or_else(|| {
+            panic!(
+                "activation must publish the command menu over recorded egress; got {:?}",
+                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        set_my_commands.url,
+        format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"),
+        "the path placeholder must be substituted host-side"
+    );
+    let menu_body = String::from_utf8_lossy(&set_my_commands.body);
+    for command in ["model", "status", "new", "stop", "interrupt"] {
+        assert!(
+            menu_body.contains(&format!("\"command\":\"{command}\"")),
+            "the command menu must carry /{command}; got {menu_body}"
+        );
+    }
     // Redaction: the wire carries the secret by contract, but the
     // model-visible install result must not.
     lifecycle

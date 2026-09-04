@@ -849,7 +849,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ReplySinkOutcome::retry_after` and `ReplyPhase::as_str` helpers,
         // were deleted after a workspace-wide consumer sweep. Count read
         // from this test's own failure message.
-        ("ironclaw_extension_contracts", 12_867),
+        // 12_867 -> 12_878 (2026-09-03, channel command-menu registration):
+        // +11 lines for the `activation_calls`/`deactivation_calls` recipe
+        // lists on `ChannelIngressDescriptor` — declaration only; execution
+        // stays in ironclaw_extension_host's lifecycle. Count read from this
+        // test's own failure message.
+        ("ironclaw_extension_contracts", 12_878),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

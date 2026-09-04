@@ -404,6 +404,28 @@ method = "post"
 path = "/bot{telegram_bot_token}/deleteWebhook"
 body = {}
 
+# The chat menu button: publish the declared `[channel] commands` to the Bot
+# API command menu at activation (`setMyCommands` replaces the stored list, so
+# it is idempotent) and clear it best-effort at deactivation. Entries must stay
+# in sync with `[channel] commands`; pinned by
+# `telegram_command_menu_matches_the_declared_channel_commands` in
+# crates/app/ironclaw_architecture_tests/tests/telegram_extension_gates.rs.
+[[channel.ingress.activation_calls]]
+method = "post"
+path = "/bot{telegram_bot_token}/setMyCommands"
+body.commands = [
+  { command = "model", description = "Show or choose your preferred LLM model" },
+  { command = "status", description = "Show what the assistant is doing in this conversation" },
+  { command = "new", description = "Start a fresh conversation without deleting the current one" },
+  { command = "stop", description = "Stop the active run in this conversation" },
+  { command = "interrupt", description = "Interrupt the active run in this conversation" },
+]
+
+[[channel.ingress.deactivation_calls]]
+method = "post"
+path = "/bot{telegram_bot_token}/deleteMyCommands"
+body = {}
+
 [[channel.egress]]
 scheme = "https"
 host = "api.telegram.org"
@@ -412,6 +434,8 @@ credential_handle = "telegram_bot_token"
 paths = [
   "/bot{telegram_bot_token}/setWebhook",
   "/bot{telegram_bot_token}/deleteWebhook",
+  "/bot{telegram_bot_token}/setMyCommands",
+  "/bot{telegram_bot_token}/deleteMyCommands",
   "/bot{telegram_bot_token}/sendMessage",
   "/bot{telegram_bot_token}/deleteMessage",
   "/bot{telegram_bot_token}/setMessageReaction",

@@ -364,12 +364,13 @@ impl ExtensionHost {
         Ok(())
     }
 
-    /// Run one half of the declarative ingress-wiring pair.
+    /// Run one half of the declarative ingress-wiring pair, plus that half's
+    /// additional `activation_calls`/`deactivation_calls` surface recipes.
     ///
-    /// Absence of the section is a no-op, which is what "default no-op" used
-    /// to mean when these were trait methods — minus the trait surface. A
-    /// channel whose events URL is configured in the vendor's own console
-    /// (or which has no webhook at all) simply declares neither.
+    /// Absence of every section is a no-op, which is what "default no-op"
+    /// used to mean when these were trait methods — minus the trait surface.
+    /// A channel whose events URL is configured in the vendor's own console
+    /// (or which has no webhook at all) simply declares none.
     async fn run_ingress_registration(
         &self,
         record: &InstallationRecord,
@@ -381,42 +382,56 @@ impl ExtensionHost {
         let Some(ingress) = channel.ingress.as_ref() else {
             return Ok(());
         };
-        let recipe = match wiring {
-            IngressWiring::Register => ingress.registration.as_ref(),
-            IngressWiring::Deregister => ingress.deregistration.as_ref(),
+        // The ingress-wiring recipe runs first, then the additional surface
+        // calls in declared order (e.g. a command-menu registration).
+        let recipes: Vec<_> = match wiring {
+            IngressWiring::Register => ingress
+                .registration
+                .iter()
+                .chain(ingress.activation_calls.iter())
+                .collect(),
+            IngressWiring::Deregister => ingress
+                .deregistration
+                .iter()
+                .chain(ingress.deactivation_calls.iter())
+                .collect(),
         };
-        let Some(recipe) = recipe else {
+        if recipes.is_empty() {
             return Ok(());
-        };
-        // Resolve by method + path, never list order. A recipe with zero or
-        // multiple matching targets is ambiguous authority and fails closed.
-        let target = crate::channel_vendor_calls::resolve_vendor_call_target(
-            recipe,
-            channel.egress.as_slice(),
-        )
-        .map_err(|error| ChannelWiringError::Failed {
-            reason: error.to_string(),
-        })?;
+        }
         let egress = self.deps.egress.egress_for_channel(
             &record.extension_id,
             &record.installation_id,
             channel.egress.as_slice(),
         );
-        with_deadline(
-            self.deps.hook_deadline,
-            crate::channel_vendor_calls::run_vendor_call(
+        for recipe in recipes {
+            // Resolve by method + path, never list order. A recipe with zero
+            // or multiple matching targets is ambiguous authority and fails
+            // closed.
+            let target = crate::channel_vendor_calls::resolve_vendor_call_target(
                 recipe,
-                &target.host,
-                target.credential_handle.as_ref(),
-                &record.config,
-                egress.as_ref(),
-                wiring.label(),
-            ),
-        )
-        .await
-        .map_err(|error| ChannelWiringError::Failed {
-            reason: error.to_string(),
-        })
+                channel.egress.as_slice(),
+            )
+            .map_err(|error| ChannelWiringError::Failed {
+                reason: error.to_string(),
+            })?;
+            with_deadline(
+                self.deps.hook_deadline,
+                crate::channel_vendor_calls::run_vendor_call(
+                    recipe,
+                    &target.host,
+                    target.credential_handle.as_ref(),
+                    &record.config,
+                    egress.as_ref(),
+                    wiring.label(),
+                ),
+            )
+            .await
+            .map_err(|error| ChannelWiringError::Failed {
+                reason: error.to_string(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Drop an installation record. This is the live removal path: the

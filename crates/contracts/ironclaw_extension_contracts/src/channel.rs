@@ -641,6 +641,16 @@ pub struct ChannelIngressDescriptor {
     /// Idempotent, best-effort vendor-side unwiring run at deactivation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deregistration: Option<ChannelVendorCallRecipe>,
+    /// Additional idempotent vendor-side surface wiring run at activation,
+    /// after `registration` and in declared order — e.g. publishing the
+    /// channel's declared `commands` to the vendor's native command menu.
+    /// Same recipe grammar, same restricted egress, same fail-closed
+    /// activation semantics as `registration`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activation_calls: Vec<ChannelVendorCallRecipe>,
+    /// Best-effort counterparts run at deactivation, after `deregistration`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deactivation_calls: Vec<ChannelVendorCallRecipe>,
     /// Present for webhook ingress (the mounted route's last path segment);
     /// absent for `authenticated_session` ingress, which mounts no webhook
     /// route. The pairing is enforced by [`ChannelDescriptor::validate`].
