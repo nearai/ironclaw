@@ -1,0 +1,1032 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IronClaw Reborn — Final Architecture Explorer</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --surface: #ffffff; --surface-2: #eceef2;
+    --ink: #16191f; --ink-soft: #4a515c; --ink-faint: #7c8590;
+    --line: #d9dde3; --line-strong: #c4cad2;
+    --accent: #a9631a; --accent-soft: #f3e6d4; --accent-line: #e0b783;
+    --sub: #3a6ea5; --sub-soft: #e2ebf4;
+    --kept: #2f7d5b; --kept-soft: #dcefe5; --gone: #a03d3d; --gone-soft: #f2e0e0;
+    --shadow: 0 1px 2px rgba(20,25,31,.05), 0 8px 28px rgba(20,25,31,.06);
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", "JetBrains Mono", Menlo, "Cascadia Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116; --surface: #161a21; --surface-2: #1d222b;
+      --ink: #e6e9ee; --ink-soft: #a8b0bc; --ink-faint: #6b7480;
+      --line: #262c36; --line-strong: #333b47;
+      --accent: #d99a4e; --accent-soft: #2c2114; --accent-line: #5a441f;
+      --sub: #6ea3d8; --sub-soft: #16212e;
+      --kept: #57b088; --kept-soft: #14261e; --gone: #cf6f6f; --gone-soft: #2a1717;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f7; --surface: #ffffff; --surface-2: #eceef2;
+    --ink: #16191f; --ink-soft: #4a515c; --ink-faint: #7c8590;
+    --line: #d9dde3; --line-strong: #c4cad2;
+    --accent: #a9631a; --accent-soft: #f3e6d4; --accent-line: #e0b783;
+    --sub: #3a6ea5; --sub-soft: #e2ebf4;
+    --kept: #2f7d5b; --kept-soft: #dcefe5; --gone: #a03d3d; --gone-soft: #f2e0e0;
+    --shadow: 0 1px 2px rgba(20,25,31,.05), 0 8px 28px rgba(20,25,31,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --surface: #161a21; --surface-2: #1d222b;
+    --ink: #e6e9ee; --ink-soft: #a8b0bc; --ink-faint: #6b7480;
+    --line: #262c36; --line-strong: #333b47;
+    --accent: #d99a4e; --accent-soft: #2c2114; --accent-line: #5a441f;
+    --sub: #6ea3d8; --sub-soft: #16212e;
+    --kept: #57b088; --kept-soft: #14261e; --gone: #cf6f6f; --gone-soft: #2a1717;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1220px; margin: 0 auto; padding: 0 24px; }
+  code, .mono { font-family: var(--mono); }
+  button { font: inherit; color: inherit; }
+
+  /* ---- top bar ---- */
+  .topbar { position: sticky; top: 0; z-index: 40; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  .topbar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 12px; padding-bottom: 12px; }
+  .brand { display: flex; align-items: center; gap: 11px; font-weight: 600; letter-spacing: -.01em; }
+  .brand .mk { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(145deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #000)); display: grid; place-items: center; color: #fff; font-family: var(--mono); font-size: .78rem; font-weight: 700; }
+  .brand small { display: block; font-weight: 400; font-size: .72rem; color: var(--ink-faint); font-family: var(--mono); letter-spacing: .02em; }
+  .theme-btn { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 7px 12px; cursor: pointer; font-family: var(--mono); font-size: .76rem; color: var(--ink-soft); }
+  .theme-btn:hover { border-color: var(--accent-line); color: var(--ink); }
+
+  /* ---- hero ---- */
+  header.hero { padding: 46px 0 26px; }
+  .hero h1 { font-size: clamp(1.9rem, 4.4vw, 3rem); line-height: 1.05; letter-spacing: -.03em; margin: 0 0 14px; font-weight: 680; text-wrap: balance; }
+  .hero h1 em { color: var(--accent); font-style: normal; }
+  .hero p { color: var(--ink-soft); max-width: 74ch; margin: 0 0 10px; font-size: 1.04rem; }
+  .hint { display: inline-flex; align-items: center; gap: 8px; margin-top: 14px; font-family: var(--mono); font-size: .78rem; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 100px; padding: 6px 14px; }
+  .hint .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: .35; transform: scale(.8);} 50% { opacity: 1; transform: scale(1);} }
+  @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+
+  /* ---- explorer layout ---- */
+  .explorer { display: grid; grid-template-columns: minmax(0,1fr) 380px; gap: 26px; align-items: start; padding-bottom: 20px; }
+
+  /* stack diagram */
+  .band { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+  .band + .band { margin-top: 10px; }
+  .band-label { font-family: var(--mono); font-size: .67rem; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 11px; display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+  .band-label .role { text-transform: none; letter-spacing: .01em; font-size: .72rem; color: var(--ink-faint); font-weight: 400; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .node { cursor: pointer; flex: 1 1 auto; min-width: 116px; text-align: center; font-family: var(--mono); font-size: .82rem; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; transition: border-color .14s, transform .08s, box-shadow .14s; }
+  .node:hover { border-color: var(--accent-line); transform: translateY(-1px); }
+  .node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .node.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+  .node small { display: block; font-size: .64rem; color: var(--ink-faint); margin-top: 2px; font-weight: 400; }
+  .node.active small { color: color-mix(in srgb, var(--accent) 70%, var(--ink-faint)); }
+
+  /* interface rail */
+  .rail { display: flex; align-items: center; gap: 12px; margin: 10px 2px; }
+  .rail .l { flex: 1; height: 1px; background: repeating-linear-gradient(90deg, var(--sub) 0 6px, transparent 6px 12px); opacity: .5; }
+  .rail .pill { cursor: pointer; font-family: var(--mono); font-size: .76rem; color: var(--sub); border: 1px solid var(--sub); background: var(--sub-soft); border-radius: 100px; padding: 5px 14px; white-space: nowrap; font-weight: 600; transition: box-shadow .14s; }
+  .rail .pill:hover { box-shadow: 0 0 0 3px color-mix(in srgb, var(--sub) 16%, transparent); }
+  .rail .pill.active { box-shadow: 0 0 0 3px color-mix(in srgb, var(--sub) 26%, transparent); }
+  .rail .pill:focus-visible { outline: 2px solid var(--sub); outline-offset: 2px; }
+
+  /* kernel band */
+  .kernel { border: 1.5px solid var(--accent-line); background: linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 55%, var(--surface)), var(--surface) 62%); }
+  .kernel > .band-label { color: var(--accent); font-weight: 700; }
+  .kernel > .band-label .role { color: var(--accent); opacity: .82; }
+  .krow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+  .kcell { cursor: pointer; text-align: left; background: var(--surface); border: 1px solid var(--accent-line); border-radius: 8px; padding: 12px 13px; transition: transform .08s, box-shadow .14s; }
+  .kcell:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+  .kcell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .kcell.active { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .kcell h4 { margin: 0 0 4px; font-size: .8rem; font-family: var(--mono); color: var(--accent); }
+  .kcell p { margin: 0; font-size: .76rem; color: var(--ink-soft); line-height: 1.45; }
+
+  .band.untrusted .band-label .role { color: var(--gone); }
+  .uflag { font-family: var(--mono); font-size: .6rem; letter-spacing: .1em; text-transform: uppercase; color: var(--gone); border: 1px solid var(--gone); border-radius: 5px; padding: 2px 6px; }
+
+  .depl-strip { cursor: pointer; margin-top: 10px; display: flex; gap: 12px; align-items: center; border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 12px 15px; background: var(--surface); transition: border-color .14s; }
+  .depl-strip:hover { border-color: var(--sub); }
+  .depl-strip.active { border-style: solid; border-color: var(--sub); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sub) 16%, transparent); }
+  .depl-strip:focus-visible { outline: 2px solid var(--sub); outline-offset: 2px; }
+  .depl-strip .tw { font-family: var(--mono); font-size: .72rem; color: var(--sub); border: 1px solid var(--sub); border-radius: 6px; padding: 4px 9px; white-space: nowrap; font-weight: 600; }
+  .depl-strip p { margin: 0; font-size: .82rem; color: var(--ink-soft); }
+
+  /* ---- inspector ---- */
+  .inspector { position: sticky; top: 78px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; min-height: 420px; }
+  .insp-head { padding: 16px 18px 14px; border-bottom: 1px solid var(--line); position: relative; }
+  .insp-kind { font-family: var(--mono); font-size: .64rem; letter-spacing: .13em; text-transform: uppercase; font-weight: 700; }
+  .insp-title { font-size: 1.18rem; letter-spacing: -.015em; margin: 6px 0 4px; text-wrap: balance; }
+  .insp-role { font-size: .86rem; color: var(--ink-soft); margin: 0; }
+  .insp-body { padding: 6px 18px 20px; }
+  .insp-field { padding: 13px 0 3px; border-top: 1px solid var(--line); }
+  .insp-field:first-child { border-top: none; }
+  .insp-field .k { font-family: var(--mono); font-size: .64rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 600; margin-bottom: 6px; }
+  .insp-field .v { font-size: .87rem; color: var(--ink); }
+  .insp-field .v code { font-family: var(--mono); font-size: .82em; background: var(--surface-2); padding: .05em .34em; border-radius: 4px; }
+  .insp-sig { font-family: var(--mono); font-size: .76rem; line-height: 1.7; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; overflow-x: auto; white-space: pre; }
+  .chips2 { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip2 { font-family: var(--mono); font-size: .73rem; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 6px; padding: 3px 8px; }
+  .chip2.sub { color: var(--sub); background: var(--sub-soft); border-color: var(--sub); }
+  .insp-note { font-size: .82rem; color: var(--ink-soft); border-left: 3px solid var(--accent); padding-left: 12px; margin: 4px 0 0; }
+  .insp-note.kept { border-color: var(--kept); }
+  .insp-note.gone { border-color: var(--gone); }
+  .kind-kernel { color: var(--accent); }
+  .kind-substrate, .kind-interface { color: var(--sub); }
+  .kind-product { color: var(--ink-soft); }
+  .kind-lane { color: var(--gone); }
+  .kind-capability { color: var(--accent); }
+  .insp-empty { padding: 40px 22px; text-align: center; color: var(--ink-faint); }
+  .insp-empty .big { font-family: var(--mono); font-size: 2.4rem; color: var(--accent); opacity: .5; }
+  .insp-empty p { font-size: .88rem; margin: 12px 0 0; }
+
+  /* ---- capability section ---- */
+  section.block { padding: 44px 0; border-top: 1px solid var(--line); }
+  .sec-num { font-family: var(--mono); font-size: .72rem; color: var(--ink-faint); letter-spacing: .08em; display: block; margin-bottom: 10px; }
+  h2 { font-size: clamp(1.3rem, 2.4vw, 1.8rem); letter-spacing: -.015em; margin: 0 0 8px; text-wrap: balance; }
+  .lede { color: var(--ink-soft); max-width: 76ch; font-size: 1.02rem; margin: 0 0 20px; }
+  .lede strong { color: var(--ink); }
+
+  .triptych { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+  .tri { background: var(--surface); border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: var(--radius); padding: 15px 16px; box-shadow: var(--shadow); }
+  .tri .lbl { font-family: var(--mono); font-size: .67rem; letter-spacing: .13em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+  .tri p { margin: 8px 0 0; font-size: .92rem; color: var(--ink-soft); }
+  .tri p strong { color: var(--ink); font-weight: 640; }
+  .bind { margin: 20px 0 0; font-size: 1.02rem; color: var(--ink); border-left: 3px solid var(--accent); padding-left: 18px; max-width: 74ch; }
+
+  .lifecycle { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .lstep { cursor: pointer; flex: 1 1 130px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px 12px; box-shadow: var(--shadow); transition: transform .08s, box-shadow .14s, border-color .14s; }
+  .lstep:hover { transform: translateY(-1px); border-color: var(--accent-line); }
+  .lstep:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .lstep.active { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+  .lstep .idx { font-family: var(--mono); font-size: .64rem; font-weight: 700; color: var(--ink-faint); }
+  .lstep .n { font-family: var(--mono); font-weight: 600; font-size: .85rem; margin-top: 2px; }
+  .lstep .s { font-size: .68rem; color: var(--ink-faint); margin-top: 4px; font-family: var(--mono); line-height: 1.4; }
+  .lstep.fold .idx, .lstep.fold .n { color: var(--accent); }
+  .lstep.fold { border-color: var(--accent-line); background: linear-gradient(180deg, var(--accent-soft), var(--surface) 74%); }
+
+  /* ---- expandable reference ---- */
+  details.ref { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); margin-top: 12px; overflow: hidden; }
+  details.ref > summary { cursor: pointer; padding: 15px 18px; font-weight: 600; letter-spacing: -.01em; list-style: none; display: flex; align-items: center; gap: 12px; }
+  details.ref > summary::-webkit-details-marker { display: none; }
+  details.ref > summary .tw { margin-left: auto; font-family: var(--mono); font-size: .74rem; color: var(--ink-faint); transition: transform .2s; }
+  details.ref[open] > summary .tw { transform: rotate(90deg); color: var(--accent); }
+  details.ref > summary .sc { font-family: var(--mono); font-size: .68rem; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 5px; padding: 2px 7px; }
+  .ref-body { padding: 4px 18px 20px; border-top: 1px solid var(--line); }
+
+  table.led { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  table.led th, table.led td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.led thead th { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+  table.led td:first-child { color: var(--ink-soft); }
+  .now { color: var(--gone); font-family: var(--mono); font-size: .84rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .after { color: var(--kept); font-family: var(--mono); font-size: .84rem; font-weight: 600; }
+  .table-scroll { overflow-x: auto; }
+
+  .trust-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+  .trust { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--kept); border-radius: var(--radius); padding: 14px 16px; }
+  .trust .badge { font-family: var(--mono); font-size: .63rem; letter-spacing: .1em; text-transform: uppercase; color: var(--kept); font-weight: 700; }
+  .trust h3 { margin: 6px 0; font-size: .95rem; }
+  .trust p { font-size: .83rem; margin: 0; color: var(--ink-soft); }
+
+  .depl-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+  .depl { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .depl .hd { font-family: var(--mono); font-weight: 700; padding: 11px 14px; border-bottom: 1px solid var(--line); color: var(--accent); font-size: .86rem; }
+  .depl .kv { display: flex; justify-content: space-between; gap: 10px; padding: 6px 14px; font-family: var(--mono); font-size: .75rem; }
+  .depl .kv dt { color: var(--ink-faint); }
+  .depl .kv dd { margin: 0; color: var(--ink); text-align: right; }
+
+  footer { padding: 40px 0 64px; border-top: 1px solid var(--line); color: var(--ink-faint); font-size: .82rem; }
+  footer .mono { color: var(--ink-soft); }
+
+  /* ---- status dots on diagram nodes ---- */
+  .node, .kcell, .rail .pill, .depl-strip { position: relative; }
+  .sdot { position: absolute; top: 6px; right: 6px; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--surface); }
+  .kcell .sdot { top: 8px; right: 8px; }
+  .sdot.done { background: var(--kept); }
+  .sdot.wip { background: var(--accent); }
+  .sdot.planned { background: var(--ink-faint); }
+
+  /* ---- legend ---- */
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; font-family: var(--mono); font-size: .76rem; color: var(--ink-soft); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .legend .done { background: var(--kept); } .legend .wip { background: var(--accent); } .legend .planned { background: var(--ink-faint); }
+
+  /* ---- inspector status pill ---- */
+  .insp-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: .78rem; font-family: var(--mono); padding: 9px 11px; border-radius: 8px; margin: 2px 0 4px; border: 1px solid var(--line); }
+  .insp-status.done { background: var(--kept-soft); color: var(--kept); border-color: var(--kept); }
+  .insp-status.wip { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+  .insp-status.planned { background: var(--surface-2); color: var(--ink-soft); }
+  .insp-status .prs { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+  .insp-status .prs a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+
+  /* ---- progress section ---- */
+  .prog-hero { display: flex; flex-wrap: wrap; gap: 10px 26px; align-items: baseline; margin: 4px 0 22px; }
+  .prog-stat { font-family: var(--mono); }
+  .prog-stat b { font-size: 1.7rem; color: var(--accent); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  .prog-stat span { display: block; font-size: .72rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .08em; margin-top: 2px; }
+  .slices { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .slice { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 18px 19px; display: flex; flex-direction: column; }
+  .slice.full { grid-column: 1 / -1; }
+  .slice-hd { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  .slice-letter { font-family: var(--mono); font-weight: 700; font-size: .8rem; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line); flex: none; }
+  .slice-hd h3 { margin: 0; font-size: 1rem; letter-spacing: -.01em; flex: 1; }
+  .pill-status { font-family: var(--mono); font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; padding: 4px 9px; border-radius: 100px; white-space: nowrap; }
+  .pill-status.done { background: var(--kept-soft); color: var(--kept); }
+  .pill-status.wip { background: var(--accent-soft); color: var(--accent); }
+  .pill-status.planned { background: var(--surface-2); color: var(--ink-soft); }
+  .slice-sub { font-family: var(--mono); font-size: .72rem; color: var(--ink-faint); margin: 0 0 12px; }
+  .pips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }
+  .pip { width: 100%; max-width: 15px; height: 15px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line); flex: 1 1 12px; cursor: default; }
+  .pip.done { background: var(--kept); border-color: var(--kept); }
+  .pip.wip { background: var(--accent); border-color: var(--accent-line); }
+  .pip.planned { background: transparent; }
+  .slice-meta { display: flex; flex-direction: column; gap: 10px; }
+  .metarow { font-size: .82rem; color: var(--ink-soft); }
+  .metarow .k { font-family: var(--mono); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); display: block; margin-bottom: 5px; }
+  .prchips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pr { font-family: var(--mono); font-size: .72rem; text-decoration: none; padding: 2px 7px; border-radius: 5px; border: 1px solid; transition: transform .08s; }
+  .pr:hover { transform: translateY(-1px); }
+  .pr.merged { color: var(--kept); border-color: var(--kept); background: var(--kept-soft); }
+  .pr.open { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+  .dod { font-size: .8rem; color: var(--ink-soft); border-left: 3px solid var(--line-strong); padding-left: 12px; }
+  .dod b { color: var(--ink); font-weight: 600; }
+  .remain { font-family: var(--mono); font-size: .8rem; color: var(--gone); font-variant-numeric: tabular-nums; }
+  .remain.zero { color: var(--kept); }
+
+  @media (max-width: 780px) { .slices { grid-template-columns: 1fr; } }
+
+  /* ---- scope of cleaning / demolition ledger ---- */
+  .demo-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); background: var(--surface); }
+  table.demo { width: 100%; border-collapse: collapse; font-size: .88rem; min-width: 720px; }
+  table.demo th { text-align: left; font-family: var(--mono); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); padding: 11px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  table.demo td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.demo tr:last-child td { border-bottom: none; }
+  tr.stage td { background: var(--surface-2); font-family: var(--mono); font-size: .7rem; letter-spacing: .07em; text-transform: uppercase; color: var(--accent); font-weight: 700; padding: 9px 14px; }
+  tr.stage .st { font-size: .62rem; padding: 2px 8px; border-radius: 100px; margin-left: 8px; font-weight: 700; }
+  tr.stage .st.done { background: var(--kept-soft); color: var(--kept); }
+  tr.stage .st.wip { background: var(--accent-soft); color: var(--accent); }
+  tr.stage .st.planned { background: var(--surface); color: var(--ink-soft); border: 1px solid var(--line); }
+  .del { font-family: var(--mono); font-size: .82rem; color: var(--gone); line-height: 1.55; }
+  .del s { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--gone) 55%, transparent); text-decoration-thickness: 1.5px; }
+  .del .sub { display: block; color: var(--ink-faint); font-size: .74rem; margin-top: 2px; }
+  .mag { font-family: var(--mono); font-size: .82rem; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .mag em { display: block; font-style: normal; font-weight: 400; color: var(--ink-faint); font-size: .72rem; margin-top: 2px; white-space: normal; }
+  .becomes { font-family: var(--mono); font-size: .82rem; color: var(--kept); }
+  .gate { font-size: .79rem; color: var(--ink-soft); }
+  .gate code { font-family: var(--mono); font-size: .82em; background: var(--surface-2); padding: .04em .3em; border-radius: 4px; }
+  .principle { margin-top: 16px; display: flex; gap: 14px; align-items: flex-start; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--radius); padding: 15px 17px; }
+  .principle .arrow { font-family: var(--mono); color: var(--accent); font-weight: 700; white-space: nowrap; font-size: .82rem; padding-top: 1px; }
+  .principle p { margin: 0; font-size: .87rem; color: var(--ink); }
+  .principle b { color: var(--accent); }
+
+  @media (max-width: 900px) {
+    .explorer { grid-template-columns: 1fr; }
+    .inspector { position: static; order: -1; }
+    .triptych, .trust-grid, .depl-grid { grid-template-columns: 1fr; }
+    .krow { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <div class="brand">
+      <span class="mk">IC</span>
+      <span>IronClaw Reborn — Architecture Explorer<small>target state · post DTO / dyn / Local* simplification</small></span>
+    </div>
+    <button class="theme-btn" id="themeBtn" type="button">◐ theme</button>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>A frozen kernel that mediates one first-class thing: the <em>capability</em>.</h1>
+    <p>The destination the three moves converge on. The kernel is <strong>mechanism</strong> — a small, frozen authority vocabulary plus a few real seams; everything that varies by feature or deployment is <strong>policy</strong>, resolved to data at the composition edge.</p>
+    <span class="hint"><span class="pulse"></span>Click any node, interface rail, or lifecycle step to inspect it — dots show refactor status.</span>
+    <div class="legend">
+      <span><i class="done"></i> landed on main</span>
+      <span><i class="wip"></i> in flight (open PRs)</span>
+      <span><i class="planned"></i> planned</span>
+      <span style="color:var(--ink-faint)">status as of 2026-07-18 · main @ #6245 · <a href="#progress" style="color:var(--accent)">jump to slice progress ↓</a></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="explorer">
+
+    <!-- DIAGRAM -->
+    <div class="diagram">
+      <div class="band">
+        <div class="band-label"><span>Products</span><span class="role">adapters — replaceable userland</span></div>
+        <div class="row">
+          <button class="node" data-node="products">CLI</button>
+          <button class="node" data-node="products">WebUI</button>
+          <button class="node" data-node="products">Slack</button>
+          <button class="node" data-node="products">Telegram</button>
+          <button class="node" data-node="products">OpenAI-compat</button>
+        </div>
+      </div>
+
+      <div class="rail"><span class="l"></span><button class="pill" data-node="productsurface">ProductSurface ▸ interface</button><span class="l"></span></div>
+
+      <div class="band kernel">
+        <div class="band-label"><span>Kernel</span><span class="role">slow-moving · changes only when the security / recovery model changes</span></div>
+        <div class="krow">
+          <button class="kcell" data-node="turns"><h4>Turn coordinator + runner</h4><p>Durable turns, leases, active-lock, recovery.</p></button>
+          <button class="kcell" data-node="capmediation"><h4>authorize() + dispatch()</h4><p>All policy in one fold over the capability.</p></button>
+          <button class="kcell" data-node="vocab"><h4>Vocabulary — host_api</h4><p>Neutral authority types, frozen by test.</p></button>
+        </div>
+      </div>
+
+      <div class="rail"><span class="l"></span><button class="pill" data-node="agentloophost">AgentLoopHost ▸ trust membrane</button><span class="l"></span></div>
+
+      <div class="band">
+        <div class="band-label"><span>Userland loop</span><span class="role">agent behavior — replaceable</span></div>
+        <div class="row"><button class="node" data-node="loop" style="flex:1 1 100%">AgentLoopDriver</button></div>
+      </div>
+
+      <div class="band untrusted">
+        <div class="band-label"><span>Runtime lanes</span><span class="role"><span class="uflag">untrusted</span> &nbsp; closed enum — a new lane is a compile error</span></div>
+        <div class="row">
+          <button class="node" data-node="lanes">FirstParty</button>
+          <button class="node" data-node="lanes">Wasm</button>
+          <button class="node" data-node="lanes">Mcp</button>
+          <button class="node" data-node="lanes">Process <small>host-only</small></button>
+        </div>
+      </div>
+
+      <div class="band">
+        <div class="band-label"><span>Substrates</span><span class="role">mechanism the kernel mediates — never ambient authority</span></div>
+        <div class="row">
+          <button class="node" data-node="fs">RootFilesystem</button>
+          <button class="node" data-node="sandbox">ProcessSandbox</button>
+          <button class="node" data-node="secret">SecretBroker</button>
+          <button class="node" data-node="network">NetworkPolicy</button>
+          <button class="node" data-node="events">Events / Memory / RunState</button>
+        </div>
+      </div>
+
+      <button class="depl-strip" data-node="deployment">
+        <span class="tw">DeploymentConfig</span>
+        <p>A single data value selects each substrate's backend and each policy's width. LocalDev / Hosted / Enterprise are <strong>constants</strong>, not struct families.</p>
+      </button>
+    </div>
+
+    <!-- INSPECTOR -->
+    <aside class="inspector" id="inspector" aria-live="polite">
+      <div class="insp-empty" id="inspEmpty">
+        <div class="big">{ }</div>
+        <p>Select a component to inspect its role, interface, types, and what makes it change.</p>
+      </div>
+      <div id="inspContent" hidden>
+        <div class="insp-head">
+          <div class="insp-kind" id="iKind"></div>
+          <h3 class="insp-title" id="iTitle"></h3>
+          <p class="insp-role" id="iRole"></p>
+        </div>
+        <div class="insp-body" id="iBody"></div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- CAPABILITY: FIRST-CLASS CITIZEN -->
+<section class="block">
+  <div class="wrap">
+    <span class="sec-num">the first-class citizen</span>
+    <h2>Capability is the unit the whole kernel exists to mediate</h2>
+    <p class="lede">Not a tool, not an extension, not a permission flag — a <strong>capability</strong>: a typed access lease granting exactly what a tool may reach (<code>api.stripe.com</code> + read <code>/workspace/invoices</code>). It is the one noun that binds the three properties IronClaw exists to guarantee, at once.</p>
+
+    <div class="triptych">
+      <div class="tri"><span class="lbl">Self-extension</span><p>A user hands their agent a <strong>new capability</strong>.</p></div>
+      <div class="tri"><span class="lbl">Multi-tenancy</span><p>That capability <strong>cannot reach across a tenant boundary</strong>.</p></div>
+      <div class="tri"><span class="lbl">Consistency</span><p>Neither the capability nor the boundary can be <strong>violated by a runtime bug</strong>.</p></div>
+    </div>
+    <p class="bind">One noun binds all three. Make it first-class — typed, granted, leased, isolated by construction — and self-extension, isolation, and correctness become three views of one problem.</p>
+
+    <h3 style="margin:28px 0 4px; font-size:1.02rem; letter-spacing:-.01em;">The capability lifecycle</h3>
+    <p style="font-size:.88rem; color:var(--ink-soft); margin:0 0 8px;">Declaration, grant, and isolation are its durable life; the shaded steps 4–6 are the per-call authority fold. Click a step to inspect it.</p>
+    <div class="lifecycle">
+      <button class="lstep" data-node="lc1"><span class="idx">1</span><div class="n">Declare</div><div class="s">manifest · EffectKind + PermissionMode</div></button>
+      <button class="lstep" data-node="lc2"><span class="idx">2</span><div class="n">Register</div><div class="s">FirstParty / Wasm / Mcp loader</div></button>
+      <button class="lstep" data-node="lc3"><span class="idx">3</span><div class="n">Grant</div><div class="s">explicit — the grant surface</div></button>
+      <button class="lstep fold" data-node="lc4"><span class="idx">4</span><div class="n">Authorize</div><div class="s">the fold · all policy</div></button>
+      <button class="lstep fold" data-node="lc5"><span class="idx">5</span><div class="n">Lease</div><div class="s">scoped mount + one-shot secret</div></button>
+      <button class="lstep fold" data-node="lc6"><span class="idx">6</span><div class="n">Dispatch</div><div class="s">closed RuntimeLane</div></button>
+      <button class="lstep" data-node="lc7"><span class="idx">7</span><div class="n">Isolate</div><div class="s">path construction + CAS</div></button>
+    </div>
+  </div>
+</section>
+
+<!-- REFACTORING PROGRESS -->
+<section class="block" id="progress">
+  <div class="wrap">
+    <span class="sec-num">refactoring progress · slices §9 / ratchets §10</span>
+    <h2>Where the refactor actually is</h2>
+    <p class="lede">The proposal landed <strong>2026-07-17</strong> (<a href="https://github.com/nearai/ironclaw/pull/6175">#6175</a>, revised <a href="https://github.com/nearai/ironclaw/pull/6208">#6208</a>). Execution is underway: the Slice C capability vocabulary is <strong>merged into <code>host_api</code></strong>, the <code>authorize()</code> fold is being wired, in-memory stores are being deleted domain by domain, and the <code>Local*</code> family is collapsing to config. Every axis is guarded by a frozen <code>ironclaw_architecture</code> ratchet that can only shrink.</p>
+
+    <div class="prog-hero">
+      <span class="prog-stat"><b>51</b><span>commits since the proposal</span></span>
+      <span class="prog-stat"><b>1 / 3</b><span>§4.2 dyn-collapse moves landed</span></span>
+      <span class="prog-stat"><b>0</b><span>LocalDev* type names (wiring pending)</span></span>
+      <span class="prog-stat"><b>0</b><span>Enterprise* types (locked)</span></span>
+      <span class="prog-stat"><b>6</b><span>ratchets frozen &amp; green</span></span>
+    </div>
+
+    <div class="slices">
+
+      <!-- Slice A -->
+      <div class="slice">
+        <div class="slice-hd"><span class="slice-letter">A</span><h3>Delete in-memory stores</h3><span class="pill-status wip">in progress</span></div>
+        <p class="slice-sub">§4.3 · lowest-risk, subtractive · <code>reborn_inmemory_store_ratchet.rs</code></p>
+        <div class="pips">
+          <span class="pip done" title="approvals"></span><span class="pip done" title="capability-lease"></span><span class="pip done" title="process"></span><span class="pip done" title="run-state"></span><span class="pip done" title="budget-gate"></span><span class="pip done" title="outbound-state"></span><span class="pip done" title="triggered-run-delivery"></span><span class="pip done" title="delivered-gate-route"></span><span class="pip planned" title="turn-state"></span><span class="pip planned" title="checkpoints"></span><span class="pip planned" title="secrets / session"></span><span class="pip planned" title="slack routing"></span>
+        </div>
+        <div class="slice-meta">
+          <div class="metarow"><span class="k">Merged</span><div class="prchips"><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6195">#6195</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6197">#6197</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6200">#6200</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6203">#6203</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6210">#6210</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6212">#6212</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6213">#6213</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6214">#6214</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6204">#6204</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6216">#6216</a></div></div>
+          <div class="metarow"><span class="k">Remaining</span><span class="remain">12 <code>InMemory*Store</code> frozen</span> — 8 store domains deleted onto <code>FilesystemStore&lt;InMemoryBackend&gt;</code></div>
+          <p class="dod"><b>Done when:</b> the allowlist reaches its floor (~2 permanent bounded-cache keeps, not 0); every other test uses <code>Fs&lt;InMemoryBackend&gt;</code>. Consolidated domains done; <b>turns cluster deferred</b> pending a livelock/concurrency stress test before swapping <code>FilesystemTurnStateStore&lt;InMemoryBackend&gt;</code> in.</p>
+        </div>
+      </div>
+
+      <!-- Slice B -->
+      <div class="slice">
+        <div class="slice-hd"><span class="slice-letter">B</span><h3>Local* → config data</h3><span class="pill-status wip">in progress</span></div>
+        <p class="slice-sub">§4.4 · <b>type-name axis empty; config-data collapse partial</b> · <code>reborn_localdev_typename_ratchet.rs</code> (empty)</p>
+        <div class="pips">
+          <span class="pip done" title="LocalHostProcessPort → HostProcessPort"></span><span class="pip done" title="LocalFilesystem → DiskFilesystem"></span><span class="pip done" title="LocalTraceSubmission → NodeTraceSubmission"></span><span class="pip done" title="LocalDevOutboundStores → OutboundStores"></span><span class="pip done" title="Enterprise* = 0 (locked)"></span><span class="pip done" title="ratchets frozen"></span><span class="pip done" title="LocalDev* type-name family → 0"></span><span class="pip done" title="DeploymentConfig resolves mode → EffectiveRuntimePolicy at the edge (#6235)"></span><span class="pip planned" title="select substrate backends as data — the §5.6 {filesystem, process, network, approval} shape"></span><span class="pip planned" title="remove per-mode `match profile` branching (5 sites)"></span><span class="pip planned" title="delete build_local_dev_* wiring (11 fns)"></span><span class="pip planned" title="synthetic caps → first-party (tracked in §5.8)"></span>
+        </div>
+        <div class="slice-meta">
+          <div class="metarow"><span class="k">Merged</span><div class="prchips"><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6206">#6206</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6207">#6207</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6209">#6209</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6218">#6218</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6219">#6219</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6220">#6220</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6205">#6205</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6222">#6222</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6235">#6235</a></div></div>
+          <div class="metarow"><span class="k">Done vs. remaining — the ratchet only proves the names</span><span class="remain zero">LocalDev* shadow-runtime family genuinely deleted</span> · <span class="remain zero">Enterprise* = 0 ✓</span> · but wiring persists: <span class="remain">56 <code>RuntimeProfile::</code> refs · 6 <code>match profile</code> sites · 8+ <code>build_local_*</code> fns</span> · synthetic caps + <code>local_trigger_access</code> module unchanged</div>
+          <p class="dod"><b>Divergence, not just incompleteness:</b> <code>DeploymentConfig</code> is a <em>mode/profile request</em> (`{deployment, requested_profile, org_policy}`) that resolves to <code>EffectiveRuntimePolicy</code> — the team <em>deliberately</em> kept <code>ironclaw_runtime_policy</code> as the single resolver and did <b>not</b> adopt the §5.6 backend-selecting shape (`{filesystem, process, network, approval}`). The mode enum survives on purpose (contra "the kernel never names a mode").</p>
+        </div>
+      </div>
+
+      <!-- Slice C -->
+      <div class="slice">
+        <div class="slice-hd"><span class="slice-letter">C</span><h3>DTO / dyn collapse — the capability path</h3><span class="pill-status wip">in progress</span></div>
+        <p class="slice-sub">§3 / §4.1 / §4.2 · <b>vocabulary landed <em>additively</em>; scaffold in place; the collapse has NOT started</b> · <code>reborn_capability_dto_collapse_ratchet.rs</code> still at full length</p>
+        <div class="pips">
+          <span class="pip done" title="C.1–C.7 host_api vocabulary DEFINED (Invocation/Authorized/Outcome/Blocked/HostFailure/Resolution/SafeSummary)"></span><span class="pip done" title="closed RuntimeLane enum + dispatcher routes via from_runtime_kind (#6229/#6240)"></span><span class="pip done" title="RuntimeAdapter dyn registry → closed executor (#6240) — 1 of 3 §4.2 moves"></span><span class="pip done" title="dead trust_decision field removed from RuntimeCapabilityRequest (#6234)"></span><span class="pip wip" title="authorize() is a DELEGATING SCAFFOLD — takes old CapabilityInvocationRequest, still delegates trust to a separate Arc<dyn> authorizer, does not reserve (#6239)"></span><span class="pip wip" title="Authorized minted-then-discarded: 4/5 fields are PROVISIONAL placeholders; seal guarantee admitted-vacuous; does not gate dispatch"></span><span class="pip wip" title="vocabulary ADDITIVE — nothing returns Resolution/HostFailure/Outcome; Resolution mapped only at the loop_host seam (#6242/#6245)"></span><span class="pip planned" title="unified dispatch(Authorized) — does not exist yet"></span><span class="pip planned" title="delete the 5+ frozen mirror DTOs (collapse not started)"></span><span class="pip planned" title="delete HostRuntime + CapabilityDispatcher traits — still Arc<dyn> on the hot path, test doubles GREW (~10 / ~19)"></span>
+        </div>
+        <div class="slice-meta">
+          <div class="metarow"><span class="k">Merged — vocabulary + scaffold (additive)</span><div class="prchips"><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6223">#6223</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6227">#6227</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6228">#6228</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6229">#6229</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6231">#6231</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6233">#6233</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6234">#6234</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6237">#6237</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6238">#6238</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6239">#6239</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6240">#6240</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6241">#6241</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6242">#6242</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6243">#6243</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6245">#6245</a></div></div>
+          <div class="metarow"><span class="k">Open — finishing §5.3</span><div class="prchips"><a class="pr open" href="https://github.com/nearai/ironclaw/pull/6254">#6254 Resolution non-lossy</a><a class="pr open" href="https://github.com/nearai/ironclaw/pull/6256">#6256 ReplayPayloadStore</a></div></div>
+          <div class="metarow"><span class="k">Reality vs. the "fold wired" impression</span><span class="remain">5+ mirror DTOs LIVE &amp; frozen (collapse not started)</span> · <code>authorize()</code> delegates trust &amp; doesn't reserve · no <code>dispatch(Authorized)</code> · <code>Authorized</code> minted-then-discarded · §1.2 four-layer smear persists (trust in host_runtime, approval in capabilities, reservation in dispatcher)</div>
+          <p class="dod"><b>Done when:</b> the mirror DTOs are deleted, <code>authorize()</code> inlines the four policy checks and actually gates <code>dispatch(Authorized)</code>, and <code>HostRuntime</code>/<code>CapabilityDispatcher</code> stop being <code>Arc&lt;dyn&gt;</code>. Today: 1 of 3 §4.2 moves landed (the lane enum); the rest is additive scaffolding.</p>
+        </div>
+      </div>
+
+      <!-- §5.8 products -->
+      <div class="slice">
+        <div class="slice-hd"><span class="slice-letter">§</span><h3>Products out of composition</h3><span class="pill-status wip">in progress</span></div>
+        <p class="slice-sub">§5.8 · god-crate #6168 · <code>reborn_composition_boundaries.rs</code></p>
+        <div class="pips">
+          <span class="pip done" title="WebUI host stack → single ironclaw_webui crate"></span><span class="pip done" title="composition mass ratchet gate"></span><span class="pip done" title="run-failure classifiers → runner"></span><span class="pip done" title="runtime.rs test module extracted (Phase 0)"></span><span class="pip wip" title="Slack / Telegram / OpenAI adapters split"></span><span class="pip planned" title="product_auth → recipes + one AuthEngine"></span><span class="pip planned" title="synthetic caps → first-party"></span>
+        </div>
+        <div class="slice-meta">
+          <div class="metarow"><span class="k">Merged</span><div class="prchips"><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6194">#6194</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6167">#6167</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6173">#6173</a><a class="pr merged" href="https://github.com/nearai/ironclaw/pull/6177">#6177</a></div></div>
+          <div class="metarow"><span class="k">Remaining — barely started (184K LOC / 224 files in the crate)</span><span class="remain">product_auth 32K · slack 31K · runtime 21K · llm_admin 10K</span> all still resident. The WebUI <em>crate</em> was consolidated (composition/webui now ~2.3K), but no product left the crate.</div>
+          <p class="dod"><b>Reality check:</b> <code>reborn_composition_boundaries.rs</code> freezes the facade shape + dependency direction — it does <b>NOT</b> ban <code>slack</code>/<code>telegram</code>/<code>product_auth</code> identifiers (they're still inside). <b>Done when:</b> composition is assembler-only and the boundary test bans product identifiers; adapters register by <code>ExtensionId</code>.</p>
+        </div>
+      </div>
+
+      <!-- Ratchets -->
+      <div class="slice full">
+        <div class="slice-hd"><span class="slice-letter">▤</span><h3>Anti-slippage ratchets — the debt can only shrink</h3><span class="pill-status done">green</span></div>
+        <p class="slice-sub">§10 · each freezes a checked-in allowlist (set membership, never a count) and fails on any new violation</p>
+        <div class="slice-meta">
+          <div class="metarow"><span class="k">Live in <code>crates/ironclaw_architecture/tests/</code></span>
+            <div class="prchips" style="gap:8px">
+              <span class="pr merged" style="cursor:default"><code>reborn_inmemory_store_ratchet</code> · 12 frozen</span>
+              <span class="pr merged" style="cursor:default"><code>reborn_localdev_typename_ratchet</code> · 0 ✓ (empty)</span>
+              <span class="pr merged" style="cursor:default"><code>reborn_deployment_mode_typename_ratchet</code> · 25 · Enterprise* = 0</span>
+              <span class="pr merged" style="cursor:default"><code>reborn_capability_dto_collapse_ratchet</code> · 4 mirror DTOs frozen</span>
+              <span class="pr merged" style="cursor:default"><code>reborn_authorized_seal_ratchet</code> · Authorized non-forgeable</span>
+              <span class="pr merged" style="cursor:default"><code>reborn_composition_boundaries</code> · product footprint</span>
+            </div>
+          </div>
+          <p class="dod">Each allowlist is the contract until its axis lands: it may only get shorter, and deleting an entry without trimming the list also fails — so the ratchet is forced to shrink in lock-step. Definition of done for each slice = its ratchet flips from a frozen allowlist to an empty one.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- SCOPE OF CLEANING -->
+<section class="block" id="cleanup">
+  <div class="wrap">
+    <span class="sec-num">scope of cleaning · the demolition ledger</span>
+    <h2>What gets deleted, and at which stage</h2>
+    <p class="lede">The refactor is <strong>subtractive</strong>: almost nothing new is invented — the storage seam, the memory backend, and now the <code>host_api</code> vocabulary all already exist. The value is in the <strong>removal</strong>: a store reimplemented per backend, five look-alike request DTOs re-wrapped ~14 times per call, six mediator test-double traits, a 771-identifier shadow runtime, and a six-figure god-crate all come out. Nothing is deleted until its replacement carries the load — then the old wiring is removed in a sweep.</p>
+
+    <div class="prog-hero">
+      <span class="prog-stat"><b>4,258</b><span>LOC · largest single store deleted</span></span>
+      <span class="prog-stat"><b>4 + 3</b><span>mirror DTO families + dyn traits out</span></span>
+      <span class="prog-stat"><b>771 → 0</b><span>LocalDev* type <em>names</em> (wiring still per-mode)</span></span>
+      <span class="prog-stat"><b>~123K</b><span>LOC product code leaving composition</span></span>
+    </div>
+
+    <div class="demo-scroll">
+      <table class="demo">
+        <thead><tr><th>Removed</th><th>Magnitude</th><th>Becomes</th><th>Deleted only once…</th></tr></thead>
+        <tbody>
+
+          <tr class="stage"><td colspan="4">Stage 1 — Slice A · delete in-memory stores (§4.3) <span class="st wip">in progress</span></td></tr>
+          <tr>
+            <td class="del"><s>InMemoryTurnStateStore</s><span class="sub">the whale — lease/lock/checkpoint/idempotency/events, reimplemented</span></td>
+            <td class="mag">4,258 LOC<em>+ 11 more frozen stores</em></td>
+            <td class="becomes">FilesystemTurnStateStore&lt;InMemoryBackend&gt;</td>
+            <td class="gate">…the filesystem store covers its cases (reconcile-then-delete, turns last)</td>
+          </tr>
+          <tr>
+            <td class="del"><s>InMemory{Approval,Process,RunState,Lease,…}Store</s><span class="sub">8 store domains — one hand-written impl each</span></td>
+            <td class="mag">✓ done<em>PRs #6195–#6214</em></td>
+            <td class="becomes">Filesystem*Store&lt;F&gt;, backend-injected</td>
+            <td class="gate">…already deleted — tests repointed to the memory backend</td>
+          </tr>
+
+          <tr class="stage"><td colspan="4">Stage 2 — Slice B · Local* → config data (§4.4) <span class="st wip">in progress</span></td></tr>
+          <tr>
+            <td class="del"><s>LocalDev* shadow-runtime <em>type names</em></s><span class="sub">approval / capability / lease / mount / network / outbound — a parallel wiring</span></td>
+            <td class="mag">names: 29 → 0<em>#6235 · renamed to shared families</em></td>
+            <td class="becomes">Builtin*/Composed*/Staged* + DeploymentConfig edge</td>
+            <td class="gate">…the <em>type-name</em> ratchet is empty; but the per-mode <em>wiring</em> (11 <code>build_local_dev_*</code> fns, 5 <code>match profile</code>) is renamed, not yet deleted</td>
+          </tr>
+          <tr>
+            <td class="del">per-mode composition setup<span class="sub">56 <code>RuntimeProfile::</code> refs · 8+ <code>build_local_*</code> fns across factory.rs / runtime.rs</span></td>
+            <td class="mag">diverged<em>§5.6 shape rejected</em></td>
+            <td class="becomes">mode-request → EffectiveRuntimePolicy (single resolver kept by design)</td>
+            <td class="gate">…this row may never land as written — the team chose "request data → resolver" over "backends as config fields"</td>
+          </tr>
+          <tr>
+            <td class="del"><s>local_trigger_access</s> module<span class="sub">LocalTriggerAccessSource::LocalDev{Env,Sso,Run}Bootstrap</span></td>
+            <td class="mag">4 files</td>
+            <td class="becomes">owner_seed: OwnerSeed value</td>
+            <td class="gate">…the owner grant is seeded from config at boot, not a module</td>
+          </tr>
+
+          <tr class="stage"><td colspan="4">Stage 3 — Slice C · DTO / dyn collapse (§3 / §4.2) <span class="st wip">vocab additive · collapse not started</span></td></tr>
+          <tr>
+            <td class="del"><s>RuntimeCapabilityRequest</s> · <s>CapabilityInvocationRequest</s><br><s>CapabilityDispatchRequest</s> · <s>RuntimeAdapterRequest</s><span class="sub">the 5→3 mirror collapse — hops 2/3 carry zero new info</span></td>
+            <td class="mag">4 DTO families<em>frozen by ratchet (#6238), ~8 files each</em></td>
+            <td class="becomes">Invocation + Authorized<span style="color:var(--ink-faint)"> (landed in host_api)</span></td>
+            <td class="gate">…callers migrate onto <code>&amp;Authorized</code>; today <code>authorize()</code> is a delegating scaffold and the DTOs are frozen but still live — deletion not started</td>
+          </tr>
+          <tr>
+            <td class="del"><s>trust_decision</s> field<span class="sub">dead-past — copied through hops 2–3, ignored by the runtime</span></td>
+            <td class="mag">✓ done<em>field removed · #6234</em></td>
+            <td class="becomes">nothing — computed inside authorize()</td>
+            <td class="gate">…done — <code>authorize()</code> computes trust into <code>Authorized</code></td>
+          </tr>
+          <tr>
+            <td class="del"><s>trait HostRuntime</s> + 4 doubles<br><s>trait CapabilityDispatcher</s> + 2 doubles<span class="sub">one prod impl each; traits paid on every call to serve a test seam</span></td>
+            <td class="mag">2 traits<em>+ 6 Recording/Queued/Cancelling fakes</em></td>
+            <td class="becomes">concrete types + one boundary fake</td>
+            <td class="gate">…the fold replaces the mediators; a generic/fake serves the tests</td>
+          </tr>
+          <tr>
+            <td class="del"><s>RuntimeAdapter&lt;F,G&gt;</s> dyn registry<span class="sub">generic <em>and</em> dyn — double indirection, 1 prod impl</span></td>
+            <td class="mag">✓ collapsed<em>trait shell pending · #6240</em></td>
+            <td class="becomes">closed enum RuntimeLane<span style="color:var(--ink-faint)"> (dispatch via from_runtime_kind)</span></td>
+            <td class="gate">…done — dispatch routes through <code>RuntimeLane::from_runtime_kind</code>; the trait shell is the last delete</td>
+          </tr>
+
+          <tr class="stage"><td colspan="4">Stage 4 — §5.8 · products out of composition (#6168) <span class="st wip">in progress</span></td></tr>
+          <tr>
+            <td class="del"><s>composition/src/{slack,runtime,product_auth,llm_admin,…}</s><span class="sub">product + transport + auth host code inside the assembler</span></td>
+            <td class="mag">~123K LOC<em>of 184K in the crate</em></td>
+            <td class="becomes">per-product adapters over ProductSurface</td>
+            <td class="gate">…each surface is one adapter; composition names no product (ratchet → empty)</td>
+          </tr>
+          <tr>
+            <td class="del"><s>product_auth</s> per-vendor flows<span class="sub">vendors differ in parameters, never in flow</span></td>
+            <td class="mag">33,013 LOC</td>
+            <td class="becomes">recipe data + one AuthEngine</td>
+            <td class="gate">…the shared OAuth/api-key engine consumes per-vendor recipes</td>
+          </tr>
+          <tr>
+            <td class="del"><s>LocalDev synthetic capabilities</s><span class="sub">project_create / skill_activate / result_read / outbound_delivery_*</span></td>
+            <td class="mag">in runtime/ (34.6K)</td>
+            <td class="becomes">first-party capabilities on the normal lane</td>
+            <td class="gate">…promoted to real capabilities — a security <em>improvement</em>, not a risk</td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div>
+
+    <div class="principle">
+      <span class="arrow">build → migrate → delete</span>
+      <p>The order is always the same: <b>stand up the new vocabulary, migrate every caller onto it, then delete the old wiring in one sweep.</b> As of 2026-07-18 the refactor is at the <em>first</em> step: <code>Invocation</code>/<code>Authorized</code>/<code>Outcome</code> exist but <b>additively</b> — nothing returns them yet, <code>Authorized</code> is minted-then-discarded, and the mirror DTOs are <em>frozen but not yet migrated off</em>. Deletion is the last step and has not begun. The ratchets (§10) hold the line so a half-finished demolition can't regrow — but a green ratchet proves the <em>names/allowlist</em>, never that the wiring collapsed (see Slice B: <code>DeploymentConfig</code> renamed the types without replacing the setup).</p>
+    </div>
+  </div>
+</section>
+
+<!-- EXPANDABLE REFERENCE -->
+<section class="block">
+  <div class="wrap">
+    <span class="sec-num">reference — expand for detail</span>
+    <h2>The moves, measured &amp; what stays fixed</h2>
+
+    <details class="ref" open>
+      <summary><span class="sc">§7</span> Before → after <span class="tw">▸</span></summary>
+      <div class="ref-body">
+        <div class="table-scroll">
+          <table class="led">
+            <thead><tr><th>Dimension</th><th>Now</th><th>After</th></tr></thead>
+            <tbody>
+              <tr><td>Types per capability call</td><td class="now">~14</td><td class="after">4</td></tr>
+              <tr><td>Hot-path <code>dyn</code> seams</td><td class="now">6+</td><td class="after">2 + 1 lane enum</td></tr>
+              <tr><td>Policy decision sites</td><td class="now">4 crates</td><td class="after">1 authorize()</td></tr>
+              <tr><td>Store impls per domain</td><td class="now">2–4 hand-written</td><td class="after">1 · FsStore&lt;F&gt;</td></tr>
+              <tr><td><code>InMemory*Store</code> structs</td><td class="now">one per domain</td><td class="after">0</td></tr>
+              <tr><td><code>LocalDev*</code> identifiers</td><td class="now">~66 / 42 files</td><td class="after">0</td></tr>
+              <tr><td>Deployment modes</td><td class="now">struct family</td><td class="after">config constants</td></tr>
+              <tr><td><code>host_api</code> boundary</td><td class="now">~124 types</td><td class="after">neutral vocab, frozen</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+    <details class="ref">
+      <summary><span class="sc">§2/§8</span> Trust boundaries preserved <span class="tw">▸</span></summary>
+      <div class="ref-body">
+        <div class="trust-grid">
+          <div class="trust"><span class="badge">✓ preserved</span><h3>The agent loop</h3><p>Untrusted behavior. May only ask for effects through host ports; cannot name secrets, the dispatcher, or the network.</p></div>
+          <div class="trust"><span class="badge">✓ preserved</span><h3>Runtime-lane execution</h3><p>WASM / script / MCP / container code is untrusted — mediated handles only, never ambient authority. The closed enum removes a <code>dyn</code>, not the boundary.</p></div>
+          <div class="trust"><span class="badge">✓ preserved</span><h3>Runtime-supplied data</h3><p>Egress / worker / MCP output is untrusted — validated, bound to the authorized invocation, bounded, and redacted before re-entering trusted flow.</p></div>
+        </div>
+        <p style="margin-top:16px; font-size:.86rem; color:var(--ink-soft);"><strong style="color:var(--kept)">Shell cross-tenant escape (#6170) — FIXED (verified 2026-07-18):</strong> the fail-open <code>HostedSingleTenant → LocalSingleUser → LocalHost</code> mapping is gone; the resolver is structurally fail-closed (a served multi-tenant boot resolves to <code>ProcessBackendKind::None</code>, and cross-family pairs return <code>false</code> with a test asserting "hosted multi-tenant must never produce LocalHost"); <code>HostProcessPort</code> carries the #6170 rename + comment. <em>Mechanism differs from the doc's sketch:</em> there is a <code>ProcessSandboxBackend</code> trait and <code>SandboxMount { container_path, writable }</code> (no <code>for_scope</code>/<code>from_host_path</code>) — host roots live in <em>trusted executor config</em>, not in the mount type. Protection real; the doc's named API is aspirational.</p>
+      </div>
+    </details>
+
+    <details class="ref">
+      <summary><span class="sc">§4.4</span> Deployment is data <span class="tw">▸</span></summary>
+      <div class="ref-body">
+        <div class="depl-grid">
+          <div class="depl"><div class="hd">LOCAL_DEV</div><dl>
+            <div class="kv"><dt>filesystem</dt><dd>InMemory / Disk</dd></div>
+            <div class="kv"><dt>approval</dt><dd>AutoApproveEligible</dd></div>
+            <div class="kv"><dt>network</dt><dd>AllowAll</dd></div>
+            <div class="kv"><dt>process</dt><dd>HostUnsandboxed</dd></div>
+            <div class="kv"><dt>owner_seed</dt><dd>EnvToken</dd></div></dl></div>
+          <div class="depl"><div class="hd">HOSTED</div><dl>
+            <div class="kv"><dt>filesystem</dt><dd>libSQL</dd></div>
+            <div class="kv"><dt>approval</dt><dd>Gated</dd></div>
+            <div class="kv"><dt>network</dt><dd>Allowlist(..)</dd></div>
+            <div class="kv"><dt>process</dt><dd>Sandboxed</dd></div>
+            <div class="kv"><dt>owner_seed</dt><dd>SSO</dd></div></dl></div>
+          <div class="depl"><div class="hd">ENTERPRISE</div><dl>
+            <div class="kv"><dt>filesystem</dt><dd>Postgres</dd></div>
+            <div class="kv"><dt>approval</dt><dd>Gated</dd></div>
+            <div class="kv"><dt>network</dt><dd>Allowlist(..)</dd></div>
+            <div class="kv"><dt>process</dt><dd>Sandboxed</dd></div>
+            <div class="kv"><dt>owner_seed</dt><dd>SSO</dd></div></dl></div>
+        </div>
+        <p style="margin-top:16px; font-size:.84rem; color:var(--ink-soft);">Enforced by an <code>ironclaw_architecture</code> test: no public type name contains <code>Local</code> / <code>Hosted</code> / <code>Enterprise</code>. A deployment mode selects backends and policy; it is never a type the kernel or a substrate names.</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p class="mono">docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md · status refreshed against main @ #6245 (2026-07-18)</p>
+    <p style="margin-top:8px; max-width:74ch;">Interactive rendering of the target architecture (§5 &amp; §7) and the live refactor progress. Source note revised through §11.9 (compile-time transition exhaustiveness) and §5.2.9 (the gate rendering contract). A design note, not yet a contract; the kernel changes when the security or recovery model changes, never when a feature ships.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var DATA = {
+    products: {
+      kind: "Product", role: "UX, transport, and identity binding for one surface. Replaceable userland.",
+      owns: "Protocol parse/render, transport (listen + deliver), identity binding.",
+      sig: "impl ProductAdapter {\n  fn inbound(msg)  -> ProductSurface\n  fn deliver(reply)\n}",
+      types: ["WebUiProductAdapter", "SlackProductAdapter", "TelegramProductAdapter"],
+      changes: "a surface's UX changes",
+      note: { cls: "", text: "Every product is one adapter over ProductSurface. Composition names no product — adapters register by ExtensionId and are enabled in the DeploymentConfig list." }
+    },
+    productsurface: {
+      kind: "Interface", role: "The only surface a product uses — a generic conduit, not a per-feature API.",
+      owns: "The single door for all inbound; adding a feature never adds a method here.",
+      sig: "trait ProductSurface {\n  open_conversation(actor, source) -> ConversationId\n  submit_turn(conv, msg, idem)     -> TurnRunId\n  events(conv, from)               -> EventStream\n  reply(run)                       -> AssistantReply\n  resolve_gate(gate, decision)\n  cancel(run, idem)\n}",
+      types: ["ConversationId", "TurnRunId", "EventCursor", "GateRef"],
+      changes: "never for a feature — six methods, all feature-agnostic",
+      note: { cls: "kept", text: "A new settings page, tool, or model selector adds a capability the loop can invoke, not a method here." }
+    },
+    turns: {
+      kind: "Kernel", role: "Durable turns, leases, active-lock, and crash recovery. The slow-moving coordinator.",
+      owns: "One active run per canonical thread; single-writer lease; terminal-on-expiry recovery.",
+      sig: "Queued → Running → { BlockedApproval | BlockedAuth\n                     | WaitingProcess } → …\n     → { Completed | Failed | Cancelled }",
+      types: ["TurnRun", "Lease", "CheckpointRef", "ActiveLock"],
+      changes: "the recovery model changes",
+      note: { cls: "kept", text: "Lease expiry is terminal; the active-thread lock releases exactly once on any terminal transition. Store keeps the same records — it just stops reimplementing them per backend." }
+    },
+    capmediation: {
+      kind: "Kernel", role: "All policy in one fold: authorize() then dispatch() over one payload.",
+      owns: "Trust classification, credential pre-flight, approval, obligations, resource reservation — one place, not four crates.",
+      sig: "fn authorize(inv: Invocation) -> Result<Authorized, Blocked>\nfn dispatch(auth: &Authorized, lane: &RuntimeLane)\n        -> Result<Outcome, HostFailure>",
+      types: ["Invocation", "Authorized", "Outcome", "Blocked", "HostFailure"],
+      changes: "the authority model changes",
+      note: { cls: "kept", text: "dispatch takes &Authorized (not a loose pair) so authority can't be forged or paired with a different invocation. Three outcome channels end the Ok(Failed) vs Err ambiguity." }
+    },
+    vocab: {
+      kind: "Kernel", role: "Neutral authority vocabulary — the frozen bottom crate everyone depends on.",
+      owns: "IDs, scopes, paths, decisions, mounts, resources, trust. And nothing else.",
+      sig: "// ironclaw_host_api — frozen by a boundary test\nActivityId · CapabilityId · Scope · ActorId\nMount · ResourceReservation · TrustDecision",
+      types: ["CapabilityId", "Scope", "ActorId", "Mount", "Estimate"],
+      changes: "the security model changes",
+      note: { cls: "gone", text: "runtime_policy's DeploymentMode / RuntimeProfile leave here — they are policy, not authority vocabulary. ~124 types → neutral vocab only, frozen." }
+    },
+    agentloophost: {
+      kind: "Interface", role: "The loop's trust membrane — the only thing a loop may call. Refs only.",
+      owns: "Below it, authorize + dispatch mediate every effect. The loop cannot name secrets, the dispatcher, or the network.",
+      sig: "trait AgentLoopHost {\n  prompt() -> PromptContext\n  model(req) -> ModelResult\n  invoke(LoopRequest) -> Result<Outcome, InvokeError>\n  transcript() -> &dyn TranscriptPort\n  checkpoint(state) -> CheckpointRef\n  input(); cancelled()\n}",
+      types: ["LoopRequest", "InvokeError", "CheckpointRef"],
+      changes: "never for a feature — a feature is a new capability, not a method",
+      note: { cls: "kept", text: "One of several trust boundaries. Direct dispatcher / secret / network access from a loop is a compile error." }
+    },
+    loop: {
+      kind: "Product", role: "Agent behavior — prompt / model / tool strategy. Replaceable userland.",
+      owns: "The agentic strategy. Returns refs only; effects go through AgentLoopHost.",
+      sig: "trait AgentLoopDriver {\n  fn run(ctx, host: &dyn AgentLoopHost) -> LoopExit\n}",
+      types: ["RunContext", "LoopExit", "LoopState"],
+      changes: "agent behavior changes",
+      note: { cls: "", text: "Untrusted. A LoopExit is trusted only with host-owned evidence; a valid-but-unverified exit maps to a sanitized terminal failure." }
+    },
+    lanes: {
+      kind: "Lane", role: "Executes extension / tool code. Untrusted, mediated, and a closed set.",
+      owns: "The four execution substrates. New lanes are rare and security-sensitive; new tools are data behind them.",
+      sig: "enum RuntimeLane {\n  FirstParty,\n  Wasm,\n  Mcp,\n  Process,   // host-only — no manifest can select it\n}",
+      types: ["RuntimeLane", "ToolPorts", "SandboxMount"],
+      changes: "a lane is added (rare — a compile error until every match handles it)",
+      note: { cls: "gone", text: "UNTRUSTED. Receives ToolPorts derived from Authorized — never wider than it grants, never Authorized itself. Process is host-only; only host built-ins reach it, via ProcessSandbox." }
+    },
+    fs: {
+      kind: "Substrate", role: "Scoped, contained storage — the single storage seam behind every domain store.",
+      owns: "get / put / list / cas. In-memory is a backend here, not a separate store.",
+      sig: "trait RootFilesystem { get · put · list · cas }\n// InMemoryBackend | DiskFilesystem\n// | LibSqlRootFilesystem | PostgresRootFilesystem",
+      types: ["RootFilesystem", "InMemoryBackend", "FilesystemTurnStateStore<F>"],
+      changes: "a backend is added",
+      note: { cls: "kept", text: "Tests run FilesystemTurnStateStore<InMemoryBackend> — the same store production runs over libSQL/Postgres. Every InMemory*Store deleted; one parity suite over all backends." }
+    },
+    sandbox: {
+      kind: "Substrate", role: "The ONLY way to run an OS process. Mount is derived from scope, never a host path.",
+      owns: "Process spawning behind a scope-derived mount.",
+      sig: "trait ProcessSandbox {\n  fn spawn(cmd, mount: SandboxMount)\n       -> Result<ProcessHandle, SpawnDenied>\n}\nimpl SandboxMount { fn for_scope(scope, fs) -> Self }\n// no from_host_path constructor",
+      types: ["ProcessSandbox", "SandboxMount", "ProcessHandle"],
+      changes: "never for a feature",
+      note: { cls: "kept", text: "#6170 cross-tenant escape is FIXED — the resolver fails closed so a served multi-tenant boot cannot resolve a host process backend. Achieved via ProcessSandboxBackend + trusted executor-config host roots, not the doc's SandboxMount::for_scope (that named API does not exist)." }
+    },
+    secret: {
+      kind: "Substrate", role: "One-shot leased secrets, injected host-side at the egress boundary.",
+      owns: "Secret leasing. The adapter never sees the bytes.",
+      sig: "trait SecretBroker {\n  fn lease(sel: SecretSelector, scope: &Scope) -> OneShotSecret\n}",
+      types: ["SecretBroker", "OneShotSecret", "SecretSelector"],
+      changes: "never for a feature",
+      note: { cls: "", text: "The lease is injected into egress inside dispatch(); the untrusted lane receives the derived handle, never the secret." }
+    },
+    network: {
+      kind: "Substrate", role: "Egress mediation — resolves a target against scope-bounded policy.",
+      owns: "Every outbound request decision.",
+      sig: "trait NetworkPolicy {\n  fn resolve(target: UrlTarget, scope: &Scope)\n       -> Result<Egress, Denied>\n}",
+      types: ["NetworkPolicy", "Egress", "UrlTarget"],
+      changes: "never for a feature",
+      note: { cls: "", text: "ToolPorts.egress = NetworkPolicy::resolve bounded by the descriptor's declared egress. Deny fails closed — never a silent downgrade." }
+    },
+    events: {
+      kind: "Substrate", role: "Durable records and projections — events, memory, threads, run-state.",
+      owns: "The append log and its redacted projections.",
+      sig: "// durable append atomic with the state transition\n// subscriber fan-out is async + coalesced + bounded",
+      types: ["EventLog", "RunStateStore", "MemoryStore"],
+      changes: "a domain record changes",
+      note: { cls: "kept", text: "The durable append is atomic with the transition (same tx / outbox); only subscriber fan-out is decoupled, so a slow client never blocks a transition. LLM data is never deleted." }
+    },
+    deployment: {
+      kind: "Interface", role: "Selects backends + policy per target. It IS a value, not code.",
+      owns: "One value per policy axis, fed to a single build_runtime().",
+      sig: "struct DeploymentConfig {\n  filesystem: Backend,   // InMemory | Disk | LibSql | Postgres\n  process:    ProcessPolicy,\n  network:    NetworkPolicy,\n  approval:   ApprovalPolicy,\n}\nfn build_runtime(cfg) -> Runtime",
+      types: ["DeploymentConfig", "Backend", "ProcessPolicy", "ApprovalPolicy"],
+      changes: "a deployment target changes",
+      note: { cls: "gone", text: "~66 LocalDev* identifiers across 42 files → three config constants. Enforced: no public type name contains Local / Hosted / Enterprise." }
+    },
+
+    // ── capability + lifecycle ──
+    lc1: {
+      kind: "Capability", role: "Step 1 — Declare. The capability announces its declared effects.",
+      owns: "A manifest naming what it may reach: network egress + filesystem scope.",
+      sig: "// manifest — the canonical schema\nEffectKind + PermissionMode\n// \"this tool wants api.stripe.com + read /workspace/invoices\"",
+      types: ["EffectKind", "PermissionMode", "CapabilityDescriptor"],
+      changes: "the tool's declared effects change",
+      note: { cls: "", text: "One grant model replaces three fragmented ones: UI allow/ask/disabled, WASM *.capabilities.json, and Reborn EffectKind + PermissionMode." }
+    },
+    lc2: {
+      kind: "Capability", role: "Step 2 — Register. A lane loader admits the capability.",
+      owns: "First-party / WASM / MCP loading. Runtime kind is a loading detail, not taxonomy.",
+      sig: "first_party | wasm | [mcp]  →  RuntimeLane subset",
+      types: ["CapabilityId", "RuntimeLane"],
+      changes: "a load kind is added",
+      note: { cls: "", text: "CapabilityId is a newtype — misuse is unrepresentable at compile time, never a runtime string mismatch." }
+    },
+    lc3: {
+      kind: "Capability", role: "Step 3 — Grant. The user explicitly grants the declared effects.",
+      owns: "The grant surface — the piece that makes the backend moat visible.",
+      sig: "Grant { capability: CapabilityId, effects: DeclaredEffects,\n        scope: Scope }",
+      types: ["Grant", "DeclaredEffects"],
+      changes: "a user grants or revokes",
+      note: { cls: "gone", text: "Today built tools start Capabilities::none() and lean on config files — the moat lives in the backend, invisible. The explicit grant surface is the missing piece." }
+    },
+    lc4: {
+      kind: "Capability", role: "Step 4 — Authorize (the fold). All policy, one place.",
+      owns: "Trust class, credential pre-flight, approval, obligations, resource reservation.",
+      sig: "fn authorize(inv: Invocation) -> Result<Authorized, Blocked>\n// Authorized is SEALED — built only here",
+      types: ["Invocation", "Authorized", "Blocked"],
+      changes: "the authority model changes",
+      note: { cls: "kept", text: "Produces the sealed Authorized, bound to the exact invocation it authorized. No effect runs without a completed authorize()." }
+    },
+    lc5: {
+      kind: "Capability", role: "Step 5 — Lease. Authorized is materialized into a narrowed effect surface.",
+      owns: "ToolPorts: scoped mount + one-shot secret + redaction-obligated sink.",
+      sig: "ToolPorts {\n  egress:  NetworkPolicy::resolve bounded by descriptor,\n  state:   ScopedFilesystem = Authorized.mounts,\n  logging: redaction-obligated sink,\n}",
+      types: ["ToolPorts", "OneShotSecret", "ScopedFilesystem"],
+      changes: "the effect-narrowing model changes",
+      note: { cls: "kept", text: "ToolPorts can never be wider than Authorized grants — built only by dispatch(), which holds the sealed Authorized. The lane never receives Authorized itself." }
+    },
+    lc6: {
+      kind: "Capability", role: "Step 6 — Dispatch. The work is handed to the closed runtime lane.",
+      owns: "Routing to FirstParty / Wasm / Mcp / Process with mediated handles.",
+      sig: "fn dispatch(auth: &Authorized, lane: &RuntimeLane)\n        -> Result<Outcome, HostFailure>",
+      types: ["RuntimeLane", "Outcome", "HostFailure"],
+      changes: "a lane is added",
+      note: { cls: "gone", text: "The lane runs untrusted. Its Outcome is untrusted data — validated, bound to the invocation, bounded, and redacted before it reaches the loop or model." }
+    },
+    lc7: {
+      kind: "Capability", role: "Step 7 — Isolate. Reach is bounded structurally, not by runtime checks.",
+      owns: "Per-tenant / per-user containment over one RootFilesystem plane.",
+      sig: "/tenants/<tenant>/users/<user>/<alias>\n// path construction + CAS, not runtime discipline",
+      types: ["Scope", "RootFilesystem", "SandboxMount"],
+      changes: "the isolation model changes",
+      note: { cls: "kept", text: "Multi-tenancy is a property of path construction over one storage plane — a runtime bug cannot reach across a tenant boundary because the path was never constructed to." }
+    }
+  };
+
+  // Refactor status per node, as of 2026-07-18. level: done | wip | planned.
+  var PR = "https://github.com/nearai/ironclaw/pull/";
+  var STATUS = {
+    vocab:         { level: "wip",     text: "new vocabulary (Invocation/Authorized/Outcome/Resolution/HostFailure) DEFINED but ADDITIVE + unwired — nothing returns them on the production path yet. Separately, §4.5 freeze NOT done: host_api grew to ~138 types, runtime_policy/DeploymentMode still live here, no freeze test", prs: [6223,6227,6228,6229,6231,6237] },
+    lanes:         { level: "done",    text: "closed RuntimeLane enum + dispatcher routes via RuntimeLane::from_runtime_kind", prs: [6229,6233,6240] },
+    fs:            { level: "done",    text: "RootFilesystem is the single storage seam — Slice A deleting stores onto it", prs: [6203,6197] },
+    capmediation:  { level: "wip",     text: "authorize() extracted as a DELEGATING SCAFFOLD (still delegates trust to a separate Arc<dyn>, does not reserve, does not gate dispatch — Authorized is minted-then-discarded). No unified dispatch(Authorized) yet; §1.2 four-layer smear persists. Vocabulary is additive/unwired.", prs: [6239,6241,6242,6245,6254,6256] },
+    deployment:    { level: "wip",     text: "DeploymentConfig resolves mode → EffectiveRuntimePolicy at the edge (#6235); LocalDev* type names = 0, but it does NOT yet select substrate backends as data (§5.6) and 39 RuntimeProfile refs / 11 build_local_dev_* fns still wire composition per-mode", prs: [6235] },
+    turns:         { level: "wip",     text: "CapabilityOutcome→Resolution mapping landed; turn/checkpoint stores still to move onto RootFilesystem", prs: [6242,6216] },
+    events:        { level: "wip",     text: "run-state + persistent GateRecordStore landed; outbound/delivery stores done", prs: [6243,6203,6212] },
+    products:      { level: "wip",     text: "WebUI host stack consolidated into ironclaw_webui (§5.8)", prs: [6194] },
+    sandbox:       { level: "done",    text: "#6170 cross-tenant escape FIXED: resolver fail-closed (served boots can't resolve LocalHost), HostProcessPort renamed. NB: real mechanism is ProcessSandboxBackend + executor-config host roots, NOT the doc's SandboxMount::for_scope", prs: [6206] },
+    secret:        { level: "planned", text: "target substrate port — reshaping not yet started", prs: [] },
+    network:       { level: "planned", text: "target substrate port — reshaping not yet started", prs: [] },
+    productsurface:{ level: "planned", text: "target single interface; RebornRuntime is today's proto-surface", prs: [] },
+    agentloophost: { level: "planned", text: "target membrane trait — not yet consolidated", prs: [] },
+    loop:          { level: "planned", text: "unchanged by the refactor", prs: [] }
+  };
+  var STATUS_LABEL = { done: "landed on main", wip: "in flight", planned: "planned" };
+
+  var KIND_CLASS = {
+    Kernel: "kind-kernel", Substrate: "kind-substrate", Interface: "kind-interface",
+    Product: "kind-product", Lane: "kind-lane", Capability: "kind-capability"
+  };
+
+  var empty = document.getElementById("inspEmpty");
+  var content = document.getElementById("inspContent");
+  var iKind = document.getElementById("iKind");
+  var iTitle = document.getElementById("iTitle");
+  var iRole = document.getElementById("iRole");
+  var iBody = document.getElementById("iBody");
+  var current = null;
+
+  function labelFor(id, el) {
+    // Use the node's visible text as the title, falling back to the data key.
+    var t = el ? el.querySelector("h4") : null;
+    if (t) return t.textContent.trim();
+    var txt = el ? el.textContent.replace(/\s+/g, " ").trim() : id;
+    return txt || id;
+  }
+
+  function field(k, vHtml) {
+    return '<div class="insp-field"><div class="k">' + k + '</div><div class="v">' + vHtml + '</div></div>';
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function render(id, el) {
+    var d = DATA[id];
+    if (!d) return;
+    empty.hidden = true;
+    content.hidden = false;
+
+    iKind.textContent = d.kind;
+    iKind.className = "insp-kind " + (KIND_CLASS[d.kind] || "");
+    iTitle.textContent = labelFor(id, el);
+    iRole.textContent = d.role;
+
+    var html = "";
+    var st = STATUS[id];
+    if (st) {
+      var prLinks = (st.prs || []).map(function (n) {
+        return '<a href="' + PR + n + '" target="_blank" rel="noopener">#' + n + "</a>";
+      }).join(" ");
+      html += '<div class="insp-status ' + st.level + '">● ' + STATUS_LABEL[st.level] + " — " + esc(st.text) +
+              (prLinks ? '<span class="prs">' + prLinks + "</span>" : "") + "</div>";
+    }
+    html += field("Owns", esc(d.owns));
+    if (d.sig) html += field("Interface", '<div class="insp-sig">' + esc(d.sig) + "</div>");
+    if (d.types && d.types.length) {
+      var subKind = (d.kind === "Substrate" || d.kind === "Interface");
+      var chips = d.types.map(function (t) {
+        return '<span class="chip2' + (subKind ? " sub" : "") + '">' + esc(t) + "</span>";
+      }).join("");
+      html += field("Types", '<div class="chips2">' + chips + "</div>");
+    }
+    html += field("Changes when", esc(d.changes));
+    if (d.note && d.note.text) {
+      html += '<div class="insp-field"><p class="insp-note ' + (d.note.cls || "") + '">' + esc(d.note.text) + "</p></div>";
+    }
+    iBody.innerHTML = html;
+  }
+
+  function clearActive() {
+    var was = document.querySelectorAll(".active");
+    for (var i = 0; i < was.length; i++) was[i].classList.remove("active");
+  }
+
+  function selectNode(el) {
+    var id = el.getAttribute("data-node");
+    if (!id) return;
+    if (current === el) { // toggle off
+      clearActive();
+      current = null;
+      content.hidden = true;
+      empty.hidden = false;
+      return;
+    }
+    clearActive();
+    // highlight all nodes sharing this id (e.g. every product chip)
+    var peers = document.querySelectorAll('[data-node="' + id + '"]');
+    for (var i = 0; i < peers.length; i++) peers[i].classList.add("active");
+    current = el;
+    render(id, el);
+
+    if (window.matchMedia && window.matchMedia("(max-width: 900px)").matches) {
+      document.getElementById("inspector").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  var nodes = document.querySelectorAll("[data-node]");
+  for (var i = 0; i < nodes.length; i++) {
+    nodes[i].addEventListener("click", function () { selectNode(this); });
+  }
+
+  // paint refactor-status dots on the diagram nodes
+  Object.keys(STATUS).forEach(function (id) {
+    var els = document.querySelectorAll('[data-node="' + id + '"]');
+    for (var j = 0; j < els.length; j++) {
+      var dot = document.createElement("span");
+      dot.className = "sdot " + STATUS[id].level;
+      dot.setAttribute("title", STATUS_LABEL[STATUS[id].level]);
+      els[j].appendChild(dot);
+    }
+  });
+
+  // theme toggle
+  var root = document.documentElement;
+  document.getElementById("themeBtn").addEventListener("click", function () {
+    var cur = root.getAttribute("data-theme");
+    if (!cur) {
+      var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      cur = prefersDark ? "dark" : "light";
+    }
+    root.setAttribute("data-theme", cur === "dark" ? "light" : "dark");
+  });
+})();
+</script>
+</body>
+</html>
