@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Testing Guide"
+openwiki_generated: true
+---
+
 # Testing Guide
 
 This guide covers IronClaw's testing strategy, test tiers, patterns, and how to write tests for different parts of the system.
@@ -39,6 +45,18 @@ IronClaw has three tiers of tests:
 - **When to use:** Testing complete workflows that the user would perform
 - **Example:** Test that a Slack message flows through to a tool execution and back
 
+### Tier 4: Architecture Boundary Tests (Mechanical, Structural)
+- **Purpose:** Enforce the declared Reborn design model — validate layer/dependency direction, composition boundaries, extension specificity, and contract seals
+- **Speed:** <2 seconds each
+- **Count:** 37+ boundary gates organized across dedicated test files
+- **External:** None (reads workspace structure and source text)
+- **Command:** `cargo test -p ironclaw_architecture_tests`
+- **When to use:** Whenever refactoring dependencies, adding a new crate, or approving new extension patterns
+- **What it catches:** Accidental circular dependencies, breaking layer boundaries, hardcoded extension names (should use registries), unauthorized mint points for security types
+- **Example:** When moving a crate to a different layer or adding a new integration pattern, the boundary tests fail with exact guidance on what rule was broken and how to fix it or update the allowlist
+- **Key tests:** `reborn_dependency_boundaries`, `reborn_composition_boundaries`, `reborn_extension_specificity`, `reborn_sealed_evidence_mint_ratchet`
+- **Note:** Runs automatically in CI and in the pre-push hook. Part of normal `cargo test` if you `cargo test -p '*'`, but usually skipped unless you're refactoring architecture.
+
 ## Running Tests
 
 ### Quick Smoke Test
@@ -69,6 +87,18 @@ IRONCLAW_HOOKS_POSTGRES_URL="postgres://ironclaw:ironclaw@127.0.0.1:5432/ironcla
 cargo test -- --ignored
 ```
 
+### Architecture Boundary Tests
+```bash
+# Run the full architecture test suite
+cargo test -p ironclaw_architecture_tests
+
+# Run a specific boundary test
+cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
+
+# Run all tests matching a pattern
+cargo test -p ironclaw_architecture_tests reborn_extension
+```
+
 ### Single Test or Module
 ```bash
 # Run one test
@@ -82,6 +112,24 @@ cargo test --test executor_happy_paths
 
 # Run tests matching a pattern
 cargo test --lib safety
+```
+
+### WebUI Frontend Tests
+```bash
+# Navigate to the frontend directory
+cd crates/product/ironclaw_webui/frontend
+
+# Run unit and component tests (vitest)
+pnpm test
+
+# Run Storybook visual component tests in headless Chromium
+pnpm test:storybook
+
+# Start Storybook dev server (interactive catalog at http://localhost:6006)
+pnpm storybook
+
+# Build static Storybook catalog
+pnpm build-storybook
 ```
 
 ### Watch Mode
@@ -589,9 +637,12 @@ Find the cause:
 ## See Also
 
 - **[Setup Guide](setup.md)** — How to set up your environment
+<!-- openwiki: broken internal link [workflows.md#code-review] heading anchor "code-review" does not exist in "workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **[Workflows: Code Review](workflows.md#code-review)** — How to review tests in PRs
+<!-- openwiki: broken internal link [/AGENTS.md#test-discipline] heading anchor "test-discipline" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
 - **[AGENTS.md: Testing](/AGENTS.md#test-discipline)** — Testing discipline rules
 - **[COVERAGE_PLAN.md](/COVERAGE_PLAN.md)** — Coverage goals and strategy
+<!-- openwiki: broken internal link [/tests/e2e/CLAUDE.md] file "/tests/e2e/CLAUDE.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[tests/e2e/CLAUDE.md](/tests/e2e/CLAUDE.md)** — E2E test documentation
 
 ---
