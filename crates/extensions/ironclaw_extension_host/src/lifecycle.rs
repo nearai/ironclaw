@@ -400,37 +400,58 @@ impl ExtensionHost {
         wiring: IngressWiring,
     ) -> Result<(), ChannelWiringError> {
         match wiring {
-            IngressWiring::Register => match self.run_wiring_half(record, wiring).await {
-                Ok(()) => Ok(()),
-                Err(failure) => {
-                    // A later recipe failed after an earlier one already
-                    // landed a vendor-visible effect (e.g. the webhook is
-                    // registered but activation will not publish): best-effort
-                    // run the Deregister half so the vendor is not left wired
-                    // to an extension that never activated.
-                    if failure.completed_calls > 0
-                        && let Err(unwind) = self
-                            .run_wiring_half(record, IngressWiring::Deregister)
-                            .await
-                    {
-                        tracing::debug!(
-                            extension_id = %record.extension_id,
-                            error = %unwind.reason,
-                            "unwind after failed activation wiring also failed"
-                        );
-                    }
-                    Err(ChannelWiringError::Failed {
-                        reason: failure.reason,
-                    })
-                }
-            },
-            IngressWiring::Deregister => {
-                self.run_wiring_half(record, wiring)
+            IngressWiring::Register => {
+                // ONE hook_deadline budgets the whole transition — the wiring
+                // half AND any unwind it triggers — because the caller holds
+                // the global lifecycle lock throughout. A fresh deadline for
+                // the unwind would let one unresponsive vendor double the
+                // lock hold.
+                // tokio's clock, not std's, so paused-time tests measure the
+                // same elapsed time the timeout machinery does.
+                let started = tokio::time::Instant::now();
+                match self
+                    .run_wiring_half(record, wiring, self.deps.hook_deadline)
                     .await
-                    .map_err(|failure| ChannelWiringError::Failed {
-                        reason: failure.reason,
-                    })
+                {
+                    Ok(()) => Ok(()),
+                    Err(failure) => {
+                        // A later recipe failed after an earlier one already
+                        // landed a vendor-visible effect (e.g. the webhook is
+                        // registered but activation will not publish):
+                        // best-effort run the Deregister half so the vendor is
+                        // not left wired to an extension that never activated.
+                        // The unwind gets only the REMAINING budget — after a
+                        // deadline expiry that is zero, and the vendor that
+                        // just hung would hang the unwind too.
+                        let remaining = self.deps.hook_deadline.saturating_sub(started.elapsed());
+                        if failure.completed_calls > 0 && remaining.is_zero() {
+                            tracing::debug!(
+                                extension_id = %record.extension_id,
+                                "no deadline budget left to unwind failed activation wiring"
+                            );
+                        } else if failure.completed_calls > 0
+                            && let Err(unwind) = self
+                                .run_wiring_half(record, IngressWiring::Deregister, remaining)
+                                .await
+                        {
+                            tracing::debug!(
+                                extension_id = %record.extension_id,
+                                error = %unwind.reason,
+                                "unwind after failed activation wiring also failed"
+                            );
+                        }
+                        Err(ChannelWiringError::Failed {
+                            reason: failure.reason,
+                        })
+                    }
+                }
             }
+            IngressWiring::Deregister => self
+                .run_wiring_half(record, wiring, self.deps.hook_deadline)
+                .await
+                .map_err(|failure| ChannelWiringError::Failed {
+                    reason: failure.reason,
+                }),
         }
     }
 
@@ -447,6 +468,7 @@ impl ExtensionHost {
         &self,
         record: &InstallationRecord,
         wiring: IngressWiring,
+        deadline: Duration,
     ) -> Result<(), WiringHalfFailure> {
         let Some(channel) = record.resolved.channel.as_ref() else {
             return Ok(());
@@ -493,7 +515,7 @@ impl ExtensionHost {
         );
         let mut completed_calls = 0usize;
         let mut first_failure: Option<String> = None;
-        let outcome = with_deadline(self.deps.hook_deadline, async {
+        let outcome = with_deadline(deadline, async {
             for (recipe, target) in &calls {
                 let label = vendor_call_label(wiring, recipe);
                 let result = crate::channel_vendor_calls::run_vendor_call(
@@ -531,8 +553,14 @@ impl ExtensionHost {
                     completed_calls,
                 }),
             },
+            // A deadline expiry must stay visible even when a vendor call
+            // already failed — hiding it makes a timeout look like a plain
+            // vendor error and misdirects the operator.
             Err(error) => Err(WiringHalfFailure {
-                reason: first_failure.unwrap_or_else(|| error.to_string()),
+                reason: match first_failure {
+                    Some(vendor_failure) => format!("{vendor_failure}; then {error}"),
+                    None => error.to_string(),
+                },
                 completed_calls,
             }),
         }

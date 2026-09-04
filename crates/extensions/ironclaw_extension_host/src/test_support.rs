@@ -884,6 +884,7 @@ pub struct RecordingEgressFactory {
     pub requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
     status: Arc<AtomicU16>,
     fail_url: Arc<Mutex<Option<String>>>,
+    delay: Arc<Mutex<Option<std::time::Duration>>>,
 }
 
 impl RecordingEgressFactory {
@@ -892,6 +893,7 @@ impl RecordingEgressFactory {
             requests: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(AtomicU16::new(200)),
             fail_url: Arc::new(Mutex::new(None)),
+            delay: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -900,6 +902,7 @@ impl RecordingEgressFactory {
             requests: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(AtomicU16::new(500)),
             fail_url: Arc::new(Mutex::new(None)),
+            delay: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -923,6 +926,16 @@ impl RecordingEgressFactory {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(substring.to_string());
     }
+
+    /// Delay every response by `delay` (after recording the request), so a
+    /// test can drive the lifecycle deadline deterministically under
+    /// `start_paused` tokio time.
+    pub fn set_delay(&self, delay: std::time::Duration) {
+        *self
+            .delay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(delay);
+    }
 }
 
 impl EgressFactory for RecordingEgressFactory {
@@ -936,6 +949,7 @@ impl EgressFactory for RecordingEgressFactory {
             requests: Arc::clone(&self.requests),
             status: Arc::clone(&self.status),
             fail_url: Arc::clone(&self.fail_url),
+            delay: Arc::clone(&self.delay),
         })
     }
 }
@@ -944,6 +958,7 @@ struct RecordingEgress {
     requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
     status: Arc<AtomicU16>,
     fail_url: Arc<Mutex<Option<String>>>,
+    delay: Arc<Mutex<Option<std::time::Duration>>>,
 }
 
 #[async_trait]
@@ -958,10 +973,19 @@ impl RestrictedEgress for RecordingEgress {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_deref()
             .is_some_and(|substring| request.url.contains(substring));
+        // Record BEFORE any delay: a call the deadline cuts off mid-flight
+        // must still be visible to assertions.
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
+        let delay = *self
+            .delay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         Ok(RestrictedEgressResponse {
             retry_after: None,
             status: if failed {

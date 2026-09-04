@@ -113,6 +113,14 @@ async fn harness_with_egress(
     bindings: ExtensionBindings,
     egress: Arc<RecordingEgressFactory>,
 ) -> Harness {
+    harness_with_egress_and_deadline(bindings, egress, Duration::from_secs(5)).await
+}
+
+async fn harness_with_egress_and_deadline(
+    bindings: ExtensionBindings,
+    egress: Arc<RecordingEgressFactory>,
+    hook_deadline: Duration,
+) -> Harness {
     let store = Arc::new(RehydratedInstallationRecordStore::default());
     let load_calls = Arc::new(AtomicUsize::new(0));
     let deps = ExtensionHostDeps {
@@ -126,7 +134,7 @@ async fn harness_with_egress(
         egress,
         reserved_capability_ids: Default::default(),
         reserved_ingress_routes: Default::default(),
-        hook_deadline: Duration::from_secs(5),
+        hook_deadline,
         linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
         linked_accounts: std::sync::Arc::new(
             ironclaw_extension_host::UnavailableLinkedAccountResolution,
@@ -635,6 +643,52 @@ async fn a_failing_deregistration_still_attempts_the_remaining_deactivation_call
     assert_eq!(
         h.store.get("acme-hook").await.unwrap().unwrap().state,
         InstallationState::Installed
+    );
+}
+
+/// ONE hook_deadline budgets the register half AND its unwind — the caller
+/// holds the global lifecycle lock throughout, so a fresh deadline for the
+/// unwind would let one unresponsive vendor double the lock hold. Paused
+/// tokio time: each vendor call sleeps 80ms against a 100ms budget, so the
+/// second call exhausts it and the unwind must get the zero remainder, not
+/// a new 100ms.
+#[tokio::test(start_paused = true)]
+async fn a_deadline_expiry_shares_its_budget_with_the_unwind() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    egress.set_delay(Duration::from_millis(80));
+    let h = harness_with_egress_and_deadline(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+        Duration::from_millis(100),
+    )
+    .await;
+    let mut record = record(
+        "acme-hook",
+        ironclaw_extension_host::test_support::resolve_manifest_toml(COMMAND_MENU_CHANNEL_MANIFEST),
+    );
+    record.config = webhook_config();
+    h.host.install(record).await.unwrap();
+
+    let error = h.host.activate("acme-hook").await.unwrap_err();
+    assert!(
+        matches!(error, LifecycleError::ActivationHook { .. }),
+        "{error:?}"
+    );
+    let urls: Vec<String> = egress.requests().iter().map(|r| r.url.clone()).collect();
+    assert_eq!(
+        urls.len(),
+        2,
+        "an exhausted budget must not fund unwind calls: {urls:?}"
+    );
+    assert!(urls[1].ends_with("/setMyCommands"));
+    let stored = h.store.get("acme-hook").await.unwrap().unwrap();
+    assert_eq!(stored.state, InstallationState::Failed);
+    assert!(
+        stored
+            .last_error
+            .expect("failure recorded")
+            .contains("deadline"),
+        "the timeout must stay visible in last_error"
     );
 }
 
