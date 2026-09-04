@@ -36,7 +36,7 @@ them in the same commit; re-derive any of them with:
   | wc -l`.
 - Top-level Rust bins: `ls tests/*.rs | wc -l`.
 - E2E files: `ls tests/e2e/scenarios/test_*.py | wc -l`.
-- E2E test *functions* (the §2 "889" figure — every `test_*` function or
+- E2E test *functions* (the §2 "893" figure — every `test_*` function or
   method, top-level or in a class, across all 103 files; this is an exhaustive
   syntactic count, not filtered by active/legacy status):
   ```
@@ -50,7 +50,7 @@ them in the same commit; re-derive any of them with:
   print(n)
   "
   ```
-- E2E collected pytest items (the §6 "1180 top-level tests" figure — pytest's
+- E2E collected pytest items (the §6 "1184 top-level tests" figure — pytest's
   own collection count, which differs from the syntactic function count above
   when a function is parametrized, skipped at collection, or a class groups
   several `test_*` methods under one node): `cd tests/e2e && python3 -m pytest
@@ -102,7 +102,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 
 Totals: **61** group scenarios · **63** flat integration bins (56 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**103** Python scenario files (**889** test functions) registered in the active
+**103** Python scenario files (**893** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
@@ -414,7 +414,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1181 top-level tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1184 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
