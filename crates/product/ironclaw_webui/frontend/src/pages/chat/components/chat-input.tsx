@@ -683,7 +683,7 @@ export function ChatInput({
                       onMouseEnter={() => selectMenuIndex(index)}
                       onClick={() => completeMenuCommand(command)}
                       className={[
-                        "grid w-full grid-cols-1 items-start gap-x-2.5 gap-y-1.5 rounded-lg border-l-2 px-2.5 py-2 text-left sm:grid-cols-[18rem_minmax(0,1fr)]",
+                        "grid w-full grid-cols-1 items-start gap-x-2.5 gap-y-1.5 rounded-lg border-l-2 px-2.5 py-2 text-left lg:grid-cols-[18rem_minmax(0,1fr)]",
                         isActive
                           ? "border-[var(--v2-accent)] bg-[var(--v2-accent-soft)]"
                           : "border-transparent hover:bg-[var(--v2-surface-soft)]",

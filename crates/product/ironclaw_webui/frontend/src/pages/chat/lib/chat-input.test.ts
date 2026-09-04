@@ -1284,7 +1284,7 @@ test("ChatInput command-menu rows render the title and description", () => {
   assert.ok(rowText.includes(MENU_COMMANDS[0].description));
 });
 
-test("ChatInput command-menu rows use aligned metadata columns and stack on narrow screens", () => {
+test("ChatInput command-menu rows align at wide viewports and stack in sidebar-constrained panes", () => {
   const { tree } = renderChatInput({
     disabled: false,
     sendDisabled: false,
@@ -1297,7 +1297,8 @@ test("ChatInput command-menu rows use aligned metadata columns and stack on narr
   const rowClass = templateProps(modelRow).className;
   assert.match(rowClass, /\bgrid\b/);
   assert.match(rowClass, /\bgrid-cols-1\b/);
-  assert.match(rowClass, /sm:grid-cols-\[18rem_minmax\(0,1fr\)\]/);
+  assert.doesNotMatch(rowClass, /sm:grid-cols-/);
+  assert.match(rowClass, /lg:grid-cols-\[18rem_minmax\(0,1fr\)\]/);
 
   const commandBadge = findNode(
     modelRow,
