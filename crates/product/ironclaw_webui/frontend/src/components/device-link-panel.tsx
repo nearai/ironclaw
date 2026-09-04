@@ -333,6 +333,7 @@ export function DeviceLinkPanel({
   const showQr = frame?.displayKind !== DEVICE_LINK_DISPLAY_KINDS.link;
   const showOpenLink = frame?.displayKind !== DEVICE_LINK_DISPLAY_KINDS.qrCode;
 
+  const terminalNotice = terminalCopy(t, frame, name);
   const errorNotice = error
     ? (<p role="alert" data-testid="device-link-error" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)
     : null;
@@ -472,7 +473,7 @@ export function DeviceLinkPanel({
       (
         <div className="space-y-2">
           <p role="alert" data-testid="device-link-failed" className="text-xs leading-5 text-red-300">
-            {failureCopy(t, frame)}
+            {failureCopy(t, frame, name)}
           </p>
           {frame.restartable
             ? (
@@ -487,9 +488,11 @@ export function DeviceLinkPanel({
                 </Button>
               )
             : (
-                <p data-testid="device-link-terminal" className="text-xs leading-5 text-iron-400">
-                  {t("deviceLink.cannotRetry", { name })}
-                </p>
+                terminalNotice && (
+                  <p data-testid="device-link-terminal" className="text-xs leading-5 text-iron-400">
+                    {terminalNotice}
+                  </p>
+                )
               )}
         </div>
       )}
@@ -519,7 +522,16 @@ function payloadLabels(t, name, withOpenLink) {
 // The frame's `instructions` are host-authored and already say what happened;
 // a typed error code adds the one line a user can act on. An unrecognized code
 // (newer host, older browser) contributes nothing rather than a raw key.
-function failureCopy(t, frame) {
+function failureCopy(t, frame, name) {
   if (!DEVICE_LINK_ERROR_CODES.includes(frame.errorCode)) return frame.instructions;
-  return `${frame.instructions} ${t(`deviceLink.error.${frame.errorCode}`)}`;
+  return `${frame.instructions} ${t(`deviceLink.error.${frame.errorCode}`, { name })}`;
+}
+
+// The terminal line under a failure that cannot be retried. "This account
+// cannot be linked" is true of an ineligible account and false of a deployment
+// an administrator has not configured yet — there, the failure copy already
+// names who can act, and blaming the account would send the user the wrong way.
+function terminalCopy(t, frame, name) {
+  if (!frame || frame.errorCode === "not_configured") return null;
+  return t("deviceLink.cannotRetry", { name });
 }

@@ -1685,5 +1685,6 @@ registerPack("de", {
   "deviceLink.error.identity_conflict": "Dieses Konto ist bereits verknüpft. Trennen Sie es von dem verbundenen IronClaw-Konto und versuchen Sie es erneut.",
   "deviceLink.error.vendor_unavailable": "Der Dienst ist vorübergehend nicht verfügbar.",
   "deviceLink.error.custody_failed": "Die Verknüpfung konnte nicht sicher gespeichert werden.",
+  "deviceLink.error.not_configured": "Eine Administratorin oder ein Administrator kann dies unter Admin → Konfiguration → {name} aktivieren.",
   "deviceLink.error.internal": "Beim Verknüpfen ist etwas schiefgelaufen."
 });

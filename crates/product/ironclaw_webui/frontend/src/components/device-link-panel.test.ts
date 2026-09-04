@@ -884,6 +884,32 @@ test("DeviceLinkPanel offers 'start again' on a restartable failure and refuses 
     "an existing owner is explained separately from an ineligible vendor account",
   );
   assert.ok(!stringify(conflictView).includes("deviceLink.startAgain"));
+
+  // A deployment the administrator never configured for this surface (#7955):
+  // the card names who can act and must not claim the user's account cannot be
+  // linked — nothing is wrong with the account.
+  const unconfigured = createHarness({
+    startResponses: [
+      response(
+        wireFrame({
+          step: DEVICE_LINK_STEPS.failed,
+          instructions: "Example linking has not been set up by an administrator on this deployment.",
+          error_code: "not_configured",
+          restartable: false,
+        }),
+      ),
+    ],
+  });
+  const unconfiguredView = stringify(await unconfigured.mount());
+  assert.ok(
+    unconfiguredView.includes("deviceLink.error.not_configured"),
+    "the typed code adds the administrator remedy",
+  );
+  assert.ok(!unconfiguredView.includes("deviceLink.startAgain"));
+  assert.ok(
+    !unconfiguredView.includes("deviceLink.cannotRetry"),
+    "an operator omission must not be presented as an account that cannot be linked",
+  );
 });
 
 test("DeviceLinkPanel surfaces a failed start as a retryable error rather than a blank card", async () => {

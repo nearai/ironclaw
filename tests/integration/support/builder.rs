@@ -2257,23 +2257,31 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
-    /// Drive one device link end to end through the **production** step
-    /// machine — the same `DeviceLinkFlowDriver` the WebUI routes dispatch to,
-    /// resolved off the composed product-auth bundle — and return the
-    /// credential account it minted.
-    ///
-    /// What is real here is everything except the vendor: composition's
-    /// driver, the auth-side revision compare-and-swap and TTLs, the extension
-    /// host's snapshot resolution and rate limits, provisional custody, the
-    /// completion mint with its ownership pin, and the durable blob write. The
-    /// vendor half is the harness's scripted adapter, because the real one
-    /// speaks MTProto over a socket with no injectable seam.
-    pub async fn link_device_through_product_auth(
+    /// Start one device link through the production driver and return the
+    /// first durable record it minted — the frame a card renders straight
+    /// after `start`. A vendor that fails `begin` lands here as a terminal
+    /// `Failed` record, not as a call error.
+    pub async fn start_device_link_through_product_auth(
         &self,
         provider: &str,
         extension_id: &str,
-        password: &str,
-    ) -> HarnessResult<ironclaw_auth::CredentialAccount> {
+    ) -> HarnessResult<ironclaw_auth::AuthFlowRecord> {
+        let (_, _, _, record) = self
+            .begin_device_link_through_product_auth(provider, extension_id)
+            .await?;
+        Ok(record)
+    }
+
+    async fn begin_device_link_through_product_auth(
+        &self,
+        provider: &str,
+        extension_id: &str,
+    ) -> HarnessResult<(
+        Arc<ironclaw_auth::RebornProductAuthServices>,
+        Arc<ironclaw_auth::DeviceLinkFlowDriver>,
+        ironclaw_auth::AuthProductScope,
+        ironclaw_auth::AuthFlowRecord,
+    )> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
             _ => return Err("no host-runtime capability backend to drive a device link".into()),
@@ -2309,6 +2317,29 @@ impl RebornIntegrationHarness {
             })
             .await
             .map_err(|error| format!("device-link start failed: {error:?}"))?;
+        Ok((product_auth, driver, scope, record))
+    }
+
+    /// Drive one device link end to end through the **production** step
+    /// machine — the same `DeviceLinkFlowDriver` the WebUI routes dispatch to,
+    /// resolved off the composed product-auth bundle — and return the
+    /// credential account it minted.
+    ///
+    /// What is real here is everything except the vendor: composition's
+    /// driver, the auth-side revision compare-and-swap and TTLs, the extension
+    /// host's snapshot resolution and rate limits, provisional custody, the
+    /// completion mint with its ownership pin, and the durable blob write. The
+    /// vendor half is the harness's scripted adapter, because the real one
+    /// speaks MTProto over a socket with no injectable seam.
+    pub async fn link_device_through_product_auth(
+        &self,
+        provider: &str,
+        extension_id: &str,
+        password: &str,
+    ) -> HarnessResult<ironclaw_auth::CredentialAccount> {
+        let (product_auth, driver, scope, record) = self
+            .begin_device_link_through_product_auth(provider, extension_id)
+            .await?;
         let flow_id = record.id;
 
         // Poll until the vendor asks for a value, waiting out the back-off the

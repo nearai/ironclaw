@@ -9,8 +9,77 @@
 //! invisible in manual testing: whether a terminal failure is reported as
 //! restartable.
 
+use std::collections::BTreeMap;
+
+use ironclaw_extension_contracts::linked_session::{
+    LinkedAccountGrant, LinkedSessionError, LinkedSessionPort, LinkedSessionPortFactory,
+    LinkedSessionSnapshot, LinkedSessionVersion, SessionBytes,
+};
+use ironclaw_host_api::ids::{ExtensionId, UserId};
+
 use super::pending::should_logout_on_abandon;
 use super::*;
+
+// ---------------------------------------------------------------------------
+// Fail-closed without an application identity
+// ---------------------------------------------------------------------------
+
+/// A deployment that never supplied `telegram_api_id` / `telegram_api_hash`
+/// fails closed before any socket or custody handle is touched, and says so
+/// with the `not_configured` code. It used to say `internal`, which the card
+/// renders as "something went wrong … cannot be completed for this account"
+/// — blaming the user for an operator omission (#7955).
+#[tokio::test]
+async fn a_deployment_without_an_app_identity_fails_closed_as_not_configured() {
+    struct UntouchableFactory;
+    impl LinkedSessionPortFactory for UntouchableFactory {
+        fn open(&self, _grant: &LinkedAccountGrant) -> Arc<dyn LinkedSessionPort> {
+            panic!("a not-configured deployment must never open custody")
+        }
+    }
+    struct UntouchablePort;
+    #[async_trait]
+    impl LinkedSessionPort for UntouchablePort {
+        async fn load(&self) -> Result<Option<LinkedSessionSnapshot>, LinkedSessionError> {
+            panic!("a not-configured deployment must never read custody")
+        }
+        async fn save(
+            &self,
+            _expected: LinkedSessionVersion,
+            _blob: SessionBytes,
+        ) -> Result<LinkedSessionVersion, LinkedSessionError> {
+            panic!("a not-configured deployment must never write custody")
+        }
+    }
+
+    let pool = SessionPool::new(Arc::new(UntouchableFactory), None);
+    let adapter = TelegramDeviceLinkAdapter::new(None, &pool);
+    let flow_id = DeviceLinkFlowId::new("flow-not-configured").expect("flow id");
+    let extension_id = ExtensionId::new("telegram").expect("extension id");
+    let user_id = UserId::new("user-1").expect("user id");
+    let config = BTreeMap::new();
+    let port = UntouchablePort;
+    let ctx = DeviceLinkContext {
+        flow_id: &flow_id,
+        extension_id: &extension_id,
+        user_id: &user_id,
+        config: &config,
+        session: &port,
+        account: None,
+    };
+
+    for mode in [DeviceLinkMode::Default, DeviceLinkMode::Alternate] {
+        let error = adapter
+            .begin(&ctx, mode)
+            .await
+            .expect_err("a deployment without an identity must fail closed");
+        assert_eq!(error.code(), DeviceLinkErrorCode::NotConfigured, "{mode:?}");
+        assert!(
+            !error.restartable(),
+            "{mode:?}: only an administrator edit changes this, so the card must not offer a retry"
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Poll cadence and the rendered payload

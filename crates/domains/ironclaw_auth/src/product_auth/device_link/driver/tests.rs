@@ -410,6 +410,29 @@ async fn a_vendor_failure_terminalizes_with_the_mapped_code() {
     );
 }
 
+/// A deployment that never supplied the vendor's application identity fails
+/// closed as a configuration gap — `MalformedConfig` on the record, the
+/// `not_configured` code on the frame, and no retry offered — rather than as
+/// a backend outage the user is invited to wait out.
+#[tokio::test]
+async fn a_missing_deployment_configuration_is_recorded_as_config_not_an_outage() {
+    let fixture = Fixture::new();
+    fixture
+        .vendor
+        .fail_next_call(DeviceLinkErrorCode::NotConfigured, false);
+
+    let failed = fixture.start().await;
+    assert_eq!(failed.status, AuthFlowStatus::Failed);
+    assert_eq!(failed.error, Some(AuthErrorCode::MalformedConfig));
+    assert_eq!(
+        frame(&failed),
+        &DeviceLinkStep::Failed {
+            code: DeviceLinkErrorCode::NotConfigured,
+            restartable: false,
+        }
+    );
+}
+
 /// A vendor whose manifest declares some other auth method must not be driven
 /// through this path at all.
 #[tokio::test]

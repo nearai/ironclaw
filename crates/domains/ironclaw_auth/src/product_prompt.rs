@@ -24,7 +24,9 @@ use ironclaw_extension_contracts::auth_prompt::{
     AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, DeviceLinkPromptView,
     PairingPromptView,
 };
-use ironclaw_extension_contracts::device_link::{DeviceLinkMode, DeviceLinkStep};
+use ironclaw_extension_contracts::device_link::{
+    DeviceLinkErrorCode, DeviceLinkMode, DeviceLinkStep,
+};
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter_error::{ProductAdapterError, RedactedString};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
@@ -586,7 +588,14 @@ fn device_link_prompt_view(
             view.vendor_user_ref = Some(vendor_user_ref.clone());
         }
         DeviceLinkStep::Failed { code, restartable } => {
-            view.instructions = if *restartable {
+            // Name the party who can act. An operator omission read as
+            // "cannot be completed for this account" sent users to fix an
+            // account that was never the problem.
+            view.instructions = if *code == DeviceLinkErrorCode::NotConfigured {
+                format!(
+                    "{display_name} linking has not been set up by an administrator on this deployment."
+                )
+            } else if *restartable {
                 format!("Linking {display_name} did not finish. You can try again.")
             } else {
                 format!("Linking {display_name} cannot be completed for this account.")
@@ -710,6 +719,42 @@ mod tests {
             Some("vendor-user-4711"),
             "the stable vendor id still needs its dedicated substitution-detection slot"
         );
+    }
+
+    /// A deployment-side omission must not be blamed on the user's account:
+    /// the copy names the administrator, and the typed code travels so the
+    /// card can add the remedy.
+    #[test]
+    fn not_configured_failure_names_the_administrator_not_the_account() {
+        let provider = AuthProviderId::new("acme".to_string()).expect("provider");
+        let extension_id = ExtensionId::new("acme").expect("extension id");
+        let step = DeviceLinkStep::Failed {
+            code: DeviceLinkErrorCode::NotConfigured,
+            restartable: false,
+        };
+
+        let view = device_link_prompt_view(
+            &provider,
+            Some(&extension_id),
+            "Acme account",
+            (Some("Scan a code"), None),
+            DeviceLinkMode::Default,
+            &step,
+            1,
+            chrono::Utc::now(),
+            None,
+        );
+
+        assert_eq!(
+            view.instructions,
+            "Acme account linking has not been set up by an administrator on this deployment."
+        );
+        assert!(
+            !view.instructions.contains("for this account"),
+            "an operator omission must not read as an account problem"
+        );
+        assert_eq!(view.error_code, Some(DeviceLinkErrorCode::NotConfigured));
+        assert_eq!(view.restartable, Some(false));
     }
 
     /// A pairing credential requirement MUST set `challenge_kind = Pairing`.

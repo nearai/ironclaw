@@ -62,6 +62,7 @@ fn mode_input_kind_display_kind_and_error_code_round_trip_their_wire_values() {
             "\"vendor_unavailable\"",
         ),
         (DeviceLinkErrorCode::CustodyFailed, "\"custody_failed\""),
+        (DeviceLinkErrorCode::NotConfigured, "\"not_configured\""),
         (DeviceLinkErrorCode::Internal, "\"internal\""),
     ] {
         let encoded = serde_json::to_string(&code).expect("serialize error code");
@@ -384,6 +385,15 @@ fn errors_project_stable_codes_and_restartability() {
                 reason: "adapter is not bound",
             },
             DeviceLinkErrorCode::Internal,
+            false,
+        ),
+        // An operator omission is neither `Internal` (nothing broke) nor
+        // restartable (only an administrator edit changes it).
+        (
+            DeviceLinkError::NotConfigured {
+                reason: "the deployment has not configured its application identity",
+            },
+            DeviceLinkErrorCode::NotConfigured,
             false,
         ),
     ];

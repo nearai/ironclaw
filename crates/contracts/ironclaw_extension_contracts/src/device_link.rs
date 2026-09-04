@@ -135,6 +135,11 @@ pub enum DeviceLinkErrorCode {
     VendorUnavailable,
     /// Host-side custody failed (see [`LinkedSessionError`]).
     CustodyFailed,
+    /// The deployment has not been configured for this surface — an operator
+    /// condition, not a fault with the user's account or the vendor. Terminal
+    /// for the flow: only an administrator edit changes it, and "try again"
+    /// would lie. Distinct from `Internal` so the card can say who can fix it.
+    NotConfigured,
     /// Anything else. Reserved for genuinely unclassifiable failures.
     Internal,
 }
@@ -529,6 +534,11 @@ pub enum DeviceLinkError {
     /// Custody failed; the link cannot be made durable.
     #[error("device-link custody failed")]
     Custody(#[from] LinkedSessionError),
+    /// The deployment lacks configuration this surface needs (an
+    /// administrator-supplied value the manifest marks optional). Not
+    /// `Internal`: the user cannot fix it, and the card must say so.
+    #[error("device-link surface is not configured on this deployment: {reason}")]
+    NotConfigured { reason: &'static str },
     /// The adapter failed for a reason the run cannot recover from.
     #[error("device-link adapter failed: {reason}")]
     Internal { reason: &'static str },
@@ -545,6 +555,7 @@ impl DeviceLinkError {
             Self::UnsupportedMode { .. } | Self::Internal { .. } => DeviceLinkErrorCode::Internal,
             Self::Vendor { code, .. } => *code,
             Self::Custody(_) => DeviceLinkErrorCode::CustodyFailed,
+            Self::NotConfigured { .. } => DeviceLinkErrorCode::NotConfigured,
         }
     }
 
@@ -556,7 +567,7 @@ impl DeviceLinkError {
                 false
             }
             Self::Vendor { restartable, .. } => *restartable,
-            Self::Custody(_) => false,
+            Self::Custody(_) | Self::NotConfigured { .. } => false,
         }
     }
 }

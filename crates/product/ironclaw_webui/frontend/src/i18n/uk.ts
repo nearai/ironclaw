@@ -1685,5 +1685,6 @@ registerPack("uk", {
   "deviceLink.error.identity_conflict": "Цей обліковий запис уже прив'язано. Від'єднайте його від облікового запису IronClaw, до якого його підключено, і повторіть спробу.",
   "deviceLink.error.vendor_unavailable": "Сервіс тимчасово недоступний.",
   "deviceLink.error.custody_failed": "Не вдалося безпечно зберегти прив'язку.",
+  "deviceLink.error.not_configured": "Адміністратор може ввімкнути це в розділі Адмін → Конфігурація → {name}.",
   "deviceLink.error.internal": "Під час прив'язки сталася помилка."
 });

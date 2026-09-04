@@ -1683,5 +1683,6 @@ registerPack("zh-CN", {
   "deviceLink.error.identity_conflict": "此账号已关联。请先在其所连接的 IronClaw 账号中取消关联，然后重试。",
   "deviceLink.error.vendor_unavailable": "服务暂时不可用。",
   "deviceLink.error.custody_failed": "无法安全保存关联。",
+  "deviceLink.error.not_configured": "管理员可在“管理 → 配置 → {name}”中启用此功能。",
   "deviceLink.error.internal": "关联时出现问题。"
 });

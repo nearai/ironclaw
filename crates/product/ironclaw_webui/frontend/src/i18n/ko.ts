@@ -1685,5 +1685,6 @@ registerPack("ko", {
   "deviceLink.error.identity_conflict": "이 계정은 이미 연결되어 있습니다. 연결된 IronClaw 계정에서 연결을 해제한 후 다시 시도하세요.",
   "deviceLink.error.vendor_unavailable": "서비스를 일시적으로 사용할 수 없습니다.",
   "deviceLink.error.custody_failed": "연결을 안전하게 저장하지 못했습니다.",
+  "deviceLink.error.not_configured": "관리자는 관리 → 구성 → {name}에서 활성화할 수 있습니다.",
   "deviceLink.error.internal": "연결 중 문제가 발생했습니다."
 });

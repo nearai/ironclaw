@@ -1685,5 +1685,6 @@ registerPack("ja", {
   "deviceLink.error.identity_conflict": "このアカウントはすでに連携されています。接続先の IronClaw アカウントから解除して、もう一度お試しください。",
   "deviceLink.error.vendor_unavailable": "サービスが一時的に利用できません。",
   "deviceLink.error.custody_failed": "連携を安全に保存できませんでした。",
+  "deviceLink.error.not_configured": "管理者は「管理 → 設定 → {name}」から有効にできます。",
   "deviceLink.error.internal": "連携中に問題が発生しました。"
 });

@@ -1686,5 +1686,6 @@ registerPack("es", {
   "deviceLink.error.identity_conflict": "Esta cuenta ya está vinculada. Desvincúlala de la cuenta de IronClaw donde está conectada y vuelve a intentarlo.",
   "deviceLink.error.vendor_unavailable": "El servicio no está disponible temporalmente.",
   "deviceLink.error.custody_failed": "No se pudo guardar la vinculación de forma segura.",
+  "deviceLink.error.not_configured": "Un administrador puede habilitarlo en Admin → Configuración → {name}.",
   "deviceLink.error.internal": "Algo salió mal durante la vinculación."
 });
