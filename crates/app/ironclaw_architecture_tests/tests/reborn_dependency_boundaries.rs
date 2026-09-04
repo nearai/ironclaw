@@ -849,7 +849,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ReplySinkOutcome::retry_after` and `ReplyPhase::as_str` helpers,
         // were deleted after a workspace-wide consumer sweep. Count read
         // from this test's own failure message.
-        ("ironclaw_extension_contracts", 12_867),
+        // 12_867 -> 13_026 (2026-09-04, #7955 not_configured device-link
+        // failure): +13 lines for the `DeviceLinkErrorCode::NotConfigured`
+        // variant and the `DeviceLinkError::NotConfigured` carrier (docs +
+        // code/restartable arms) — closed-vocabulary growth only; the audit
+        // classification lives in ironclaw_auth's driver and the rendering
+        // in the WebUI panel. The rest of the delta is growth main had
+        // already banked inside the +150 window since the 2026-08-31 pin;
+        // per the capture rule the pin re-captures the measured count, read
+        // from this test's own failure message.
+        ("ironclaw_extension_contracts", 13_026),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
