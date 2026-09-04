@@ -5057,6 +5057,85 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
 }
 
 #[tokio::test]
+async fn model_port_projects_legacy_untagged_observation_as_safe_summary_without_rewriting_record()
+{
+    let fixture = ThreadFixture::new().await;
+    let tool_result_ref = LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap();
+    let envelope_content = serde_json::json!({
+        "version": 1,
+        "result_ref": "result:legacy-untagged-observation",
+        "safe_summary": "legacy tool result remains available",
+        "model_observation": {
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed.",
+            "detail": {
+                "result_ref": "result:legacy-untagged-observation",
+                "byte_len": 42
+            },
+            "trust": "untrusted_tool_output"
+        }
+    })
+    .to_string();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("33333333-3333-3333-3333-333333333333").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
+        content: envelope_content.clone(),
+        image_attachments: Vec::new(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            iteration: 0,
+            capability_view: None,
+            tool_choice: None,
+        })
+        .await
+        .expect("an untagged legacy observation must not poison prompt projection");
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "prompt projection must call the model once");
+    assert_eq!(
+        calls[0].messages[0].content, envelope_content,
+        "the durable transcript content must remain byte-for-byte available"
+    );
+    let Some(HostManagedToolResultContent::Reference { envelope }) =
+        calls[0].messages[0].tool_result_content.as_ref()
+    else {
+        panic!("tool result must remain a typed reference");
+    };
+    assert_eq!(
+        envelope.safe_summary.as_str(),
+        "legacy tool result remains available"
+    );
+    assert!(
+        envelope.model_observation.is_none(),
+        "the untagged detail is not a valid typed observation"
+    );
+}
+
+#[tokio::test]
 async fn model_port_rejects_malformed_tool_result_reference_content() {
     let fixture = ThreadFixture::new().await;
     let tool_result_ref = LoopMessageRef::new("msg:22222222-2222-2222-2222-222222222222").unwrap();

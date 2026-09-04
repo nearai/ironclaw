@@ -3210,7 +3210,10 @@ where
                 MessageKind::User => (SystemInferenceContextRole::User, message.content),
                 MessageKind::Assistant => (SystemInferenceContextRole::Assistant, message.content),
                 MessageKind::ToolResultReference => {
-                    let envelope = ToolResultReferenceEnvelope::from_json_str(&message.content)
+                    let envelope =
+                        ToolResultReferenceEnvelope::from_json_str_for_model_projection(
+                            &message.content,
+                        )
                         .map_err(|error| {
                             tracing::debug!(%error, "structured finalization tool result context is invalid");
                             AgentLoopHostError::new(
@@ -3484,16 +3487,18 @@ fn tool_result_content_for_context_message(
     if message.kind != MessageKind::ToolResultReference {
         return Ok(None);
     }
-    let envelope =
-        ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
-            raw_agent_loop_host_error(
-                "model_context",
-                "decode_tool_result_reference",
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "tool result reference transcript content is invalid",
-                error,
-            )
-        })?;
+    let envelope = ToolResultReferenceEnvelope::from_json_str_for_model_projection(
+        &message.content,
+    )
+    .map_err(|error| {
+        raw_agent_loop_host_error(
+            "model_context",
+            "decode_tool_result_reference",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "tool result reference transcript content is invalid",
+            error,
+        )
+    })?;
     Ok(Some(HostManagedToolResultContent::Reference { envelope }))
 }
 
