@@ -31,6 +31,7 @@ use ironclaw_openai_compat::{
 use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
 };
+use ironclaw_product_contracts::inbound_requests::ProductCancelReason;
 use ironclaw_product_contracts::outbound::ProductOutboundEnvelope;
 use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use ironclaw_product_contracts::surface::ProductSurface;
@@ -493,13 +494,15 @@ async fn responses_cancel_uses_product_surface_control_action() {
         cancel_request.client_action_id.as_deref(),
         Some(format!("{id}:cancel").as_str())
     );
-    assert!(
-        cancel_request
-            .reason
-            .as_deref()
-            .expect("cancel reason")
-            .contains("Responses API")
-    );
+    // The surface behind this fake parses `reason` into `ProductCancelReason` and rejects
+    // anything outside that set, so asserting the shape of the string is not enough — the value
+    // has to be one the real `into_command` would accept, or the route 400s in production while
+    // this test stays green.
+    let reason = cancel_request.reason.as_deref().expect("cancel reason");
+    let parsed: ProductCancelReason =
+        serde_json::from_value(serde_json::Value::String(reason.to_owned()))
+            .unwrap_or_else(|_| panic!("cancel reason {reason:?} is not a ProductCancelReason"));
+    assert_eq!(parsed, ProductCancelReason::UserRequested);
 }
 
 #[tokio::test]
