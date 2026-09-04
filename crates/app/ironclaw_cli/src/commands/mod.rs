@@ -1,5 +1,6 @@
 use clap::Subcommand;
 
+pub(crate) mod acp_serve;
 pub(crate) mod channels;
 pub(crate) mod completion;
 pub(crate) mod config;
@@ -45,6 +46,8 @@ pub(crate) enum Command {
     Models(models::ModelsCommand),
     /// Initialize the standalone Reborn home and first-run setup marker.
     Onboard(onboard::OnboardCommand),
+    /// Speak ACP (Agent Client Protocol) on stdio.
+    AcpServe(acp_serve::AcpServeCommand),
     /// Inspect supported Reborn boot profiles.
     Profile(profile::ProfileCommand),
     /// Start the composed Reborn CLI REPL.
@@ -69,6 +72,9 @@ impl Command {
     pub(crate) fn execute(self) -> anyhow::Result<()> {
         match self {
             Self::Channels(command) => command.execute(),
+            Self::AcpServe(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Completion(command) => command.execute(),
             Self::Config(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
