@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_extension_contracts::runtime::ExtensionAssetPath;
 use ironclaw_extension_registry::{ExtensionRuntimeV2, ManifestSource};
+use ironclaw_host_api::messaging::resolve_standard_schema_ref;
 
 use ironclaw_extension_host::{
     AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
@@ -28,7 +29,7 @@ pub(crate) fn ironhub_tool_package(
     entry: &IronHubToolEntry,
     manifest: Vec<u8>,
     wasm: Vec<u8>,
-    capabilities: Vec<u8>,
+    capabilities: Option<Vec<u8>>,
     schemas: Vec<(String, Vec<u8>)>,
     prompts: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
@@ -47,10 +48,10 @@ pub(crate) fn ironhub_tool_package(
     let record = parse_imported_manifest(&manifest_toml, ManifestSource::RegistryInstalled)
         .map_err(IronHubCommandError::Product)?;
 
-    let mut files = vec![
-        ("manifest.toml".to_string(), manifest_toml.into_bytes()),
-        ("legacy/capabilities.json".to_string(), capabilities),
-    ];
+    let mut files = vec![("manifest.toml".to_string(), manifest_toml.into_bytes())];
+    if let Some(capabilities) = capabilities {
+        files.push(("legacy/capabilities.json".to_string(), capabilities));
+    }
     if let ExtensionRuntimeV2::Wasm { module } = &record.manifest().runtime {
         validate_manifest_asset_path(module)?;
         files.push((module.clone(), wasm));
@@ -67,12 +68,16 @@ pub(crate) fn ironhub_tool_package(
     let mut referenced_schemas = BTreeSet::new();
     for capability in &record.manifest().capabilities {
         let input_path = capability.input_schema_ref.as_str();
-        validate_manifest_asset_path(input_path)?;
-        referenced_schemas.insert(input_path.to_string());
+        if resolve_standard_schema_ref(input_path).is_none() {
+            validate_manifest_asset_path(input_path)?;
+            referenced_schemas.insert(input_path.to_string());
+        }
         if let Some(output_schema_ref) = &capability.output_schema_ref {
             let output_path = output_schema_ref.as_str();
-            validate_manifest_asset_path(output_path)?;
-            referenced_schemas.insert(output_path.to_string());
+            if resolve_standard_schema_ref(output_path).is_none() {
+                validate_manifest_asset_path(output_path)?;
+                referenced_schemas.insert(output_path.to_string());
+            }
         }
     }
     let published_schemas: BTreeSet<_> = schema_assets.keys().cloned().collect();
@@ -198,7 +203,7 @@ mod tests {
             description: "test tool".to_string(),
             provenance: IronHubProvenance::Official,
             wasm: artifact(),
-            capabilities: artifact(),
+            capabilities: Some(artifact()),
             manifest: Some(artifact()),
             schemas,
             prompts: BTreeMap::new(),
@@ -287,7 +292,7 @@ access_token = "/access_token""#
             entry,
             manifest,
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             published_schemas(&entry.name),
             Vec::new(),
             &[],
@@ -365,7 +370,7 @@ access_token = "/access_token""#
             &entry_named("attio"),
             published_manifest("attio", &api_key_auth("attio", "")),
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             schemas,
             Vec::new(),
             &[],
@@ -395,7 +400,7 @@ access_token = "/access_token""#
             &entry_named("attio"),
             manifest,
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             published_schemas("attio"),
             Vec::new(),
             &[],
@@ -428,7 +433,7 @@ access_token = "/access_token""#
             &entry_named("attio"),
             manifest,
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             published_schemas("attio"),
             vec![(module_path.to_string(), b"# Prompt".to_vec())],
             &[],
@@ -448,7 +453,7 @@ access_token = "/access_token""#
             &entry,
             vec![0xff],
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             published_schemas("attio"),
             Vec::new(),
             &[],
@@ -462,7 +467,7 @@ access_token = "/access_token""#
             &entry,
             published_manifest("attio", &api_key_auth("attio", "")),
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             duplicate,
             Vec::new(),
             &[],
@@ -476,7 +481,7 @@ access_token = "/access_token""#
             &entry,
             published_manifest("attio", &api_key_auth("attio", "")),
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             unreferenced,
             Vec::new(),
             &[],
@@ -521,6 +526,57 @@ access_token = "/access_token""#
     }
 
     #[test]
+    fn a_tool_without_a_legacy_capabilities_sidecar_installs() {
+        let mut entry = entry_named("attio");
+        entry.capabilities = None;
+
+        let package = ironhub_tool_package(
+            &entry,
+            published_manifest("attio", &api_key_auth("attio", "")),
+            component(),
+            None,
+            published_schemas("attio"),
+            Vec::new(),
+            &[],
+        )
+        .expect("package builds without a capabilities sidecar");
+
+        assert!(
+            !package
+                .assets
+                .iter()
+                .any(|asset| asset.path.as_str() == "legacy/capabilities.json"),
+            "no legacy sidecar may be written when the catalog publishes none"
+        );
+    }
+
+    #[test]
+    fn dropping_the_capabilities_sidecar_changes_the_pinned_tool_artifact_digest() {
+        let original = entry_named("attio");
+        let mut changed = original.clone();
+        changed.capabilities = None;
+
+        assert_ne!(
+            super::super::catalog::tool_artifact_digest(&original),
+            super::super::catalog::tool_artifact_digest(&changed),
+        );
+    }
+
+    #[test]
+    fn the_egress_budget_does_not_shrink_with_the_artifact() {
+        let url =
+            "https://hub.ironclaw.com/artifacts/attio/a-path-longer-than-the-file-it-names.json";
+        let policy = super::super::catalog::network_policy_for_url_from_origin(url, None)
+            .expect("policy builds");
+
+        let budget = policy.max_egress_bytes.expect("egress budget");
+        assert!(
+            budget > url.len() as u64,
+            "a budget below the URL length rejects the download before a socket opens"
+        );
+    }
+
+    #[test]
     fn package_rejects_manifest_asset_paths_outside_the_extension_root() {
         let base = String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
             .expect("manifest UTF-8");
@@ -551,7 +607,7 @@ access_token = "/access_token""#
                 &entry_named("attio"),
                 manifest.into_bytes(),
                 component(),
-                b"{}".to_vec(),
+                Some(b"{}".to_vec()),
                 published_schemas("attio"),
                 Vec::new(),
                 &[],
@@ -650,7 +706,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             &entry_named("attio"),
             published_manifest("other-tool", &api_key_auth("other-tool", "")),
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             published_schemas("other-tool"),
             Vec::new(),
             &[],
@@ -672,7 +728,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             &entry_named("attio"),
             b"this is not toml".to_vec(),
             component(),
-            b"{}".to_vec(),
+            Some(b"{}".to_vec()),
             published_schemas("attio"),
             Vec::new(),
             &[],
@@ -682,6 +738,48 @@ setup_url = "https://app.attio.com/settings/developers""#,
         assert!(
             error.to_string().contains("attio") || error.to_string().contains("manifest"),
             "got {error}"
+        );
+    }
+
+    /// The host synthesizes these schemas, so a catalog never publishes them.
+    #[test]
+    fn a_capability_on_a_standard_schema_ref_installs_without_a_published_asset() {
+        let manifest = String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+            .expect("published manifest is utf8")
+            .replace("[[tools]]\n", "[[tools]]\nstandard_op = \"send_message\"\n")
+            .replace("id = \"attio.invoke\"", "id = \"attio.send_message\"")
+            .replace(
+                "effects = [\"network\", \"use_secret\"]",
+                "effects = [\"network\", \"use_secret\", \"external_write\"]",
+            )
+            .replace(
+                "input_schema_ref = \"schemas/attio/invoke.input.v1.json\"\n",
+                "",
+            )
+            .replace(
+                "output_schema_ref = \"schemas/attio/raw_output.v1.json\"\n",
+                "",
+            );
+
+        let package = ironhub_tool_package(
+            &entry_named("attio"),
+            manifest.into_bytes(),
+            component(),
+            Some(b"{}".to_vec()),
+            Vec::new(),
+            Vec::new(),
+            &[],
+        )
+        .expect("a host-synthesized schema ref has no published asset to match");
+
+        let paths: Vec<&str> = package
+            .assets
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+        assert!(
+            !paths.iter().any(|path| path.starts_with("standard:")),
+            "a standard ref must not become an installed asset path, got {paths:?}"
         );
     }
 }

@@ -6,7 +6,10 @@ use ironclaw_extension_registry::{
     ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
+use ironclaw_host_api::{
+    ids::ExtensionId, messaging::resolve_standard_schema_ref, path::VirtualPath,
+    runtime::RuntimeKind,
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionOnboarding, LifecyclePackageKind, LifecyclePackageRef,
@@ -394,9 +397,15 @@ fn manifest_declared_asset_paths(
         declared.push(module.clone());
     }
     for capability in &manifest.capabilities {
-        declared.push(capability.input_schema_ref.as_str().to_string());
+        let input_schema_ref = capability.input_schema_ref.as_str();
+        if resolve_standard_schema_ref(input_schema_ref).is_none() {
+            declared.push(input_schema_ref.to_string());
+        }
         if let Some(output_schema_ref) = &capability.output_schema_ref {
-            declared.push(output_schema_ref.as_str().to_string());
+            let output_schema_ref = output_schema_ref.as_str();
+            if resolve_standard_schema_ref(output_schema_ref).is_none() {
+                declared.push(output_schema_ref.to_string());
+            }
         }
         if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
             declared.push(prompt_doc_ref.as_str().to_string());
@@ -859,6 +868,45 @@ setup_url = "{expected_url}"
                 VirtualPath::new("/system/extensions/uploaded-tool").unwrap()
             )
         );
+    }
+
+    /// A v3 tool bound to a standard messaging op. The host synthesizes its
+    /// schema refs after validating the binding, and `standard_op` is v3-only,
+    /// so the v2 bundle fixture above cannot express this shape.
+    const STANDARD_OP_BUNDLE_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "uploaded-standard"
+name = "Uploaded Standard"
+version = "0.1.0"
+description = "fixture: an imported tool bound to a standard messaging op"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[tools]]
+standard_op = "send_message"
+id = "uploaded-standard.send_message"
+description = "Sends a message"
+effects = ["external_write"]
+default_permission = "ask"
+visibility = "model"
+"#;
+
+    #[test]
+    fn an_imported_bundle_omits_host_synthesized_standard_schemas() {
+        imported_extension_package(
+            vec![
+                (
+                    "manifest.toml".to_string(),
+                    STANDARD_OP_BUNDLE_FIXTURE.as_bytes().to_vec(),
+                ),
+                ("wasm/tool.wasm".to_string(), b"\0asm\x0d\0\x01\0".to_vec()),
+            ],
+            &[],
+        )
+        .expect("a synthesized standard schema ref has no asset for the bundle to carry");
     }
 
     #[tokio::test]

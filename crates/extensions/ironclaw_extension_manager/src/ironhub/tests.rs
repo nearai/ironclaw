@@ -256,7 +256,7 @@ async fn install_rejects_catalog_tools_that_predate_published_extension_manifest
             description: "stale catalog entry".to_string(),
             provenance: IronHubProvenance::Official,
             wasm: artifact.clone(),
-            capabilities: artifact,
+            capabilities: Some(artifact),
             manifest: None,
             schemas: std::collections::BTreeMap::new(),
             prompts: std::collections::BTreeMap::new(),
@@ -775,7 +775,7 @@ fn catalog_validation_covers_published_tool_assets_and_origin_boundaries() {
         description: "fixture".to_string(),
         provenance: IronHubProvenance::Official,
         wasm: artifact("https://hub.ironclaw.com/fixture.wasm"),
-        capabilities: artifact("https://hub.ironclaw.com/capabilities.json"),
+        capabilities: Some(artifact("https://hub.ironclaw.com/capabilities.json")),
         manifest: Some(artifact("https://hub.ironclaw.com/manifest.toml")),
         schemas: std::collections::BTreeMap::from([(
             "schemas/input.json".to_string(),
@@ -1254,6 +1254,104 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             && request.policy.deny_private_ip_ranges
             && request.capability_id.as_str() == super::IRONHUB_INSTALL_CAPABILITY_ID
     }));
+}
+
+#[tokio::test]
+async fn a_catalog_entry_without_a_capabilities_sidecar_installs_through_real_managers() {
+    let owner = "ironhub-no-sidecar-owner";
+    let services =
+        crate::lifecycle_test_support::build_lifecycle_test_services(owner, None, false).await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url = "https://hub.ironclaw.com/tests/no-sidecar/manifest.json";
+    let tool_url = "https://hub.ironclaw.com/tests/no-sidecar/tool.wasm";
+    let tool_manifest_url = "https://hub.ironclaw.com/tests/no-sidecar/manifest.toml";
+    let input_schema_url = "https://hub.ironclaw.com/tests/no-sidecar/invoke.input.v1.json";
+    let output_schema_url = "https://hub.ironclaw.com/tests/no-sidecar/raw_output.v1.json";
+    let prompt_url = "https://hub.ironclaw.com/tests/no-sidecar/invoke.md";
+    let skill_url = "https://hub.ironclaw.com/tests/no-sidecar/SKILL.md";
+    let skill_file_url = "https://hub.ironclaw.com/tests/no-sidecar/scripts/run.py";
+    let tool_bytes = include_bytes!("../../../packages/github/wasm/github_tool.wasm").to_vec();
+    let skill_bytes = b"---\nname: unused-skill\ndescription: unused\n---\n# Unused\n".to_vec();
+    let skill_file_bytes = b"print('unused')\n".to_vec();
+    let prompt_bytes = published_tool_prompt();
+
+    let mut catalog: serde_json::Value =
+        serde_json::from_str(&mixed_manifest_json(MixedManifestFixture {
+            tool_url,
+            tool_size: tool_bytes.len(),
+            tool_sha: &sha256_hex(&tool_bytes),
+            capabilities_url: "https://hub.ironclaw.com/tests/no-sidecar/capabilities.json",
+            capabilities_size: 0,
+            capabilities_sha: &sha256_hex(b""),
+            skill_url,
+            skill_size: skill_bytes.len(),
+            skill_sha: &sha256_hex(&skill_bytes),
+            skill_file_url,
+            skill_file_size: skill_file_bytes.len(),
+            skill_file_sha: &sha256_hex(&skill_file_bytes),
+            tool_manifest_url,
+            input_schema_url,
+            output_schema_url,
+            prompt_url,
+        }))
+        .expect("fixture catalog is json");
+    let removed = catalog["tools"][0]
+        .as_object_mut()
+        .expect("tool entry is an object")
+        .remove("capabilities");
+    assert!(
+        removed.is_some(),
+        "the fixture must have carried a sidecar for this test to be meaningful"
+    );
+
+    let egress = Arc::new(RecordingEgress::new([
+        (
+            manifest_url,
+            signed_manifest(catalog.to_string(), &test_signing_key()),
+        ),
+        (tool_url, tool_bytes),
+        (
+            tool_manifest_url,
+            published_basic_tool_manifest_with_prompt("0.1.0"),
+        ),
+        (input_schema_url, published_input_schema()),
+        (output_schema_url, published_output_schema()),
+        (prompt_url, prompt_bytes),
+    ]));
+    let service = configure_test_catalog(
+        IronHubService::new_with_runtime_egress(
+            Arc::clone(&services.skill_management),
+            Arc::clone(&services.extension_management),
+            egress.clone(),
+            scope.clone(),
+            CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+            test_link_state(),
+        ),
+        manifest_url,
+        test_manifest_verify_keys(),
+    );
+
+    let tool = service
+        .execute(IronHubCommand::Install {
+            name: "installed-tool".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Tool),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("a tool without a legacy sidecar installs");
+    assert_eq!(tool.phase, IronHubPhase::Installed);
+
+    let sidecar_path =
+        VirtualPath::new("/system/extensions/installed-tool/legacy/capabilities.json")
+            .expect("sidecar path");
+    assert!(
+        services.filesystem.read_file(&sidecar_path).await.is_err(),
+        "no sidecar was published, so none may be materialized"
+    );
+    // Catalog, manifest, wasm, two schemas, prompt.
+    assert_eq!(egress.requests().len(), 6);
 }
 
 #[tokio::test]

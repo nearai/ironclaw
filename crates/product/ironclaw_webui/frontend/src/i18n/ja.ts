@@ -1687,5 +1687,20 @@ registerPack("ja", {
   "deviceLink.error.identity_conflict": "このアカウントはすでに連携されています。接続先の IronClaw アカウントから解除して、もう一度お試しください。",
   "deviceLink.error.vendor_unavailable": "サービスが一時的に利用できません。",
   "deviceLink.error.custody_failed": "連携を安全に保存できませんでした。",
-  "deviceLink.error.internal": "連携中に問題が発生しました。"
+  "deviceLink.error.internal": "連携中に問題が発生しました。",
+  "ironhub.install.title": "IronHub からインストール",
+  "ironhub.install.description": "承認する前に、このリンクがインストールする内容を確認してください。",
+  "ironhub.install.name": "名前",
+  "ironhub.install.version": "バージョン",
+  "ironhub.install.digest": "アーティファクトダイジェスト",
+  "ironhub.install.privateSource": "プライベートマニフェストのソース",
+  "ironhub.install.confirm": "インストール",
+  "ironhub.install.installing": "インストール中...",
+  "ironhub.install.installed": "インストールしました。",
+  "ironhub.install.notInstalled": "ハブは何もインストールされなかったと報告しました。",
+  "ironhub.install.linkInvalid": "このインストールリンクは不完全か、形式が正しくありません。",
+  "ironhub.install.rejected": "このインストールリンクはこのエージェント向けに署名されていません。",
+  "ironhub.install.expired": "このインストールリンクは期限切れです。ハブからインストールをやり直してください。",
+  "ironhub.install.alreadyUsed": "このインストールリンクはすでに使用されています。ハブからインストールをやり直してください。",
+  "ironhub.install.failed": "インストールを完了できませんでした。"
 });
