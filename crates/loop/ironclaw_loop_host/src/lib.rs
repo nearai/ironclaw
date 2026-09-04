@@ -2307,6 +2307,26 @@ pub trait HostManagedModelGateway: Send + Sync {
         resolved_model_route.and_then(|route| ProviderModelId::new(route.model_id()).ok())
     }
 
+    /// Best-effort provider-advertised total context window (input and
+    /// output), in tokens, for the route this run will use.
+    ///
+    /// Gateways that own provider selection should override this. The default
+    /// returns `None`, which keeps the compiled-in budget — a gateway that
+    /// knows nothing must not change how any run is budgeted.
+    ///
+    /// This is awaited on the turn-run host-build critical path, so an
+    /// implementation must be cheap and I/O-free — `ironclaw_llm`'s
+    /// `LlmProvider::model_metadata()` contract makes it a static description
+    /// for exactly this reason. A slow override stalls every run's
+    /// construction; return `None` rather than doing work.
+    async fn advertised_context_window_tokens(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        _resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<u64> {
+        None
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,

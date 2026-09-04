@@ -724,6 +724,7 @@ impl RebornIntegrationGroup {
             group: self,
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
+            advertised_context_window: None,
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
             record_model_calls: false,
@@ -1635,6 +1636,7 @@ pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
+    advertised_context_window: Option<u32>,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
     /// Additive raw-provider call recording for this thread.
@@ -1683,6 +1685,14 @@ type ThreadModelProviderParts = (
 );
 
 impl<'g> RebornThreadBuilder<'g> {
+    /// Make the scripted model advertise a total context window, so the run's
+    /// prompt context budget is derived from it instead of the compiled-in
+    /// default. Unset — the default — advertises nothing.
+    pub fn advertised_context_window(mut self, tokens: u32) -> Self {
+        self.advertised_context_window = Some(tokens);
+        self
+    }
+
     /// Set the scripted model replies for this thread (consumed in order at the
     /// raw-provider seam, one per model turn).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
@@ -1812,7 +1822,11 @@ impl<'g> RebornThreadBuilder<'g> {
         // wraps it in a parking provider at the SAME vendor-SDK seam (decorator
         // chain still runs on top), so captured requests stay inspectable either
         // way.
-        let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
+        let mut scripted = scripted_trace_llm(self.replies);
+        if let Some(tokens) = self.advertised_context_window {
+            scripted = scripted.with_advertised_context_window(tokens);
+        }
+        let scripted_llm: Arc<TraceLlm> = Arc::new(scripted);
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
         // provider modes mutually exclusive by construction — no priority

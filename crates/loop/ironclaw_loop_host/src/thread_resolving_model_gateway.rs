@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use ironclaw_loop_contracts::{
     InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
     LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
-    LoopPromptBundleAuthority,
+    LoopPromptBundleAuthority, PromptContextTokenBudget,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -41,6 +41,7 @@ where
     pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    pub prompt_context_budget: PromptContextTokenBudget,
 }
 
 /// Resolves a thread's transcript into a host-managed model request.
@@ -68,6 +69,7 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    prompt_context_budget: PromptContextTokenBudget,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -89,6 +91,7 @@ where
             context_window_cache,
             attachment_read_port,
             prompt_diagnostic_sink,
+            prompt_context_budget,
         } = parts;
         Self {
             thread_service,
@@ -103,6 +106,7 @@ where
             context_window_cache,
             attachment_read_port,
             prompt_diagnostic_sink,
+            prompt_context_budget,
         }
     }
 }
@@ -146,7 +150,8 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
-        .with_prompt_bundle_authority(self.prompt_authority.clone());
+        .with_prompt_bundle_authority(self.prompt_authority.clone())
+        .with_prompt_context_token_budget(self.prompt_context_budget);
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }

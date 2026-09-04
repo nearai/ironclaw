@@ -100,8 +100,8 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **61** group scenarios · **63** flat integration bins (56 in
-`tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+Totals: **61** group scenarios · **64** flat integration bins (58 in
+`tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
@@ -221,7 +221,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (63)
+## 4. Flat integration bins — the `[[test]]` targets under `tests/integration/*.rs` and `tests/integration/auth/*.rs` (64)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -240,6 +240,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A repeated call with identical output gets one recovery warning and then terminates after a second no-progress strike; alternating signatures with identical output also terminate, while a fixed call whose output changes completes without no-progress termination | `terminal_warning.rs::{repeated_identical_call_terminates_as_no_progress_after_second_strike,alternating_signatures_with_byte_identical_outputs_terminate_as_no_progress,same_call_with_changing_output_completes_instead_of_terminating}` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
+| A model that advertises a context window gets a prompt budget derived from it (90% of the window, response reserve clamped) through the real provider gateway, and is sent a smaller transcript than an unadvertised model; an unadvertised model keeps the compiled-in 128k/20k ceiling | `context_budget.rs::{small_advertised_window_shrinks_what_the_model_receives,unadvertised_window_keeps_the_compiled_in_ceiling}` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
 | Two background children settle independently while the parent keeps running: each gets its own framed transcript row and its own queued `SubagentSettled` input, in settle order (D6) | `subagent_await_edge.rs::background_child_result_is_delivered_per_child_while_parent_runs` |
 | A background result's live-run enqueue racing `RunClosed` (the parent terminalized mid-delivery) is healed by a System-provenance `activate`, not lost | `subagent_await_edge.rs::run_closed_race_is_healed_by_activation` |
@@ -343,7 +344,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 | A downloaded run artifact carries per-iteration model-call timing evidence for a completed run, and still carries durable per-message timestamps (with an explicit `run_not_resident` reason) when the process-local timing buffer was evicted or the process restarted | `run_artifact_timings.rs` |
 
-One of the 63 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 64 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

@@ -131,26 +131,27 @@ fn parse_custom_headers() -> std::collections::HashMap<String, String> {
 }
 
 /// Return the context window length for a known Gemini model.
-/// Uses explicit match on known model IDs, with a fallback heuristic
-/// for unrecognized models.
-fn gemini_context_length(model: &str) -> u32 {
+/// Uses explicit match on known model IDs; unrecognized models return `None`
+/// rather than a guessed value, since a wrong `Some` produces the provider
+/// rejection the context budget exists to avoid.
+fn gemini_context_length(model: &str) -> Option<u32> {
     match model {
         // Pro models — 2M context
         "gemini-2.5-pro"
         | "gemini-3-pro-preview"
         | "gemini-3.1-pro-preview"
-        | "gemini-3.1-pro-preview-customtools" => 2_000_000,
+        | "gemini-3.1-pro-preview-customtools" => Some(2_000_000),
         // Flash / Flash-Lite — 1M context
         "gemini-2.5-flash"
         | "gemini-2.5-flash-lite"
         | "gemini-3-flash-preview"
-        | "gemini-3.1-flash-lite-preview" => 1_000_000,
+        | "gemini-3.1-flash-lite-preview" => Some(1_000_000),
         // Legacy
-        "gemini-1.5-pro" => 2_000_000,
-        "gemini-1.5-flash" => 1_000_000,
-        "gemini-2.0-flash" => 1_000_000,
-        // Fallback for unknown models
-        _ => 1_000_000,
+        "gemini-1.5-pro" => Some(2_000_000),
+        "gemini-1.5-flash" => Some(1_000_000),
+        "gemini-2.0-flash" => Some(1_000_000),
+        // Unknown model — do not guess.
+        _ => None,
     }
 }
 
@@ -2157,7 +2158,7 @@ impl LlmProvider for GeminiOauthProvider {
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         let model = self.config.model.as_str();
-        let context_length = Some(gemini_context_length(model));
+        let context_length = gemini_context_length(model);
 
         Ok(ModelMetadata {
             id: self.config.model.clone(),
@@ -2279,6 +2280,12 @@ impl LlmProvider for GeminiOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_context_length_is_none_for_unknown_models() {
+        assert_eq!(gemini_context_length("gemini-9-hypothetical"), None);
+        assert_eq!(gemini_context_length("gemini-2.5-pro"), Some(2_000_000));
+    }
 
     #[tokio::test]
     async fn adapter_response_path_maps_oauth_http_413_to_context_overflow() {

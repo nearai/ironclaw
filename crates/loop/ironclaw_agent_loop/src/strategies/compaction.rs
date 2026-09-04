@@ -53,12 +53,40 @@ impl DefaultCompactionStrategy {
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
 
-    pub(super) fn can_evaluate(&self, state: &LoopExecutionState) -> bool {
+    /// The budget this run actually runs with: the one resolved from the
+    /// run's model when present, otherwise this strategy's compiled-in
+    /// default.
+    pub(super) fn effective_budget(&self, ctx: &LoopRunContext) -> PromptContextTokenBudget {
+        ctx.resolved_context_budget
+            .unwrap_or(self.prompt_context_budget)
+    }
+
+    /// The tail this run can afford to protect: the configured tail, capped
+    /// at half the visible transcript so compaction can always drop the
+    /// other half.
+    ///
+    /// `preserve_tail_tokens` is compiled-in, but the visible transcript is
+    /// run-resolved from the model's advertised context window and can be
+    /// far smaller (a small-window model can derive a visible transcript
+    /// below the compiled-in tail). Without this cap, both automatic and
+    /// forced-recovery compaction would be permanently disabled for that
+    /// run — the `can_evaluate` guard would never clear and the boundary
+    /// searches would never find a tail-sized gap to cut before.
+    pub(super) fn effective_preserve_tail_tokens(&self, budget: PromptContextTokenBudget) -> u64 {
+        self.preserve_tail_tokens
+            .min(budget.visible_transcript_tokens() / 2)
+    }
+
+    pub(super) fn can_evaluate(
+        &self,
+        state: &LoopExecutionState,
+        budget: PromptContextTokenBudget,
+    ) -> bool {
         if state.compaction_prompt.message_index.is_empty() {
             return false;
         }
-        let threshold = self.prompt_context_budget.visible_transcript_tokens();
-        if threshold <= self.preserve_tail_tokens {
+        let threshold = budget.visible_transcript_tokens();
+        if threshold <= self.effective_preserve_tail_tokens(budget) {
             return false;
         }
         // Forced/recovery compactions (context-overflow retry, byte-cap
@@ -77,6 +105,7 @@ impl DefaultCompactionStrategy {
     pub(super) fn trigger_at(
         &self,
         state: &LoopExecutionState,
+        budget: PromptContextTokenBudget,
         drop_through_seq: u64,
     ) -> CompactionDecision {
         let effectiveness_baseline = if state.compaction_state.force_compact_on_next_iteration {
@@ -85,12 +114,12 @@ impl DefaultCompactionStrategy {
             }
         } else {
             CompactionEffectivenessBaseline::TriggerThresholdTokens {
-                tokens: self.prompt_context_budget.visible_transcript_tokens(),
+                tokens: budget.visible_transcript_tokens(),
             }
         };
         CompactionDecision::Trigger {
             drop_through_seq,
-            preserve_tail_tokens: self.preserve_tail_tokens,
+            preserve_tail_tokens: self.effective_preserve_tail_tokens(budget),
             deadline_ms: self.deadline_ms,
             effectiveness_baseline,
         }
@@ -111,9 +140,10 @@ impl CompactionStrategy for DefaultCompactionStrategy {
     fn should_compact(
         &self,
         state: &LoopExecutionState,
-        _ctx: &LoopRunContext,
+        ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if !self.can_evaluate(state) {
+        let budget = self.effective_budget(ctx);
+        if !self.can_evaluate(state, budget) {
             return CompactionDecision::Skip;
         }
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
@@ -122,22 +152,22 @@ impl CompactionStrategy for DefaultCompactionStrategy {
                 == Some(CompactionInitiator::WindowEviction)
             {
                 return eligible_window_eviction_boundary(state, prompt_fingerprint, None)
-                    .map(|sequence| self.trigger_at(state, sequence))
+                    .map(|sequence| self.trigger_at(state, budget, sequence))
                     .unwrap_or(CompactionDecision::Skip);
             }
             return latest_eligible_user_boundary(state, prompt_fingerprint)
-                .map(|sequence| self.trigger_at(state, sequence))
+                .map(|sequence| self.trigger_at(state, budget, sequence))
                 .unwrap_or(CompactionDecision::Skip);
         }
 
         tail_preserving_user_boundary(
             state,
             prompt_fingerprint,
-            self.preserve_tail_tokens,
+            self.effective_preserve_tail_tokens(budget),
             0,
             |_| true,
         )
-        .map(|sequence| self.trigger_at(state, sequence))
+        .map(|sequence| self.trigger_at(state, budget, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
 }
@@ -320,673 +350,4 @@ impl CompactionForceStrategy for ByteCapStrategy {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::{
-        CompactionEffectivenessBaseline, CompactionPromptSnapshot, CompactionStrategyState,
-        DeferredCompactionWatermark, LoopExecutionState, MessageIndexEntry,
-    };
-    use ironclaw_host_api::ids::CapabilityId;
-    use ironclaw_loop_contracts::PromptContextTokenBudget;
-
-    #[test]
-    fn evaluate_skips_when_message_index_is_empty() {
-        let context = crate::test_support::test_run_context("compaction-strategy-empty");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.force_compact_on_next_iteration = true;
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 1,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn evaluate_skips_when_no_eligible_user_message_boundary_exists() {
-        let context = crate::test_support::test_run_context("compaction-strategy");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt =
-            CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 100,
-            }]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 1,
-        };
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn evaluate_skips_when_below_threshold_with_valid_user_boundary_and_forcing_is_off() {
-        let context = crate::test_support::test_run_context("compaction-strategy-below-threshold");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 20,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 20,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 60,
-            deadline_ms: 1,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn can_evaluate_skips_when_visible_threshold_equals_preserve_tail() {
-        let context = crate::test_support::test_run_context("compaction-strategy-equal-tail");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt =
-            CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 100,
-            }]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 90,
-            deadline_ms: 1,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn evaluate_triggers_at_latest_user_boundary_outside_tail() {
-        let context = crate::test_support::test_run_context("compaction-strategy-trigger");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state = CompactionStrategyState::default();
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 30,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 30,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 30,
-            },
-            MessageIndexEntry {
-                sequence: 4,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 30,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 60,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 1,
-                preserve_tail_tokens: 60,
-                deadline_ms: 7,
-                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
-                    tokens: 90,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_triggers_when_newest_assistant_block_exceeds_tail_budget() {
-        let context = crate::test_support::test_run_context("compaction-strategy-tail-overflow");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state = CompactionStrategyState::default();
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 100,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 60,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 1,
-                preserve_tail_tokens: 60,
-                deadline_ms: 7,
-                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
-                    tokens: 90,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_skips_when_latest_user_boundary_was_already_compacted() {
-        let context = crate::test_support::test_run_context("compaction-strategy-compacted");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.last_compacted_through_seq = Some(3);
-        state.compaction_state.force_compact_on_next_iteration = true;
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 4,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 100,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 60,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn evaluate_skips_previously_deferred_boundary_when_forced() {
-        let context = crate::test_support::test_run_context("compaction-strategy-deferred");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.force_compact_on_next_iteration = true;
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-        ]);
-        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-            through_seq: 3,
-            prompt_fingerprint: state.compaction_prompt.fingerprint(),
-        });
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 1,
-                preserve_tail_tokens: 1,
-                deadline_ms: 7,
-                effectiveness_baseline:
-                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 30 },
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_skips_deferred_boundary_in_threshold_overflow_path() {
-        let context =
-            crate::test_support::test_run_context("compaction-strategy-deferred-threshold");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 50,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 50,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 50,
-            },
-            MessageIndexEntry {
-                sequence: 4,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 50,
-            },
-        ]);
-        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-            through_seq: 3,
-            prompt_fingerprint: state.compaction_prompt.fingerprint(),
-        });
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 60,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 1,
-                preserve_tail_tokens: 60,
-                deadline_ms: 7,
-                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
-                    tokens: 90,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_skips_when_only_deferred_boundary_is_eligible_in_threshold_overflow_path() {
-        let context = crate::test_support::test_run_context("compaction-strategy-deferred-skip");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 50,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 50,
-            },
-        ]);
-        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-            through_seq: 1,
-            prompt_fingerprint: state.compaction_prompt.fingerprint(),
-        });
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 60,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn evaluate_retries_deferred_boundary_after_prompt_snapshot_changes() {
-        let context = crate::test_support::test_run_context("compaction-strategy-deferred-changed");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-            through_seq: 3,
-            prompt_fingerprint: 42,
-        });
-        state.compaction_state.force_compact_on_next_iteration = true;
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 3,
-                preserve_tail_tokens: 1,
-                deadline_ms: 7,
-                effectiveness_baseline:
-                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 30 },
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_retries_after_transcript_advances_past_deferred_boundary() {
-        let context = crate::test_support::test_run_context("compaction-strategy-deferred-newer");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.force_compact_on_next_iteration = true;
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 4,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 5,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-        ]);
-        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-            through_seq: 3,
-            prompt_fingerprint: state.compaction_prompt.fingerprint(),
-        });
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 5,
-                preserve_tail_tokens: 1,
-                deadline_ms: 7,
-                effectiveness_baseline:
-                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 50 },
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_uses_output_budget_when_larger_than_reserve() {
-        let context = crate::test_support::test_run_context("compaction-strategy-output-budget");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 40,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 35,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 30),
-            preserve_tail_tokens: 1,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 1,
-                preserve_tail_tokens: 1,
-                deadline_ms: 7,
-                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
-                    tokens: 70,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn tail_preserving_user_boundary_respects_minimum_tail_message_count() {
-        let context = crate::test_support::test_run_context("compaction-strategy-min-tail");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 3,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 10,
-            },
-            MessageIndexEntry {
-                sequence: 4,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 10,
-            },
-        ]);
-
-        let boundary = tail_preserving_user_boundary(
-            &state,
-            state.compaction_prompt.fingerprint(),
-            1,
-            2,
-            |_| true,
-        );
-
-        assert_eq!(boundary, Some(1));
-    }
-
-    #[test]
-    fn evaluate_skips_threshold_trigger_when_circuit_is_open() {
-        let context = crate::test_support::test_run_context("compaction-strategy-circuit-open");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.compaction_circuit_open = true;
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 100,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 100,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Skip
-        );
-    }
-
-    #[test]
-    fn evaluate_triggers_forced_compaction_even_when_circuit_is_open() {
-        // BUG B1 regression: force_compact_on_next_iteration is how
-        // context-overflow recovery and byte-cap overflow request a shrink.
-        // An open breaker must not suppress it — only automatic
-        // threshold-triggered compaction is gated.
-        let context =
-            crate::test_support::test_run_context("compaction-strategy-circuit-open-forced");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.compaction_circuit_open = true;
-        state.compaction_state.force_compact_on_next_iteration = true;
-        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-            MessageIndexEntry {
-                sequence: 1,
-                kind: IndexedMessageKind::User,
-                estimated_tokens: 100,
-            },
-            MessageIndexEntry {
-                sequence: 2,
-                kind: IndexedMessageKind::Assistant,
-                estimated_tokens: 100,
-            },
-        ]);
-        let strategy = DefaultCompactionStrategy {
-            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
-            preserve_tail_tokens: 1,
-            deadline_ms: 7,
-        };
-
-        assert_eq!(
-            strategy.should_compact(&state, &context),
-            CompactionDecision::Trigger {
-                drop_through_seq: 1,
-                preserve_tail_tokens: 1,
-                deadline_ms: 7,
-                effectiveness_baseline:
-                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 200 },
-            }
-        );
-    }
-
-    // --- ByteCapStrategy tests ---
-
-    #[test]
-    fn byte_cap_strategy_trips_when_capability_exceeds_cap() {
-        let context = crate::test_support::test_run_context("byte-cap-policy-trips");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        let id = CapabilityId::new("builtin.http").expect("valid capability");
-        // 32_000 is the cap; 32_001 exceeds it.
-        state
-            .post_capability_state
-            .pending_capability_bytes
-            .insert(id, 32_001);
-
-        let strategy = ByteCapStrategy::with_defaults();
-        assert_eq!(
-            strategy.should_force_compact(&state),
-            Some(CompactionInitiator::CapabilityResultOverflow)
-        );
-    }
-
-    #[test]
-    fn byte_cap_strategy_skips_when_under_threshold() {
-        let context = crate::test_support::test_run_context("byte-cap-policy-under");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        let http_id = CapabilityId::new("builtin.http").expect("valid capability");
-        let subagent_id = CapabilityId::new("builtin.spawn_subagent").expect("valid capability");
-        // Both under their respective caps.
-        state
-            .post_capability_state
-            .pending_capability_bytes
-            .insert(http_id, 31_999);
-        state
-            .post_capability_state
-            .pending_capability_bytes
-            .insert(subagent_id, 47_999);
-
-        let strategy = ByteCapStrategy::with_defaults();
-        assert_eq!(strategy.should_force_compact(&state), None);
-    }
-
-    #[test]
-    fn byte_cap_strategy_uses_default_cap_for_unknown_capability() {
-        let context = crate::test_support::test_run_context("byte-cap-policy-unknown");
-        let mut state = LoopExecutionState::initial_for_run(&context);
-        let id = CapabilityId::new("custom.unknown_tool").expect("valid capability");
-        // DEFAULT_FALLBACK_CAP_BYTES is 32_000; 32_001 exceeds it.
-        state
-            .post_capability_state
-            .pending_capability_bytes
-            .insert(id, ByteCapStrategy::DEFAULT_FALLBACK_CAP_BYTES + 1);
-
-        let strategy = ByteCapStrategy::with_defaults();
-        assert_eq!(
-            strategy.should_force_compact(&state),
-            Some(CompactionInitiator::CapabilityResultOverflow)
-        );
-    }
-
-    #[test]
-    fn byte_cap_strategy_empty_accumulator_returns_none() {
-        let context = crate::test_support::test_run_context("byte-cap-policy-empty");
-        let state = LoopExecutionState::initial_for_run(&context);
-        // pending_capability_bytes is empty by default.
-        let strategy = ByteCapStrategy::with_defaults();
-        assert_eq!(strategy.should_force_compact(&state), None);
-    }
-
-    #[test]
-    fn byte_cap_strategy_with_cap_overrides_default_cap() {
-        let ctx = crate::test_support::test_run_context("byte-cap-with-cap");
-        let mut state = LoopExecutionState::initial_for_run(&ctx);
-        let id = CapabilityId::new("custom.large_tool").unwrap();
-        state
-            .post_capability_state
-            .pending_capability_bytes
-            .insert(id.clone(), 5_000);
-        // Default cap (32_000) would NOT trip at 5_000; custom cap of 4_000 should trip.
-        let strategy = ByteCapStrategy::with_defaults().with_cap(id, 4_000);
-        assert_eq!(
-            strategy.should_force_compact(&state),
-            Some(CompactionInitiator::CapabilityResultOverflow)
-        );
-    }
-}
+mod tests;

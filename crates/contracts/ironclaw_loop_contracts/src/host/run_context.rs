@@ -10,6 +10,7 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::context_budget::PromptContextTokenBudget;
 use crate::refs::{CheckpointSchemaId, LoopDriverId};
 use crate::snapshot::ResolvedRunProfile;
 use ironclaw_host_api::turn::{
@@ -245,6 +246,11 @@ pub struct LoopRunContext {
     pub resolved_run_profile: ResolvedRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Prompt context budget resolved from this run's model at host
+    /// construction. `None` — an older serialized context, or a provider that
+    /// advertises no window — means the compiled-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_context_budget: Option<PromptContextTokenBudget>,
     pub loop_driver_id: LoopDriverId,
     pub loop_driver_version: RunProfileVersion,
     pub checkpoint_schema_id: CheckpointSchemaId,
@@ -279,6 +285,7 @@ impl LoopRunContext {
             run_id,
             resolved_run_profile,
             resolved_model_route: None,
+            resolved_context_budget: None,
             loop_driver_id,
             loop_driver_version,
             checkpoint_schema_id,
@@ -344,6 +351,11 @@ impl LoopRunContext {
 
     pub fn with_resolved_model_route(mut self, snapshot: LoopModelRouteSnapshot) -> Self {
         self.resolved_model_route = Some(snapshot);
+        self
+    }
+
+    pub fn with_resolved_context_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.resolved_context_budget = Some(budget);
         self
     }
 

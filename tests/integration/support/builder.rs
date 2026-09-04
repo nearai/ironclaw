@@ -138,6 +138,9 @@ pub(crate) enum StorageReopen {
 pub struct RebornIntegrationHarnessBuilder {
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
+    /// Advertised model context window for this harness's scripted model.
+    /// `None` advertises nothing, which is every pre-existing scenario.
+    advertised_context_window: Option<u32>,
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
@@ -209,6 +212,14 @@ pub struct RebornIntegrationHarnessBuilder {
 }
 
 impl RebornIntegrationHarnessBuilder {
+    /// Make the scripted model advertise a total context window, so the run's
+    /// prompt context budget is derived from it instead of the compiled-in
+    /// default.
+    pub fn advertised_context_window(mut self, tokens: u32) -> Self {
+        self.advertised_context_window = Some(tokens);
+        self
+    }
+
     /// Set the scripted model replies (consumed in order at the raw-provider seam).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
@@ -806,9 +817,11 @@ impl RebornIntegrationHarnessBuilder {
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
-        group
-            .thread(self.conversation_id)
-            .script(self.replies)
+        let mut thread_builder = group.thread(self.conversation_id).script(self.replies);
+        if let Some(tokens) = self.advertised_context_window {
+            thread_builder = thread_builder.advertised_context_window(tokens);
+        }
+        thread_builder
             .model_mode(self.model_mode)
             .record_model_calls_for_test(self.record_model_calls)
             .build()
@@ -903,6 +916,7 @@ impl RebornIntegrationHarness {
         RebornIntegrationHarnessBuilder {
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
+            advertised_context_window: None,
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),

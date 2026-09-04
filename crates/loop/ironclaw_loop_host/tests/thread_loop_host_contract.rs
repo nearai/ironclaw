@@ -26,15 +26,15 @@ use ironclaw_loop_contracts::{
     LoopContextBundle, LoopContextCompactionKind, LoopContextMessage, LoopContextPort,
     LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind,
     LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView,
-    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopModelUsage,
-    LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort,
-    ModelProfileId, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
-    PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, RunProfileResolutionRequest,
-    RunProfileResolver, SkillName, SkillTrustLevel, SkillVisibility, ToolObservationDetail,
-    ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, resolution,
+    LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
+    LoopModelRouteSnapshot, LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch,
+    LoopRunContext, LoopTranscriptPort, ModelProfileId, ModelVisibleToolObservation,
+    ObservationTrust, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+    PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
+    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillName,
+    SkillTrustLevel, SkillVisibility, ToolObservationDetail, ToolObservationStatus,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -49,6 +49,7 @@ use ironclaw_loop_host::{
     SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
     ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
     build_skill_run_snapshot, identity_message_ref, load_canonical_system_inference_context,
 };
 use ironclaw_outbound::{
@@ -396,6 +397,100 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].messages.len(), 1);
     assert_eq!(calls[0].messages[0].content, "latest short");
+}
+
+/// Builds the gateway wrapper the driver host uses in production, with the
+/// fixture's thread and the given budget, so the test drives the same
+/// construction path as `ironclaw_turn_runner`'s `loop_driver_host`.
+fn thread_resolving_gateway(
+    fixture: &ThreadFixture,
+    host_gateway: Arc<RecordingGateway>,
+    prompt_context_budget: PromptContextTokenBudget,
+) -> ThreadResolvingLoopModelGateway<InMemorySessionThreadService, RecordingGateway> {
+    ThreadResolvingLoopModelGateway::new(ThreadResolvingLoopModelGatewayParts {
+        thread_service: Arc::clone(&fixture.thread_service),
+        thread_scope: fixture.thread_scope.clone(),
+        host_gateway,
+        max_messages: 16,
+        skill_context_source: None,
+        identity_context_source: None,
+        instruction_materialization_store: None,
+        capabilities: None,
+        prompt_authority: LoopPromptBundleAuthority::shared(),
+        context_window_cache: None,
+        attachment_read_port: None,
+        prompt_diagnostic_sink: None,
+        prompt_context_budget,
+    })
+}
+
+/// Sends an empty request through the gateway wrapper and returns the
+/// transcript messages the host gateway received.
+async fn messages_forwarded_by_gateway(
+    fixture: &ThreadFixture,
+    prompt_context_budget: PromptContextTokenBudget,
+) -> Vec<String> {
+    let host_gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let gateway = thread_resolving_gateway(fixture, host_gateway.clone(), prompt_context_budget);
+    issue_prompt_grant(&fixture.run_context, &[]);
+
+    LoopModelGateway::stream_model(
+        &gateway,
+        LoopModelGatewayRequest {
+            context: fixture.run_context.clone(),
+            request: LoopModelRequest {
+                inline_messages: Vec::new(),
+                messages: Vec::new(),
+                surface_version: None,
+                model_preference: None,
+                fallback_index: 0,
+                iteration: 0,
+                capability_view: None,
+                tool_choice: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls = host_gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    calls[0]
+        .messages
+        .iter()
+        .map(|message| message.content.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn thread_resolving_gateway_applies_its_prompt_context_budget_to_message_selection() {
+    // The gateway wrapper is what the driver host hands the loop, so a budget
+    // that stops here never reaches the outbound request. The port-level
+    // sibling above proves the port honors a budget; this one proves the
+    // wrapper passes its own budget down instead of the port's default.
+    // Roles alternate because the port coalesces consecutive user text into
+    // one message; alternating keeps the control count honest.
+    let fixture = ThreadFixture::new_with_user_content("old short").await;
+    fixture.append_assistant_reply("assistant reply").await;
+    fixture
+        .accept_user_message("event-2", &"large ".repeat(32))
+        .await;
+    fixture
+        .append_assistant_reply("assistant reply again")
+        .await;
+    fixture.accept_user_message("event-3", "latest short").await;
+
+    let unbudgeted =
+        messages_forwarded_by_gateway(&fixture, PromptContextTokenBudget::default()).await;
+    assert_eq!(
+        unbudgeted.len(),
+        5,
+        "control: the default budget must admit the whole seeded transcript"
+    );
+
+    let budgeted =
+        messages_forwarded_by_gateway(&fixture, PromptContextTokenBudget::new(6, 0, 0)).await;
+    assert_eq!(budgeted, vec!["latest short".to_string()]);
 }
 
 #[tokio::test]
@@ -5986,6 +6081,20 @@ async fn register_reply_attachment(
         )
         .await
         .expect("reply attachment registration");
+}
+
+impl ThreadFixture {
+    async fn append_assistant_reply(&self, content: &str) {
+        self.thread_service
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.thread_id.clone(),
+                turn_run_id: self.run_context.run_id.to_string(),
+                content: MessageContent::text(content),
+            })
+            .await
+            .unwrap();
+    }
 }
 
 async fn finalized_assistant_message(fixture: &ThreadFixture) -> ThreadMessageRecord {

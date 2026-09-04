@@ -133,10 +133,10 @@ use ironclaw_loop_contracts::{
     LoopModelUsage, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
     LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
     LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
-    MemoryPromptContextService, NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, RunScopedHookMilestoneSink,
-    StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    MemoryPromptContextService, NoOpBudgetAccountant, NoOpPolicyGuard, PromptContextTokenBudget,
+    ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, LoopCheckpointStore, RunProfileId,
@@ -1601,8 +1601,15 @@ where
         validate_thread_scope(&effective_scope, &request.loop_run_context)?;
 
         let max_messages = self.config.max_messages.max(1);
-        let prompt_context_budget = self.config.prompt_context_budget;
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+        // Resolve the scope-specific gateway ONCE and reuse the same object
+        // for both the window query below and the gateway construction later
+        // in this function. Asking `self.model_gateway` while the run is
+        // served by a `resolve_for_scope` override would let the budget
+        // describe a different gateway than the one issuing the request.
+        // (Production overrides none -- the trait default returns `None` --
+        // but a test harness that does would get a silently wrong budget.)
+        let scoped_gateway = self.model_gateway.resolve_for_scope(&run_context.scope);
 
         // Kick off advisory communication-context fetches only for origins that
         // can use delivery/channel context. WebUI chat renders its origin without
@@ -1643,6 +1650,47 @@ where
                 .await
         });
 
+        // Ask the run's model how much context it really holds. Deliberately
+        // awaited HERE, after the prefetch kickoffs above, rather than beside
+        // the route resolution: a blocking await placed before them would
+        // serialize three fetches the surrounding code deliberately runs in
+        // parallel. A caller that already supplied a budget is authoritative.
+        //
+        // `model_metadata()` is a static, I/O-free description of the
+        // configured model by the ironclaw_llm contract (CONTRACT.md,
+        // "LlmProvider Trait" key notes), so this await resolves
+        // immediately. ponytail: if that contract is ever relaxed, promote
+        // this to a `tokio::spawn` alongside `user_profile_fetch` instead of
+        // widening the critical path.
+        let run_context = if run_context.resolved_context_budget.is_some() {
+            run_context
+        } else {
+            let profile_id = &run_context.resolved_run_profile.model_profile_id;
+            let route = run_context.resolved_model_route.as_ref();
+            let advertised = match scoped_gateway.as_ref() {
+                Some(gateway) => {
+                    gateway
+                        .advertised_context_window_tokens(profile_id, route)
+                        .await
+                }
+                None => {
+                    self.model_gateway
+                        .advertised_context_window_tokens(profile_id, route)
+                        .await
+                }
+            };
+            match advertised {
+                Some(window) => run_context.with_resolved_context_budget(
+                    PromptContextTokenBudget::from_advertised_window(Some(window)),
+                ),
+                None => run_context,
+            }
+        };
+        // Derived FROM the field, so the two can never disagree.
+        let prompt_context_budget = run_context
+            .resolved_context_budget
+            .unwrap_or(self.config.prompt_context_budget);
+
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
@@ -1650,7 +1698,8 @@ where
             run_context.clone(),
             max_messages,
         )
-        .with_context_window_cache(Arc::clone(&context_window_cache));
+        .with_context_window_cache(Arc::clone(&context_window_cache))
+        .with_prompt_context_token_budget(prompt_context_budget);
         // An unbound run's prepared context is its COMPLETE input by
         // contract: no skill, identity, or memory lane is folded in, so the
         // caller's declared context is exactly what the model sees.
@@ -1956,54 +2005,55 @@ where
         // own `Arc<G>` (G: ?Sized, not coercible to `Arc<dyn _>`) in the fallback —
         // see `build_compaction_ports` above. Each arm moves its owned fields.
         let model_gateway_ports_started_at = ironclaw_observability::live_latency_started_at();
-        let model_gateway: Arc<dyn LoopModelGateway> =
-            if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
-                Arc::new(ThreadResolvingLoopModelGateway::new(
-                    ThreadResolvingLoopModelGatewayParts {
-                        thread_service: Arc::clone(&self.thread_service),
-                        thread_scope: effective_scope.clone(),
-                        host_gateway: gw,
-                        max_messages,
-                        skill_context_source: (!unbound_run)
-                            .then(|| self.skill_context_source.clone())
-                            .flatten(),
-                        identity_context_source: (!unbound_run)
-                            .then(|| self.identity_context_source.clone())
-                            .flatten(),
-                        instruction_materialization_store: Some(Arc::clone(
-                            &instruction_materialization_store,
-                        )),
-                        capabilities: Some(Arc::clone(&capabilities)),
-                        prompt_authority,
-                        context_window_cache: Some(context_window_cache),
-                        attachment_read_port: self.attachment_read_port.clone(),
-                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
-                    },
-                ))
-            } else {
-                Arc::new(ThreadResolvingLoopModelGateway::new(
-                    ThreadResolvingLoopModelGatewayParts {
-                        thread_service: Arc::clone(&self.thread_service),
-                        thread_scope: effective_scope.clone(),
-                        host_gateway: Arc::clone(&self.model_gateway),
-                        max_messages,
-                        skill_context_source: (!unbound_run)
-                            .then(|| self.skill_context_source.clone())
-                            .flatten(),
-                        identity_context_source: (!unbound_run)
-                            .then(|| self.identity_context_source.clone())
-                            .flatten(),
-                        instruction_materialization_store: Some(Arc::clone(
-                            &instruction_materialization_store,
-                        )),
-                        capabilities: Some(Arc::clone(&capabilities)),
-                        prompt_authority,
-                        context_window_cache: Some(context_window_cache),
-                        attachment_read_port: self.attachment_read_port.clone(),
-                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
-                    },
-                ))
-            };
+        let model_gateway: Arc<dyn LoopModelGateway> = if let Some(gw) = scoped_gateway {
+            Arc::new(ThreadResolvingLoopModelGateway::new(
+                ThreadResolvingLoopModelGatewayParts {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: gw,
+                    max_messages,
+                    skill_context_source: (!unbound_run)
+                        .then(|| self.skill_context_source.clone())
+                        .flatten(),
+                    identity_context_source: (!unbound_run)
+                        .then(|| self.identity_context_source.clone())
+                        .flatten(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                    prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                    prompt_context_budget,
+                },
+            ))
+        } else {
+            Arc::new(ThreadResolvingLoopModelGateway::new(
+                ThreadResolvingLoopModelGatewayParts {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: Arc::clone(&self.model_gateway),
+                    max_messages,
+                    skill_context_source: (!unbound_run)
+                        .then(|| self.skill_context_source.clone())
+                        .flatten(),
+                    identity_context_source: (!unbound_run)
+                        .then(|| self.identity_context_source.clone())
+                        .flatten(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                    prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                    prompt_context_budget,
+                },
+            ))
+        };
         let structured_finalization: Option<Arc<dyn StructuredFinalizationPort>> =
             if run_context.output_contract.is_structured_output() {
                 Some(Arc::new(StructuredFinalizationCoordinator::new(
@@ -3195,6 +3245,10 @@ mod compaction_tests;
 #[cfg(test)]
 #[path = "loop_driver_host/run_lease_fence_tests.rs"]
 mod run_lease_fence_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/context_budget_tests.rs"]
+mod context_budget_tests;
 
 #[cfg(test)]
 mod tests {
