@@ -100,7 +100,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **61** group scenarios · **62** flat integration bins (55 in
+Totals: **62** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -108,7 +108,7 @@ Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (61)
+## 3. Group scenarios — `tests/integration/group_*/` (62)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -188,7 +188,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 |---|---|
 | List, install, and remove a skill, with each step visible from a different conversation | `scenario_install_list_remove.rs` |
 
-### 3.7 Linked accounts (device link) — `group_device_link/` (4)
+### 3.7 Linked accounts (device link) — `group_device_link/` (5)
 
 Telegram's **linked-account** surfaces: the real bundled manifest (channel +
 `method = "device_link"` auth + fifteen `standard_op` tools), its
@@ -203,6 +203,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 | Configure the deployment, install Telegram, link their own account, have the assistant read it through a real tool call — and lose that tool the moment the link is revoked | `scenario_link_call_unlink.rs` |
 | Link their own Telegram account without inheriting (or leaking) someone else's — a second person's call acts as themselves | `scenario_actor_isolation.rs` |
 | Have a revoked link park the run on a connect prompt instead of failing silently, then re-link and have the parked call run for real | `scenario_revoked_session_reauth.rs` |
+| Be told plainly, on a deployment whose administrator never configured personal-account access, that the administrator (not their account) is what's missing — a terminal `not_configured` failure recorded as `MalformedConfig` (config, not an outage), with no doomed "Start again" offer (#7955; a new scenario because every existing one runs against a *configured* deployment — this one scripts the vendor `begin` itself failing closed) | `scenario_unconfigured_deployment_fails_closed.rs` |
 | Link their account through the real multi-step handshake — scan, wait, type the account password — keep that personal credential separate from workspace-bot identity and pairing, use it immediately through the assistant, then remove the extension and have the provider device disappear | `scenario_handshake_mints_and_serves.rs` (drives the production `DeviceLinkFlowDriver`: start → poll → submit → completed, asserts the minted account's §4.5 ownership pin and durable custody, proves neither linking nor installing personal-account tools creates a bot-channel identity, proves a linked tool call resolves to that account, then removes the extension through the production lifecycle and observes the scripted provider revoke) |
 
 ### 3.8 Triggers & automations — `group_triggers/` (10)
