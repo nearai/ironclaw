@@ -853,12 +853,7 @@ mod tests {
         );
     }
 
-    /// Build a provider for testing the `prompt_cache_key` gate directly —
-    /// `complete()`/`complete_with_tools()` cannot be driven through a local
-    /// capture server here because Copilot's token exchange targets a
-    /// hardcoded live GitHub endpoint (`GITHUB_COPILOT_TOKEN_URL`), so the
-    /// gating method itself (the same one both call sites use) is the
-    /// wire-shape-adjacent seam this file can test in isolation.
+    /// Build a provider for testing the `prompt_cache_key` gate directly.
     fn test_provider(unsupported_params: Vec<&str>) -> GithubCopilotProvider {
         let config = RegistryProviderConfig::generic(
             crate::registry::ProviderProtocol::GithubCopilot,
@@ -908,6 +903,124 @@ mod tests {
             "thread-cache-key-abc".to_string(),
         );
         assert_eq!(provider.prompt_cache_key(&metadata), None);
+    }
+
+    async fn capture_copilot_request() -> (String, tokio::sync::oneshot::Receiver<serde_json::Value>)
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture server");
+        let address = listener.local_addr().expect("capture server address");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut buffer).await.expect("read request");
+                assert!(count > 0, "request ended before headers");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let body_start = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                        .expect("content-length header");
+                    while request.len() < body_start + content_length {
+                        let count = socket.read(&mut buffer).await.expect("read body");
+                        assert!(count > 0, "request ended before body");
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let body =
+                        serde_json::from_slice(&request[body_start..body_start + content_length])
+                            .expect("request body is JSON");
+                    tx.send(body).expect("test receives captured request");
+                    let response = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{response}",
+                                response.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("write response");
+                    return;
+                }
+            }
+        });
+        (format!("http://{address}"), rx)
+    }
+
+    fn wire_test_provider(base_url: String) -> GithubCopilotProvider {
+        let client = Client::new();
+        GithubCopilotProvider {
+            token_manager: Arc::new(
+                crate::github_copilot_auth::tests::token_manager_with_cached_token(
+                    client.clone(),
+                    "cached-session-token".to_string(),
+                ),
+            ),
+            client,
+            model: "gpt-4o".to_string(),
+            base_url,
+            active_model: std::sync::RwLock::new("gpt-4o".to_string()),
+            extra_headers: Vec::new(),
+            unsupported_params: HashSet::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_sends_prompt_cache_key_on_the_wire() {
+        let (base_url, captured) = capture_copilot_request().await;
+        let provider = wire_test_provider(base_url);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        provider
+            .complete(request)
+            .await
+            .expect("Copilot completion");
+
+        let body = captured.await.expect("captured request");
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-abc");
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_sends_prompt_cache_key_on_the_wire() {
+        let (base_url, captured) = capture_copilot_request().await;
+        let provider = wire_test_provider(base_url);
+        let mut request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search")],
+            vec![ToolDefinition {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        );
+        request.metadata.insert(
+            PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-xyz".to_string(),
+        );
+
+        provider
+            .complete_with_tools(request)
+            .await
+            .expect("Copilot tool completion");
+
+        let body = captured.await.expect("captured request");
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
     }
 
     #[test]

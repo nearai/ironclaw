@@ -13,6 +13,7 @@ use futures::{Stream, StreamExt};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -21,7 +22,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    ToolCompletionResponse, ToolDefinition, prompt_cache_key_from_metadata,
 };
 
 /// OpenAI Codex Responses API provider.
@@ -40,6 +41,7 @@ pub struct OpenAiCodexProvider {
     model: String,
     api_base_url: String,
     auth: RwLock<AuthState>,
+    unsupported_params: HashSet<String>,
 }
 
 impl OpenAiCodexProvider {
@@ -70,7 +72,13 @@ impl OpenAiCodexProvider {
                 token: token.to_string(),
                 account_id,
             }),
+            unsupported_params: HashSet::new(),
         })
+    }
+
+    pub(crate) fn with_unsupported_params(mut self, unsupported_params: Vec<String>) -> Self {
+        self.unsupported_params = unsupported_params.into_iter().collect();
+        self
     }
 
     /// Update the access token after a refresh.
@@ -195,8 +203,10 @@ impl OpenAiCodexProvider {
         // Stable per-conversation routing key for OpenAI's prompt cache. Only
         // the thread id qualifies: a per-run key would fragment the cache
         // across a conversation's turns instead of reusing it.
-        if let Some(thread_id) = metadata.get(crate::provider::PROMPT_CACHE_KEY_METADATA) {
-            body["prompt_cache_key"] = serde_json::Value::String(thread_id.clone());
+        if let Some(prompt_cache_key) =
+            prompt_cache_key_from_metadata(&self.unsupported_params, metadata)
+        {
+            body["prompt_cache_key"] = serde_json::Value::String(prompt_cache_key);
         }
 
         body
@@ -1727,6 +1737,26 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
         let body = captured_json(captured).await;
 
         assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
+    }
+
+    #[tokio::test]
+    async fn complete_public_path_omits_prompt_cache_key_when_unsupported() {
+        let (base_url, captured) = capture_one_request().await;
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new("gpt-5.3-codex", &base_url, &jwt, 5)
+            .unwrap()
+            .with_unsupported_params(vec!["prompt_cache_key".to_string()]);
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        let _ = provider.complete(request).await;
+        let body = captured_json(captured).await;
+
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]

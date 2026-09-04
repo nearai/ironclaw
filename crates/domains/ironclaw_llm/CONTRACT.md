@@ -408,15 +408,17 @@ regardless of which wire shape a turn happens to use:
   field/gate shape on `OpenAiRequest`, populated in `complete()` and
   `complete_with_tools()`.
 
-**Kill switch**: `RegistryProviderConfig`/`NearAiConfig.unsupported_params`
+**Kill switch**: `RegistryProviderConfig`/dedicated provider
+`unsupported_params`
 accepts `"prompt_cache_key"` (validated against `registry.rs`'s
 shared `provider.rs::UnsupportedParam::VALID_NAMES`) so an operator can
 suppress the field per provider when a server 400s on unknown fields. The
 shared `provider.rs::prompt_cache_key_from_metadata` helper applies that gate
-before reading metadata for rig, NEAR AI, and GitHub Copilot adapters. Catalog
-resolution carries the same list through `RegistryProviderConfig` or
-`ResolvedDedicatedProviderConfig`; the latter populates `NearAiConfig` for the
-dedicated NEAR AI backend.
+before reading metadata for rig, NEAR AI, GitHub Copilot, Codex ChatGPT, and
+OpenAI Codex adapters. Catalog resolution carries the same list through
+`RegistryProviderConfig` or `ResolvedDedicatedProviderConfig`; the latter
+populates `NearAiConfig` or `OpenAiCodexConfig` for the corresponding dedicated
+backend.
 
 ## rig_adapter.rs Details
 

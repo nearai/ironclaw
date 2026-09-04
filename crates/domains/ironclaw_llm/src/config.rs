@@ -173,6 +173,8 @@ pub struct OpenAiCodexConfig {
     pub session_path: PathBuf,
     /// Seconds before expiry to proactively refresh (default: 300).
     pub token_refresh_margin_secs: u64,
+    /// Parameter names suppressed from outbound Responses API requests.
+    pub unsupported_params: Vec<String>,
 }
 
 impl Default for OpenAiCodexConfig {
@@ -184,6 +186,7 @@ impl Default for OpenAiCodexConfig {
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
             session_path: ironclaw_base_dir().join("openai_codex_session.json"),
             token_refresh_margin_secs: 300,
+            unsupported_params: Vec::new(),
         }
     }
 }
@@ -210,6 +213,7 @@ impl OpenAiCodexConfig {
             session_path: session_path.unwrap_or(defaults.session_path),
             token_refresh_margin_secs: token_refresh_margin_secs
                 .unwrap_or(defaults.token_refresh_margin_secs),
+            unsupported_params: defaults.unsupported_params,
         }
     }
 }

@@ -304,7 +304,8 @@ fn create_codex_chatgpt_from_registry(
         config.refresh_token.clone(),
         config.auth_path.clone(),
         request_timeout_secs,
-    )?;
+    )?
+    .with_unsupported_params(config.unsupported_params.clone());
 
     Ok(Arc::new(provider))
 }
@@ -901,12 +902,15 @@ async fn create_openai_codex_provider(
 
     let token = session_mgr.get_access_token().await?;
 
-    let provider = Arc::new(OpenAiCodexProvider::new(
-        &codex.model,
-        &codex.api_base_url,
-        token.expose_secret(),
-        config.request_timeout_secs,
-    )?);
+    let provider = Arc::new(
+        OpenAiCodexProvider::new(
+            &codex.model,
+            &codex.api_base_url,
+            token.expose_secret(),
+            config.request_timeout_secs,
+        )?
+        .with_unsupported_params(codex.unsupported_params.clone()),
+    );
 
     tracing::info!(
         "Using OpenAI Codex (Responses API, model: {}, base: {})",
@@ -2079,6 +2083,64 @@ mod tests {
                 "{provider_id} must carry the shared cache key",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn codex_chatgpt_factory_honors_prompt_cache_key_kill_switch() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept model request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read model request");
+                assert!(read > 0, "model request ended before headers");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("reject model request");
+            capture_request_body(listener).await
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "codex_chatgpt",
+            Some(secrecy::SecretString::from("test-key".to_string())),
+            format!("http://{address}"),
+            "gpt-4o",
+        )
+        .with_unsupported_params(vec!["prompt_cache_key".to_string()]);
+        config.is_codex_chatgpt = true;
+        let provider = create_registry_provider_inner(&config, 5)
+            .expect("Codex ChatGPT provider construction succeeds");
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+
+        provider
+            .complete(request)
+            .await
+            .expect_err("loopback server intentionally rejects the request");
+        let body = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("loopback server must observe a request")
+            .expect("loopback server task");
+        let body: serde_json::Value =
+            serde_json::from_str(&body).expect("request body is valid JSON");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "the registry factory must carry the prompt-cache kill switch",
+        );
     }
 
     /// Regression for Qwen 3.8 responses whose final non-streaming message

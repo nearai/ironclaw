@@ -22,6 +22,7 @@ use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +34,7 @@ use crate::error::LlmError;
 use super::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition,
+    ToolDefinition, prompt_cache_key_from_metadata,
 };
 
 /// Sanitize a tool name to match the Responses API pattern `^[a-zA-Z0-9_-]+$`.
@@ -186,6 +187,7 @@ pub(crate) struct CodexChatGptProvider {
     request_timeout: Duration,
     /// Prevent concurrent 401 handlers from racing the same refresh token.
     refresh_lock: Mutex<()>,
+    unsupported_params: HashSet<String>,
 }
 
 impl CodexChatGptProvider {
@@ -202,6 +204,7 @@ impl CodexChatGptProvider {
             auth_path: None,
             request_timeout: Duration::from_secs(120),
             refresh_lock: Mutex::new(()),
+            unsupported_params: HashSet::new(),
         }
     }
 
@@ -255,7 +258,13 @@ impl CodexChatGptProvider {
             auth_path,
             request_timeout: Duration::from_secs(request_timeout_secs),
             refresh_lock: Mutex::new(()),
+            unsupported_params: HashSet::new(),
         })
+    }
+
+    pub(crate) fn with_unsupported_params(mut self, unsupported_params: Vec<String>) -> Self {
+        self.unsupported_params = unsupported_params.into_iter().collect();
+        self
     }
 
     /// Resolve the model to use, lazily on first call.
@@ -423,8 +432,10 @@ impl CodexChatGptProvider {
         // Stable per-conversation routing key for OpenAI's prompt cache. Only
         // the thread id qualifies: a per-run key would fragment the cache
         // across a conversation's turns instead of reusing it.
-        if let Some(thread_id) = metadata.get(crate::provider::PROMPT_CACHE_KEY_METADATA) {
-            body["prompt_cache_key"] = Value::String(thread_id.clone());
+        if let Some(prompt_cache_key) =
+            prompt_cache_key_from_metadata(&self.unsupported_params, metadata)
+        {
+            body["prompt_cache_key"] = Value::String(prompt_cache_key);
         }
 
         body
@@ -1793,6 +1804,24 @@ mod tests {
         let body = captured_completion_json(captured).await;
 
         assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
+    }
+
+    #[tokio::test]
+    async fn complete_public_path_omits_prompt_cache_key_when_unsupported() {
+        let (base_url, captured) = capture_completion_request().await;
+        let provider = CodexChatGptProvider::new(&base_url, "key", "gpt-4o")
+            .with_unsupported_params(vec!["prompt_cache_key".to_string()]);
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        let _ = provider.complete(request).await;
+        let body = captured_completion_json(captured).await;
+
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]

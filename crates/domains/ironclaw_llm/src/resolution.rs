@@ -131,13 +131,13 @@ pub fn resolve_provider_config_from_env(
         if provider.protocol == ProviderProtocol::OpenAiCodex
             && (codex_auth_enabled_from_env() || nonempty_env("CODEX_AUTH_PATH").is_some())
         {
-            return resolve_codex_cli_auth_provider().map(Some);
+            return resolve_codex_cli_auth_provider(provider.unsupported_params.clone()).map(Some);
         }
         return resolve_provider_definition_from_env(provider).map(Some);
     }
 
     if codex_auth_enabled_from_env() {
-        return resolve_codex_cli_auth_provider().map(Some);
+        return resolve_codex_cli_auth_provider(Vec::new()).map(Some);
     }
 
     let registry = ProviderRegistry::load_from_path(user_providers_path);
@@ -221,14 +221,16 @@ pub fn build_llm_config_from_resolved_provider(
                 ));
             }
             ProviderProtocol::OpenAiCodex => {
-                openai_codex = Some(OpenAiCodexConfig::build(
+                let mut config = OpenAiCodexConfig::build(
                     Some(dedicated.model.clone()),
                     nonempty_env("OPENAI_CODEX_AUTH_URL"),
                     nonempty_env("OPENAI_CODEX_API_URL"),
                     nonempty_env("OPENAI_CODEX_CLIENT_ID"),
                     nonempty_env("OPENAI_CODEX_SESSION_PATH").map(PathBuf::from),
                     parse_optional_u64("OPENAI_CODEX_REFRESH_MARGIN_SECS", "openai_codex")?,
-                ));
+                );
+                config.unsupported_params = dedicated.unsupported_params;
+                openai_codex = Some(config);
             }
             ProviderProtocol::OpenAiCompletions
             | ProviderProtocol::Anthropic
@@ -368,7 +370,9 @@ fn resolve_provider_definition(
     }
 }
 
-fn resolve_codex_cli_auth_provider() -> Result<ResolvedProviderConfig, LlmError> {
+fn resolve_codex_cli_auth_provider(
+    unsupported_params: Vec<String>,
+) -> Result<ResolvedProviderConfig, LlmError> {
     let auth_path = nonempty_env("CODEX_AUTH_PATH").map(PathBuf::from);
     let credentials =
         auth::load_persisted_credentials(CredentialSource::CodexCli, auth_path.as_deref())
@@ -404,6 +408,7 @@ fn resolve_codex_cli_auth_provider() -> Result<ResolvedProviderConfig, LlmError>
     registry_config.is_codex_chatgpt = credentials.is_subscription;
     registry_config.refresh_token = credentials.refresh_token;
     registry_config.auth_path = credentials.source_path;
+    registry_config.unsupported_params = unsupported_params;
 
     Ok(ResolvedProviderConfig::Registry(registry_config))
 }
@@ -906,6 +911,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn codex_auth_env_route_preserves_catalog_unsupported_params() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        let directory = tempfile::tempdir().expect("temporary catalog directory");
+        let providers_path = directory.path().join("providers.json");
+        let auth_path = directory.path().join("auth.json");
+        std::fs::write(
+            &providers_path,
+            r#"[{
+                "id": "openai_codex",
+                "aliases": ["openai-codex", "codex"],
+                "protocol": "openai_codex",
+                "api_key_required": false,
+                "model_env": "OPENAI_CODEX_MODEL",
+                "default_model": "gpt-5.5",
+                "description": "OpenAI Codex test override",
+                "unsupported_params": ["prompt_cache_key"]
+            }]"#,
+        )
+        .expect("write provider overlay");
+        std::fs::write(
+            &auth_path,
+            r#"{"auth_mode":"chatgpt","tokens":{"id_token":{},"access_token":"test-token","refresh_token":"test-refresh"}}"#,
+        )
+        .expect("write Codex auth fixture");
+        env.set("LLM_BACKEND", "openai_codex");
+        env.set(
+            "CODEX_AUTH_PATH",
+            auth_path.to_str().expect("UTF-8 auth path"),
+        );
+
+        let resolved = resolve_provider_config_from_env(Some(&providers_path))
+            .expect("Codex auth route should resolve")
+            .expect("Codex provider config");
+        let ResolvedProviderConfig::Registry(config) = resolved else {
+            panic!("Codex auth resolves to a registry-backed Responses provider");
+        };
+
+        assert_eq!(
+            config.unsupported_params,
+            vec!["prompt_cache_key".to_string()],
+            "the Codex auth shortcut must retain the selected catalog kill switch",
+        );
+    }
+
     /// Regression for the Reborn onboarding bug (#4079 introduced the
     /// precedence, #4481's WebUI onboarding made it user-visible): an explicit
     /// model/base_url the operator picked in the UI must win over the ambient
@@ -971,6 +1022,32 @@ mod tests {
             config.nearai.unsupported_params,
             vec!["prompt_cache_key".to_string()],
             "the dedicated NEAR AI path must retain the catalog kill switch",
+        );
+    }
+
+    #[test]
+    fn openai_codex_resolution_preserves_catalog_unsupported_params() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let _env = EnvGuard::clear(CHAIN_ENV_VARS);
+        let config = build_llm_config_from_resolved_provider(ResolvedProviderConfig::Dedicated(
+            ResolvedDedicatedProviderConfig {
+                protocol: ProviderProtocol::OpenAiCodex,
+                provider_id: "openai_codex".to_string(),
+                api_key: None,
+                base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                unsupported_params: vec!["prompt_cache_key".to_string()],
+            },
+        ))
+        .expect("OpenAI Codex config should resolve");
+
+        assert_eq!(
+            config
+                .openai_codex
+                .expect("dedicated OpenAI Codex config")
+                .unsupported_params,
+            vec!["prompt_cache_key".to_string()],
+            "the dedicated Responses path must retain the catalog kill switch",
         );
     }
 
