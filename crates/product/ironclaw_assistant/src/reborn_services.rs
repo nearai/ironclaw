@@ -14,8 +14,8 @@ use std::{
 };
 
 use ironclaw_product_contracts::admin_users::{
-    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, AdminCreateUserFields,
-    AdminUserError, AdminUserRecord, AdminUserService, AdminUserStatus,
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, AdminApiTokenMinter,
+    AdminCreateUserFields, AdminUserError, AdminUserRecord, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 use ironclaw_product_contracts::lifecycle_service::{
@@ -94,9 +94,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
-    CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService, CommandAudience,
+    CommandResultField, CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
     PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID,
@@ -216,6 +216,10 @@ use ironclaw_notifications::{
     NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
     PublishNotificationRequest,
 };
+use ironclaw_product_contracts::approval_inbox::{
+    APPROVALS_PENDING_VIEW, ProductListPendingApprovalsRequest,
+    ProductListPendingApprovalsResponse, ProductPendingApproval, ProductPendingApprovalAction,
+};
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
     ProductView,
@@ -275,6 +279,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
     SettingsToolPermissionState,
+};
+use ironclaw_product_contracts::session_tokens::{
+    ProductMintSessionTokenRequest, ProductMintSessionTokenResponse, SESSION_TOKEN_MINT_COMMAND_ID,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -2541,6 +2548,11 @@ pub struct RebornServices<
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     ironhub_link: Option<Arc<dyn IronhubLinkService>>,
+    // DEMO SCOPE: self-serve bearer mint. Genuinely optional — wired only when
+    // the deployment has an admin token minter — mirrors the sibling optional
+    // `ironhub_link` field. Superseded by device-code pairing; delete with the
+    // Settings Devices tab.
+    session_token_minter: Option<Arc<dyn AdminApiTokenMinter>>,
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
@@ -2642,6 +2654,7 @@ where
             skill_activation_clearer: None,
             llm_config: None,
             ironhub_link: None,
+            session_token_minter: None,
             active_model_reader: None,
             operator_approval_config: None,
             diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
@@ -2742,6 +2755,13 @@ where
         self
     }
 
+    // DEMO SCOPE: see the field's doc comment. Delete with the Settings
+    // Devices tab.
+    pub fn with_session_token_minter(mut self, minter: Arc<dyn AdminApiTokenMinter>) -> Self {
+        self.session_token_minter = Some(minter);
+        self
+    }
+
     pub async fn ironhub_deliver_install(
         &self,
         caller: ProductSurfaceCaller,
@@ -2755,6 +2775,32 @@ where
             .deliver_install(caller, request)
             .await
             .map_err(ironhub_link::map_ironhub_link_error)
+    }
+
+    // DEMO SCOPE: see the `session_token_minter` field's doc comment. Delete
+    // with the Settings Devices tab.
+    async fn mint_session_token(
+        &self,
+        caller: ProductSurfaceCaller,
+        _request: ProductMintSessionTokenRequest,
+    ) -> Result<ProductMintSessionTokenResponse, ProductSurfaceError> {
+        let Some(minter) = &self.session_token_minter else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::Unavailable,
+                503,
+                false,
+            ));
+        };
+        let secret = minter
+            .mint(&caller.tenant_id, &caller.user_id)
+            .await
+            .map_err(|reason| {
+                tracing::warn!(%reason, "session token mint failed");
+                ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
+            })?;
+        Ok(ProductMintSessionTokenResponse {
+            token: secret.expose_secret().to_string(),
+        })
     }
 
     /// Wire the read-only port exposing the runtime's live active/default model
@@ -4571,6 +4617,12 @@ where
                     .await?;
                 let next_cursor = response.next_cursor.clone();
                 views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == APPROVALS_PENDING_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let response = self.build_pending_approvals_view(caller, request).await?;
+                views::view_page(response)
             }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
@@ -6590,6 +6642,131 @@ where
             }
             Err(err) => Err(map_ownership_probe_error(err)),
         }
+    }
+
+    /// Flat, caller-scoped pending-approval listing across every thread the
+    /// caller can see — both browser-bound threads and automation-owned
+    /// threads the caller's automations created. Candidate threads come from
+    /// the durable notification inbox (the same store the notifications view
+    /// reads), which already tracks which threads currently carry an
+    /// unresolved `ApprovalRequired` entry for this caller; per-thread
+    /// authorization and the actual gate list still come from the same
+    /// canonical read models `pending_approvals_for_thread_scope` and the
+    /// automation candidate scan already use, so this view adds no new
+    /// authority path.
+    async fn build_pending_approvals_view(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductListPendingApprovalsRequest,
+    ) -> Result<ProductListPendingApprovalsResponse, ProductSurfaceError> {
+        let limit = request.limit.unwrap_or(20).clamp(1, 50) as usize;
+
+        let page = self
+            .notification_inbox
+            .list(ListNotificationsRequest {
+                recipient: notification_recipient(&caller),
+                limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                cursor: None,
+                include_archived: false,
+            })
+            .await
+            .map_err(map_notification_inbox_error)?;
+
+        let mut visited_threads = HashSet::new();
+        let mut approvals: Vec<PendingApprovalInteractionView> = Vec::new();
+        let mut thread_titles: HashMap<ThreadId, Option<String>> = HashMap::new();
+
+        for notification in page.notifications {
+            if notification.kind != NotificationKind::ApprovalRequired
+                || notification.resolved_at.is_some()
+            {
+                continue;
+            }
+            let thread_id = notification.source.thread_id;
+            if !visited_threads.insert(thread_id.clone()) {
+                continue;
+            }
+            let actor = caller.actor();
+            let scope = caller.turn_scope(thread_id);
+            match self
+                .resolve_thread_access_for_caller(caller.clone(), scope, &actor)
+                .await
+            {
+                Ok(access) => {
+                    let pending = self
+                        .pending_approvals_for_thread_scope(&access.scope, &access.run_actor)
+                        .await?;
+                    approvals.extend(pending);
+                }
+                Err(error) if error.code == ProductSurfaceErrorCode::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        if let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) {
+            let candidates = self
+                .automation_approval_thread_candidates(&bound_caller)
+                .await?;
+            for candidate in candidates {
+                if !visited_threads.insert(candidate.thread_id.clone()) {
+                    continue;
+                }
+                let Some(approval_thread) = self
+                    .automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                for approval in &approval_thread.approvals {
+                    thread_titles
+                        .entry(approval.scope.thread_id.clone())
+                        .or_insert_with(|| approval_thread.record.title.clone());
+                }
+                approvals.extend(approval_thread.approvals);
+            }
+        }
+
+        // An approval visible through both the notification inbox and the
+        // automation scan collapses to one entry; the gate ref is the
+        // durable identity of a single approval decision.
+        let mut seen_gate_refs = HashSet::new();
+        approvals.retain(|approval| seen_gate_refs.insert(approval.gate_ref.clone()));
+        approvals.truncate(limit);
+
+        let approvals = approvals
+            .into_iter()
+            .map(|approval| {
+                let thread_id = approval.scope.thread_id.clone();
+                ProductPendingApproval {
+                    thread_id: thread_id.to_string(),
+                    run_id: approval.run_id.to_string(),
+                    gate_ref: approval.gate_ref.as_str().to_string(),
+                    approval_request_id: approval.approval_request_id.to_string(),
+                    summary: approval.summary,
+                    action: match approval.action {
+                        ApprovalInteractionActionView::Dispatch { capability_id } => {
+                            ProductPendingApprovalAction::Dispatch {
+                                capability_id: capability_id.to_string(),
+                            }
+                        }
+                        ApprovalInteractionActionView::SpawnCapability { capability_id } => {
+                            ProductPendingApprovalAction::SpawnCapability {
+                                capability_id: capability_id.to_string(),
+                            }
+                        }
+                        ApprovalInteractionActionView::Other => ProductPendingApprovalAction::Other,
+                    },
+                    thread_title: thread_titles.get(&thread_id).cloned().flatten(),
+                }
+            })
+            .collect();
+
+        Ok(ProductListPendingApprovalsResponse { approvals })
     }
 
     async fn resolve_projection_subscription_request(

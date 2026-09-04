@@ -285,8 +285,23 @@ registerPack("en", {
   "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
+  "settings.devices": "Devices",
 
   // Settings — usage tab
+
+  // Settings — Devices tab (DEMO SCOPE: self-serve connect-link; superseded
+  // by device-code pairing, delete with the tab)
+  "devices.title": "Connect a device",
+  "devices.description":
+    "Generate a one-time link to connect another client to your account.",
+  "devices.generateLink": "Generate connect link",
+  "devices.generating": "Generating…",
+  "devices.newLink": "New link",
+  "devices.copyLink": "Copy link",
+  "devices.copied": "Copied",
+  "devices.qrAlt": "Scan with the Companion app",
+  "devices.mintFailed": "Could not generate a connect link.",
+  "devices.note": "Anyone with this link can act as you. It stays valid until you rotate it.",
 
   // Settings — Trace Commons credits (read-only)
   "traceCommons.title": "Trace Commons credits",

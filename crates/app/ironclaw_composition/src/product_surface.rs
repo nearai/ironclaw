@@ -114,6 +114,10 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // Admin user-management surface: the directory and secret provisioner are
     // core runtime handles; only token minting is deployment-supplied.
     if let Some(minter) = runtime.reborn_admin_token_minter() {
+        // DEMO SCOPE: self-serve session-token mint reuses the same minter;
+        // superseded by device-code pairing. Delete with the Settings Devices
+        // tab.
+        api = api.with_session_token_minter(Arc::clone(&minter));
         api = api.with_admin_user_service(Arc::new(
             ironclaw_assistant::RebornAdminUserDirectory::new(
                 runtime.reborn_user_directory(),

@@ -12,6 +12,10 @@ import type { GatewayOutletContext } from "../../layout/gateway-layout";
 const AppearanceTab = React.lazy(() =>
   import("./components/appearance-tab").then(({ AppearanceTab }) => ({ default: AppearanceTab }))
 );
+// DEMO SCOPE: see components/devices-tab.tsx's own header comment.
+const DevicesTab = React.lazy(() =>
+  import("./components/devices-tab").then(({ DevicesTab }) => ({ default: DevicesTab }))
+);
 const InferenceTab = React.lazy(() =>
   import("./components/inference-tab").then(({ InferenceTab }) => ({ default: InferenceTab }))
 );
@@ -85,6 +89,7 @@ export function SettingsPage() {
     skills: (<SkillsTab searchQuery={searchQuery} />),
     traces: (<TraceCommonsTab searchQuery={searchQuery} />),
     language: (<LanguageTab searchQuery={searchQuery} />),
+    devices: (<DevicesTab searchQuery={searchQuery} />),
   };
 
   const tabContentHas = (id) => Object.prototype.hasOwnProperty.call(tabContent, id);

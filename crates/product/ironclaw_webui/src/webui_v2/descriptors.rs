@@ -31,9 +31,13 @@ use run_action_descriptors::{
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
 pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
+// DEMO SCOPE: self-serve session-token mint; superseded by device-code
+// pairing. Delete with the Settings Devices tab.
+pub const WEBUI_V2_ROUTE_MINT_SESSION_TOKEN: &str = "webui.v2.mint_session_token";
 pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_LIST_NOTIFICATIONS: &str = "webui.v2.list_notifications";
+pub const WEBUI_V2_ROUTE_LIST_PENDING_APPROVALS: &str = "webui.v2.list_pending_approvals";
 pub const WEBUI_V2_ROUTE_MARK_NOTIFICATION_READ: &str = "webui.v2.mark_notification_read";
 pub const WEBUI_V2_ROUTE_MARK_ALL_NOTIFICATIONS_READ: &str = "webui.v2.mark_all_notifications_read";
 pub const WEBUI_V2_ROUTE_ARCHIVE_NOTIFICATION: &str = "webui.v2.archive_notification";
@@ -158,6 +162,7 @@ pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT: &str =
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_NOTIFICATIONS: &str = "/api/webchat/v2/notifications";
+pub const WEBUI_V2_PATTERN_LIST_PENDING_APPROVALS: &str = "/api/webchat/v2/approvals/pending";
 pub const WEBUI_V2_PATTERN_MARK_NOTIFICATION_READ: &str =
     "/api/webchat/v2/notifications/{notification_id}/read";
 pub const WEBUI_V2_PATTERN_MARK_ALL_NOTIFICATIONS_READ: &str =
@@ -166,6 +171,7 @@ pub const WEBUI_V2_PATTERN_ARCHIVE_NOTIFICATION: &str =
     "/api/webchat/v2/notifications/{notification_id}/archive";
 pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
+pub const WEBUI_V2_PATTERN_MINT_SESSION_TOKEN: &str = "/api/webchat/v2/session/tokens";
 pub const WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE: &str =
     "/api/webchat/v2/channels/{extension_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
@@ -331,11 +337,13 @@ pub fn webui_v2_routes_with_artifact_flags(
 ) -> Vec<IngressRouteDescriptor> {
     let mut routes = vec![
         get_session_descriptor(),
+        mint_session_token_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
         session_channel_message_descriptor(),
         list_threads_descriptor(),
         list_notifications_descriptor(),
+        list_pending_approvals_descriptor(),
         mark_notification_read_descriptor(),
         mark_all_notifications_read_descriptor(),
         archive_notification_descriptor(),
@@ -508,6 +516,22 @@ fn get_session_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
+        ),
+    )
+}
+
+// DEMO SCOPE: see the route id's doc comment. Delete with the Settings
+// Devices tab.
+fn mint_session_token_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_MINT_SESSION_TOKEN,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_MINT_SESSION_TOKEN,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            rate_limit_per_caller(5, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1056,6 +1080,20 @@ fn list_notifications_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_LIST_NOTIFICATIONS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_LIST_NOTIFICATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn list_pending_approvals_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_PENDING_APPROVALS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_PENDING_APPROVALS,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

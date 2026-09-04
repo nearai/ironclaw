@@ -14,7 +14,7 @@
 // envelope mirrors `ProductSurfaceError`.
 
 const TOKEN_KEY = "ironclaw_token";
-const V2_BASE = "/api/webchat/v2";
+export const V2_BASE = "/api/webchat/v2";
 
 export type ApiRecord = Record<string, unknown>;
 export type ApiDecoder<T> = (value: unknown) => T;

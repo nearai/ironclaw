@@ -45,6 +45,9 @@ pub(super) enum ProductCommandHandler {
     SuggestionsGenerate,
     SuggestionStart,
     SuggestionDismiss,
+    // DEMO SCOPE: see `session_tokens` contract module doc comment. Delete
+    // with the Settings Devices tab.
+    SessionTokenMint,
 }
 
 impl ProductCommandHandler {
@@ -92,6 +95,7 @@ impl ProductCommandHandler {
             SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
             SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
             SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
+            SESSION_TOKEN_MINT_COMMAND_ID => Some(Self::SessionTokenMint),
             _ => None,
         }
     }
@@ -383,6 +387,10 @@ impl ProductCommandHandler {
                     .dismiss_suggestion(caller, product_command_input(input)?)
                     .await?,
             ),
+            Self::SessionTokenMint => {
+                let request: ProductMintSessionTokenRequest = product_command_input(input)?;
+                command_output(services.mint_session_token(caller, request).await?)
+            }
         }
     }
 }
