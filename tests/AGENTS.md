@@ -414,7 +414,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1180 top-level tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1181 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -434,6 +434,7 @@ entries.
 | Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_reborn_webui_v2_legacy_message_persistence.py`, `test_message_persistence.py` (10) |
 | Type a draft while a run is processing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_accepts_draft_while_run_is_processing` |
 | Click "+ New" or open a thread and start typing immediately — focus lands in the composer without a second click | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_takes_focus_from_sidebar_navigation` |
+| Navigate a long slash-command menu without losing the active option below the scroll viewport | `test_reborn_webui_v2_smoke.py::test_reborn_v2_command_menu_keeps_keyboard_selection_visible` |
 | Start a new chat while a run is active (the #5256 deadlock regression) | `test_reborn_webui_v2_smoke.py` |
 | Page through older messages/threads without losing scroll position | `test_reborn_webui_v2_smoke.py::test_reborn_v2_timeline_pagination`, `…::test_reborn_v2_loading_older_messages_preserves_viewport` |
 | Keep DOM bounded on huge histories, without SSE timer leaks | `test_reborn_webui_v2_legacy_dom_resource_limits.py` (4) |
