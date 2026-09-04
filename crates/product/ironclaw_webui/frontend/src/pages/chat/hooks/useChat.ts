@@ -1183,6 +1183,20 @@ export function useChat(threadId) {
     [threadId, setMessages, seedThreadMessages, t],
   );
 
+  const dismissCommandResult = React.useCallback(
+    (messageId) => {
+      setMessages((previous) =>
+        previous.filter(
+          (message) =>
+            message.id !== messageId ||
+            message.role !== CHAT_MESSAGE_ROLES.SYSTEM ||
+            !message.commandResult,
+        ),
+      );
+    },
+    [setMessages],
+  );
+
   return {
     // v2-native
     messages,
@@ -1198,6 +1212,7 @@ export function useChat(threadId) {
     cooldownSeconds,
     send,
     runCommand,
+    dismissCommandResult,
     resolveGate,
     submitAuthToken,
     startOnboardingOAuth,

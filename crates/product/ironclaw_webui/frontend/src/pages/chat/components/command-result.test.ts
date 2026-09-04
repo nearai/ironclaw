@@ -53,6 +53,23 @@ test("a success result renders a heading, left-aligned field rows, and readable 
   );
 });
 
+test("a structured command result exposes an accessible dismissal action", async () => {
+  const { CommandResult } = await import("./command-result");
+  const html = renderToStaticMarkup(
+    React.createElement(CommandResult, {
+      response: {
+        command: "status",
+        result: { title: "Status", fields: [], lines: [] },
+      },
+      onDismiss: () => {},
+    }),
+  );
+
+  assert.match(html, /data-testid="command-result-dismiss"/);
+  assert.match(html, /aria-label="common\.dismiss"/);
+  assert.match(html, /data-icon="close"/);
+});
+
 test("a run-id-shaped field value renders monospace, truncatable, with a copy affordance", async () => {
   const { CommandResult } = await import("./command-result");
   const runId = "1b9894d9-3f21-4a10-9abc-def012345678";
