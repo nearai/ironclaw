@@ -106,7 +106,7 @@ ironclaw_resources = { path = "../../kernel/ironclaw_resources", features = ["te
 ironclaw_slack_extension = { path = "../packages/slack" }
 http-body-util = "0.1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 # Installs a level-appropriate subscriber so a `tracing` body actually runs
 # under test: `tracing` short-circuits on the null dispatcher, so without one

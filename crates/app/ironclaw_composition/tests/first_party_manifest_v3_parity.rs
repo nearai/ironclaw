@@ -898,6 +898,8 @@ fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
         [
             "/bot{telegram_bot_token}/setWebhook",
             "/bot{telegram_bot_token}/deleteWebhook",
+            "/bot{telegram_bot_token}/setMyCommands",
+            "/bot{telegram_bot_token}/deleteMyCommands",
             "/bot{telegram_bot_token}/sendMessage",
             "/bot{telegram_bot_token}/deleteMessage",
             "/bot{telegram_bot_token}/setMessageReaction",

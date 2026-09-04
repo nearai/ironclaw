@@ -530,7 +530,11 @@ attached by composition to the same `surfaces.reply` slot every package-bound
 sink uses. Lifecycle wiring is manifest
 data too: `[channel.ingress.registration]` and `.deregistration` replace the
 old activation/cleanup hooks and run through restricted egress with host-side
-credential injection.
+credential injection. A channel may declare further activation-time vendor
+calls beside the wiring pair — `[[channel.ingress.activation_calls]]`
+(fail-closed, after registration; e.g. Telegram's `setMyCommands` command
+menu) and `[[channel.ingress.deactivation_calls]]` (best-effort per recipe,
+after deregistration) — same recipe grammar, same egress, at most 8 per list.
 
 `receive` returns a **complete** normalized outcome. It may use only the
 manifest-restricted egress provided for this verified installation. Vendor

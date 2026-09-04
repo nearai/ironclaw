@@ -19,6 +19,11 @@ ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 # turn-navigation window against the REAL DEFAULT_MAX_RETAINED_RUNS_PER_SESSION
 # rather than a transcribed copy that could drift with it.
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts" }
+# Dev-only, same reason: the Telegram command-menu gate compares the manifest's
+# menu entries against the REAL product command registry
+# (`product_command_descriptors()`) so a reworded description in the owner
+# cannot silently strand the vendor-registered copy.
+ironclaw_assistant = { path = "../../product/ironclaw_assistant" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "3", features = ["full"] }
 toml = "1.1"

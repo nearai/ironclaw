@@ -16,6 +16,8 @@ use ironclaw_host_api::{
 use crate::recipe::{IngressVerificationRecipe, RecipeValidationError};
 
 const MAX_CHANNEL_COMMANDS: usize = 32;
+/// Per-list cap on `[channel.ingress]` `activation_calls`/`deactivation_calls`.
+const MAX_INGRESS_VENDOR_CALLS: usize = 8;
 const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
 const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
@@ -406,6 +408,14 @@ impl ChannelDescriptor {
                 }
                 _ => {}
             }
+            // The recipe lists share ONE lifecycle deadline while the host
+            // holds the global lifecycle lock — bound them so a manifest
+            // cannot declare an unbounded activation-time call sequence.
+            if ingress.activation_calls.len() > MAX_INGRESS_VENDOR_CALLS
+                || ingress.deactivation_calls.len() > MAX_INGRESS_VENDOR_CALLS
+            {
+                return Err(ChannelDescriptorError::TooManyIngressVendorCalls);
+            }
         }
         for egress in &self.egress {
             if egress.host.trim().is_empty() || egress.host.contains('*') {
@@ -641,6 +651,16 @@ pub struct ChannelIngressDescriptor {
     /// Idempotent, best-effort vendor-side unwiring run at deactivation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deregistration: Option<ChannelVendorCallRecipe>,
+    /// Additional idempotent vendor-side surface wiring run at activation,
+    /// after `registration` and in declared order — e.g. publishing the
+    /// channel's declared `commands` to the vendor's native command menu.
+    /// Same recipe grammar, same restricted egress, same fail-closed
+    /// activation semantics as `registration`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activation_calls: Vec<ChannelVendorCallRecipe>,
+    /// Best-effort counterparts run at deactivation, after `deregistration`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deactivation_calls: Vec<ChannelVendorCallRecipe>,
     /// Present for webhook ingress (the mounted route's last path segment);
     /// absent for `authenticated_session` ingress, which mounts no webhook
     /// route. The pairing is enforced by [`ChannelDescriptor::validate`].
@@ -830,6 +850,10 @@ pub enum ChannelDescriptorError {
     WildcardOrEmptyEgressHost { host: String },
     #[error("egress target `{host}` declares an invalid path or transfer bound")]
     InvalidEgressConstraint { host: String },
+    #[error(
+        "channel ingress activation_calls/deactivation_calls must each declare at most 8 recipes"
+    )]
+    TooManyIngressVendorCalls,
     #[error(
         "authenticated_session ingress mounts no webhook route and must not declare a route_suffix"
     )]
@@ -1166,6 +1190,37 @@ kind = "authenticated_session"
                 channel.validate().unwrap_err(),
                 ChannelDescriptorError::InvalidCommands,
                 "expected invalid commands: {commands}"
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_vendor_call_lists_are_bounded() {
+        let recipe = ChannelVendorCallRecipe {
+            method: ChannelVendorCallMethod::Post,
+            path: "/wire".to_string(),
+            body: None,
+            body_credentials: Vec::new(),
+        };
+        let mut channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        let ingress = channel.ingress.as_mut().expect("fixture declares ingress");
+        ingress.activation_calls = vec![recipe.clone(); 8];
+        ingress.deactivation_calls = vec![recipe.clone(); 8];
+        channel.validate().unwrap();
+
+        for oversize in [true, false] {
+            let mut channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+            let ingress = channel.ingress.as_mut().expect("fixture declares ingress");
+            let list = if oversize {
+                &mut ingress.activation_calls
+            } else {
+                &mut ingress.deactivation_calls
+            };
+            *list = vec![recipe.clone(); 9];
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::TooManyIngressVendorCalls,
+                "a ninth recipe must fail validation (activation half: {oversize})"
             );
         }
     }

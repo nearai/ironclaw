@@ -53,6 +53,29 @@ impl IngressWiring {
     }
 }
 
+/// One wiring half failed. `completed_calls` says whether a vendor-visible
+/// effect already landed before the failure, which is what decides whether
+/// the Register caller must unwind.
+struct WiringHalfFailure {
+    reason: String,
+    completed_calls: usize,
+}
+
+/// Label one vendor call so a persisted `last_error` names WHICH call failed —
+/// with several recipes per half, "ingress registration returned status 400"
+/// alone cannot distinguish the webhook wiring from a later surface call. The
+/// path's last segment is the vendor method name (template text, never a
+/// resolved secret).
+fn vendor_call_label(
+    wiring: IngressWiring,
+    recipe: &ironclaw_extension_contracts::channel::ChannelVendorCallRecipe,
+) -> String {
+    match recipe.path.rsplit('/').next().filter(|s| !s.is_empty()) {
+        Some(segment) => format!("{} ({segment})", wiring.label()),
+        None => wiring.label().to_string(),
+    }
+}
+
 /// Vendor-side ingress-wiring failure, redacted before it reaches a record.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 enum ChannelWiringError {
@@ -364,59 +387,183 @@ impl ExtensionHost {
         Ok(())
     }
 
-    /// Run one half of the declarative ingress-wiring pair.
+    /// Run one half of the declarative ingress-wiring pair, plus that half's
+    /// additional `activation_calls`/`deactivation_calls` surface recipes.
     ///
-    /// Absence of the section is a no-op, which is what "default no-op" used
-    /// to mean when these were trait methods — minus the trait surface. A
-    /// channel whose events URL is configured in the vendor's own console
-    /// (or which has no webhook at all) simply declares neither.
+    /// Absence of every section is a no-op, which is what "default no-op"
+    /// used to mean when these were trait methods — minus the trait surface.
+    /// A channel whose events URL is configured in the vendor's own console
+    /// (or which has no webhook at all) simply declares none.
     async fn run_ingress_registration(
         &self,
         record: &InstallationRecord,
         wiring: IngressWiring,
     ) -> Result<(), ChannelWiringError> {
+        match wiring {
+            IngressWiring::Register => {
+                // ONE hook_deadline budgets the whole transition — the wiring
+                // half AND any unwind it triggers — because the caller holds
+                // the global lifecycle lock throughout. A fresh deadline for
+                // the unwind would let one unresponsive vendor double the
+                // lock hold.
+                // tokio's clock, not std's, so paused-time tests measure the
+                // same elapsed time the timeout machinery does.
+                let started = tokio::time::Instant::now();
+                match self
+                    .run_wiring_half(record, wiring, self.deps.hook_deadline)
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(failure) => {
+                        // A later recipe failed after an earlier one already
+                        // landed a vendor-visible effect (e.g. the webhook is
+                        // registered but activation will not publish):
+                        // best-effort run the Deregister half so the vendor is
+                        // not left wired to an extension that never activated.
+                        // The unwind gets only the REMAINING budget — after a
+                        // deadline expiry that is zero, and the vendor that
+                        // just hung would hang the unwind too.
+                        let remaining = self.deps.hook_deadline.saturating_sub(started.elapsed());
+                        if failure.completed_calls > 0 && remaining.is_zero() {
+                            tracing::debug!(
+                                extension_id = %record.extension_id,
+                                "no deadline budget left to unwind failed activation wiring"
+                            );
+                        } else if failure.completed_calls > 0
+                            && let Err(unwind) = self
+                                .run_wiring_half(record, IngressWiring::Deregister, remaining)
+                                .await
+                        {
+                            tracing::debug!(
+                                extension_id = %record.extension_id,
+                                error = %unwind.reason,
+                                "unwind after failed activation wiring also failed"
+                            );
+                        }
+                        Err(ChannelWiringError::Failed {
+                            reason: failure.reason,
+                        })
+                    }
+                }
+            }
+            IngressWiring::Deregister => self
+                .run_wiring_half(record, wiring, self.deps.hook_deadline)
+                .await
+                .map_err(|failure| ChannelWiringError::Failed {
+                    reason: failure.reason,
+                }),
+        }
+    }
+
+    /// Run every recipe of one wiring half in declared order — the wiring
+    /// recipe first, then the additional surface calls.
+    ///
+    /// Failure policy differs per half: Register stops at the first failure
+    /// (the caller aborts activation and unwinds), while Deregister attempts
+    /// every recipe and reports only the first failure, because cleanup of one
+    /// vendor surface must not strand cleanup of the others. One deadline
+    /// bounds the whole half — the recipe list must not multiply the time the
+    /// lifecycle lock is held.
+    async fn run_wiring_half(
+        &self,
+        record: &InstallationRecord,
+        wiring: IngressWiring,
+        deadline: Duration,
+    ) -> Result<(), WiringHalfFailure> {
         let Some(channel) = record.resolved.channel.as_ref() else {
             return Ok(());
         };
         let Some(ingress) = channel.ingress.as_ref() else {
             return Ok(());
         };
-        let recipe = match wiring {
-            IngressWiring::Register => ingress.registration.as_ref(),
-            IngressWiring::Deregister => ingress.deregistration.as_ref(),
+        let recipes: Vec<_> = match wiring {
+            IngressWiring::Register => ingress
+                .registration
+                .iter()
+                .chain(ingress.activation_calls.iter())
+                .collect(),
+            IngressWiring::Deregister => ingress
+                .deregistration
+                .iter()
+                .chain(ingress.deactivation_calls.iter())
+                .collect(),
         };
-        let Some(recipe) = recipe else {
+        if recipes.is_empty() {
             return Ok(());
-        };
-        // Resolve by method + path, never list order. A recipe with zero or
-        // multiple matching targets is ambiguous authority and fails closed.
-        let target = crate::channel_vendor_calls::resolve_vendor_call_target(
-            recipe,
-            channel.egress.as_slice(),
-        )
-        .map_err(|error| ChannelWiringError::Failed {
-            reason: error.to_string(),
-        })?;
+        }
+        // Resolve EVERY recipe's egress target before running any (by
+        // method + path, never list order; zero or multiple matches is
+        // ambiguous authority and fails closed) — a mis-declared later recipe
+        // must fail the transition before an earlier one reaches the live
+        // vendor.
+        let mut calls = Vec::with_capacity(recipes.len());
+        for recipe in recipes {
+            let target = crate::channel_vendor_calls::resolve_vendor_call_target(
+                recipe,
+                channel.egress.as_slice(),
+            )
+            .map_err(|error| WiringHalfFailure {
+                reason: error.to_string(),
+                completed_calls: 0,
+            })?;
+            calls.push((recipe, target));
+        }
         let egress = self.deps.egress.egress_for_channel(
             &record.extension_id,
             &record.installation_id,
             channel.egress.as_slice(),
         );
-        with_deadline(
-            self.deps.hook_deadline,
-            crate::channel_vendor_calls::run_vendor_call(
-                recipe,
-                &target.host,
-                target.credential_handle.as_ref(),
-                &record.config,
-                egress.as_ref(),
-                wiring.label(),
-            ),
-        )
-        .await
-        .map_err(|error| ChannelWiringError::Failed {
-            reason: error.to_string(),
+        let mut completed_calls = 0usize;
+        let mut first_failure: Option<String> = None;
+        let outcome = with_deadline(deadline, async {
+            for (recipe, target) in &calls {
+                let label = vendor_call_label(wiring, recipe);
+                let result = crate::channel_vendor_calls::run_vendor_call(
+                    recipe,
+                    &target.host,
+                    target.credential_handle.as_ref(),
+                    &record.config,
+                    egress.as_ref(),
+                    &label,
+                )
+                .await;
+                match result {
+                    Ok(()) => completed_calls += 1,
+                    Err(error) => match wiring {
+                        IngressWiring::Register => return Err(error),
+                        IngressWiring::Deregister => {
+                            tracing::debug!(
+                                extension_id = %record.extension_id,
+                                error = %error,
+                                "best-effort deactivation vendor call failed; continuing"
+                            );
+                            first_failure.get_or_insert(error.to_string());
+                        }
+                    },
+                }
+            }
+            Ok(())
         })
+        .await;
+        match outcome {
+            Ok(()) => match first_failure {
+                None => Ok(()),
+                Some(reason) => Err(WiringHalfFailure {
+                    reason,
+                    completed_calls,
+                }),
+            },
+            // A deadline expiry must stay visible even when a vendor call
+            // already failed — hiding it makes a timeout look like a plain
+            // vendor error and misdirects the operator.
+            Err(error) => Err(WiringHalfFailure {
+                reason: match first_failure {
+                    Some(vendor_failure) => format!("{vendor_failure}; then {error}"),
+                    None => error.to_string(),
+                },
+                completed_calls,
+            }),
+        }
     }
 
     /// Drop an installation record. This is the live removal path: the

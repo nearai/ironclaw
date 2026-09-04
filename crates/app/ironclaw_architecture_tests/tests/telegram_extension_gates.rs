@@ -444,3 +444,119 @@ fn reborn_context_free_of_v1_pairing_routes() {
         offenders.join("\n")
     );
 }
+
+/// The Bot API command menu (`setMyCommands`, run as a manifest
+/// `activation_calls` recipe) must publish exactly the commands the channel
+/// declares — same names, same order, and the descriptions the product
+/// command registry owns — so the menu can never advertise a command the
+/// admission list would refuse, hide one it accepts, or carry stale copy
+/// after the registry is reworded. Telegram's own grammar (1-32 chars of
+/// `a-z0-9_`, description 1-256 chars) is checked here too, because a
+/// violation only surfaces as a runtime activation failure otherwise. The
+/// clearing half must exist as a `deactivation_calls` recipe, not merely be
+/// allowlisted.
+#[test]
+fn telegram_command_menu_matches_the_declared_channel_commands() {
+    let manifest_path = crate_path(
+        &workspace_root(),
+        "crates/extensions/packages/telegram/manifest.toml",
+    );
+    let manifest: toml::Table = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()))
+        .parse()
+        .expect("telegram manifest parses as TOML");
+
+    let channel = manifest.get("channel").expect("[channel] section");
+    let declared: Vec<&str> = channel["commands"]
+        .as_array()
+        .expect("[channel] commands list")
+        .iter()
+        .map(|value| value.as_str().expect("command name"))
+        .collect();
+
+    let activation_calls = channel["ingress"]["activation_calls"]
+        .as_array()
+        .expect("[[channel.ingress.activation_calls]] declared");
+    let menu_call = activation_calls
+        .iter()
+        .find(|call| {
+            call["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("/setMyCommands"))
+        })
+        .expect("a setMyCommands activation call");
+    let menu = menu_call["body"]["commands"]
+        .as_array()
+        .expect("setMyCommands body commands");
+
+    let menu_names: Vec<&str> = menu
+        .iter()
+        .map(|entry| entry["command"].as_str().expect("menu command name"))
+        .collect();
+    assert_eq!(
+        menu_names, declared,
+        "the command menu must mirror [channel] commands exactly"
+    );
+    let registry: Vec<ironclaw_assistant::ProductCommandDescriptor> =
+        ironclaw_assistant::product_command_descriptors().collect();
+    for entry in menu {
+        let name = entry["command"].as_str().expect("menu command name");
+        assert!(
+            (1..=32).contains(&name.chars().count())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "Bot API command name grammar violated: {name:?}"
+        );
+        let description = entry["description"].as_str().expect("menu description");
+        assert!(
+            (1..=256).contains(&description.chars().count()),
+            "Bot API description bounds violated for {name:?}"
+        );
+        let owner = registry
+            .iter()
+            .find(|descriptor| descriptor.name == name)
+            .unwrap_or_else(|| panic!("menu command /{name} is not in the product registry"));
+        assert_eq!(
+            description, owner.description,
+            "menu description for /{name} must match the product command registry \
+             (crates/product/ironclaw_assistant/src/commands.rs) — reword both together"
+        );
+    }
+
+    // The clearing half must EXIST as a recipe; the egress allowlist alone
+    // (checked below) would keep passing after the recipe was deleted.
+    let deactivation_calls = channel["ingress"]["deactivation_calls"]
+        .as_array()
+        .expect("[[channel.ingress.deactivation_calls]] declared");
+    assert!(
+        deactivation_calls.iter().any(|call| {
+            call["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("/deleteMyCommands"))
+        }),
+        "deactivation must clear the command menu with a deleteMyCommands recipe"
+    );
+
+    // Both menu calls must be on the egress allowlist, or activation fails
+    // closed at resolve_vendor_call_target.
+    let egress_paths: Vec<&str> = channel["egress"]
+        .as_array()
+        .expect("[[channel.egress]]")
+        .iter()
+        .flat_map(|target| {
+            target
+                .get("paths")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .map(|value| value.as_str().expect("egress path"))
+        .collect();
+    for suffix in ["/setMyCommands", "/deleteMyCommands"] {
+        assert!(
+            egress_paths.iter().any(|path| path.ends_with(suffix)),
+            "egress allowlist must cover {suffix}"
+        );
+    }
+}
