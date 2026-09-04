@@ -5,8 +5,12 @@
 //! The channel-level regression net (the vendor e2e scenarios through the
 //! real ingress mount) re-points onto these components at the cutover.
 
-use ironclaw_extension_contracts::channel_adapter::{ChannelDelivery, ChannelReply};
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::ChannelDelivery;
+use ironclaw_extension_contracts::reply::{
+    ReplyAudience, ReplyPhase, ReplyReconcilePoint, ReplySink,
+};
+use ironclaw_extension_contracts::test_support::fakes::RecordingReplySink;
+use ironclaw_outbound::{ReplyPublicationSettlement, ReplyPublicationStatus};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,8 +20,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_assistant::{
-    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver,
+    DeliveryCoordinator, DeliveryRetryPolicy, PreSubmitFailureInboxNotifier, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_assistant::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -51,9 +55,12 @@ use ironclaw_host_api::{
     path::ScopedPath,
 };
 use ironclaw_notifications::{
-    ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
-    NotificationRecipient,
+    ListNotificationsRequest, MarkAllNotificationsReadRequest, NoopNotificationInboxStore,
+    NotificationAction, NotificationInboxError, NotificationInboxStore, NotificationInboxStorePort,
+    NotificationKind, NotificationMutationOutcome, NotificationMutationRequest, NotificationPage,
+    NotificationRecipient, NotificationRecord, PublishNotificationRequest,
 };
+use ironclaw_outbound::TriggeredRunDelivery;
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
     CommunicationPreferenceRepository, DeliveredGateRouteStore, DeliveryDefaultScope,
@@ -180,6 +187,23 @@ impl ScriptedTurnCoordinator {
 
     fn call_count(&self) -> usize {
         *self.calls.lock().expect("calls")
+    }
+
+    /// The state the script ends in, read without consuming a scripted
+    /// call: the durable terminal facts a publication reads must agree with
+    /// what the observer will eventually poll.
+    fn last_state(&self) -> ScriptedRunState {
+        if let Some(state) = self.state_override.lock().expect("state override").clone() {
+            return state;
+        }
+        match &self.flip {
+            Some((_, terminal)) => terminal.clone(),
+            None => self
+                .states
+                .last()
+                .cloned()
+                .expect("scripted coordinator has at least one state"),
+        }
     }
 }
 
@@ -359,19 +383,6 @@ impl RecordingChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelReply for RecordingChannelAdapter {
-    async fn send_reply(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        // Reply and delivery share one mechanism for this double, as they do
-        // for a conversational vendor; the axis is the coordinator's choice.
-        self.deliver(envelope, egress).await
-    }
-}
-
-#[async_trait]
 impl ChannelDelivery for RecordingChannelAdapter {
     async fn deliver(
         &self,
@@ -426,6 +437,10 @@ impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgr
 
 struct StaticResolver {
     adapter: Arc<RecordingChannelAdapter>,
+    /// The channel's bound reply sink: the run's answer lands here, never on
+    /// the delivery adapter.
+    reply_sink: Arc<RecordingReplySink>,
+    requires_enrollment: bool,
 }
 
 impl ChannelDeliveryResolver for StaticResolver {
@@ -434,11 +449,12 @@ impl ChannelDeliveryResolver for StaticResolver {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("install_alpha")
                 .expect("valid installation id"),
-            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            reply: Some(Arc::clone(&self.reply_sink) as Arc<dyn ReplySink>),
             delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
-            requires_enrollment: false,
+            generation: 0,
+            requires_enrollment: self.requires_enrollment,
             declared_egress_hosts: Vec::new(),
         })
     }
@@ -456,6 +472,163 @@ impl DeliveryReplyContextSource for NoStoredReplyContext {
     ) -> Result<Option<Vec<u8>>, ironclaw_product_contracts::delivery::DeliveryReplyContextError>
     {
         Ok(None)
+    }
+}
+
+/// Delegates every outbound-store operation except the terminal
+/// `Delivered` write. The provider send still succeeds, reproducing the
+/// coordinator's `DeliveredUnconfirmed` evidence at the triggered caller.
+struct TerminalDeliveredWriteFailingStore {
+    inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ironclaw_outbound::ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+
+    async fn load_thread_notification_policy(
+        &self,
+        scope: TurnScope,
+    ) -> Result<ironclaw_outbound::ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+
+    async fn upsert_subscription(
+        &self,
+        record: ironclaw_outbound::ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+
+    async fn load_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        attempt: ironclaw_outbound::OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+
+    async fn update_delivery_status(
+        &self,
+        request: ironclaw_outbound::UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        if request.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered {
+            return Err(OutboundError::Backend);
+        }
+        self.inner.update_delivery_status(request).await
+    }
+
+    async fn list_delivery_attempts(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::OutboundDeliveryAttempt>, OutboundError> {
+        self.inner.list_delivery_attempts(scope).await
+    }
+
+    async fn open_reply_publication(
+        &self,
+        request: ironclaw_outbound::OpenReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, OutboundError> {
+        self.inner.open_reply_publication(request).await
+    }
+
+    async fn claim_reply_publication_lease(
+        &self,
+        request: ironclaw_outbound::ClaimReplyPublicationLeaseRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationClaim, OutboundError> {
+        self.inner.claim_reply_publication_lease(request).await
+    }
+
+    async fn advance_reply_publication(
+        &self,
+        request: ironclaw_outbound::AdvanceReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, OutboundError> {
+        self.inner.advance_reply_publication(request).await
+    }
+
+    async fn settle_reply_publication(
+        &self,
+        request: ironclaw_outbound::SettleReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, OutboundError> {
+        self.inner.settle_reply_publication(request).await
+    }
+
+    async fn release_reply_publication_lease(
+        &self,
+        request: ironclaw_outbound::ReleaseReplyPublicationLeaseRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.release_reply_publication_lease(request).await
+    }
+
+    async fn load_reply_publication(
+        &self,
+        scope: TurnScope,
+        delivery_id: ironclaw_outbound::OutboundDeliveryId,
+    ) -> Result<Option<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        self.inner.load_reply_publication(scope, delivery_id).await
+    }
+
+    async fn list_reply_publications(
+        &self,
+        scope: TurnScope,
+        run_id: ironclaw_host_api::turn::TurnRunId,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        self.inner.list_reply_publications(scope, run_id).await
+    }
+
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        self.inner.list_open_reply_publications(scope).await
     }
 }
 
@@ -571,6 +744,22 @@ impl ironclaw_product_contracts::binding::ProductBindingResolver for StaticBindi
 
 struct OAuthPromptSource {
     authorization_url: Option<String>,
+}
+
+struct FailingAuthPromptSource;
+
+#[async_trait]
+impl BlockedAuthPromptSource for FailingAuthPromptSource {
+    async fn auth_prompt_for_blocked_run(
+        &self,
+        _request: BlockedAuthPromptRequest<'_>,
+    ) -> Result<AuthPromptView, ProductAdapterError> {
+        Err(ProductAdapterError::SurfaceTransient {
+            reason: ironclaw_host_api::product_adapter_error::RedactedString::new(
+                "auth prompt backend unavailable",
+            ),
+        })
+    }
 }
 
 #[async_trait]
@@ -836,6 +1025,13 @@ fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
 async fn inbox_records(
     inbox: &dyn NotificationInboxStorePort,
 ) -> ironclaw_notifications::NotificationPage {
+    inbox_records_with_archived(inbox, false).await
+}
+
+async fn inbox_records_with_archived(
+    inbox: &dyn NotificationInboxStorePort,
+    include_archived: bool,
+) -> ironclaw_notifications::NotificationPage {
     inbox
         .list(ListNotificationsRequest {
             recipient: NotificationRecipient {
@@ -844,7 +1040,7 @@ async fn inbox_records(
             },
             limit: 10,
             cursor: None,
-            include_archived: false,
+            include_archived,
         })
         .await
         .expect("notification inbox")
@@ -965,6 +1161,8 @@ struct Harness {
     project_files: Arc<ScriptedProjectFilesystemReader>,
     connection_notices: ChannelConnectionNoticePolicy,
     adapter: Arc<RecordingChannelAdapter>,
+    /// Where the run's answer lands (the channel's reply sink).
+    reply_sink: Arc<RecordingReplySink>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     notification_inbox: Arc<NotificationInboxStore<InMemoryBackend>>,
@@ -1032,6 +1230,7 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         None,
+        None,
     )
 }
 
@@ -1050,12 +1249,16 @@ fn build_harness_with_gate_ports(
     resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+    notification_inbox_override: Option<Arc<dyn NotificationInboxStorePort>>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
+    let reply_sink = Arc::new(RecordingReplySink::new("acme"));
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let notification_inbox = notification_inbox();
+    let notification_inbox_port = notification_inbox_override
+        .unwrap_or_else(|| Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>);
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
@@ -1063,6 +1266,8 @@ fn build_harness_with_gate_ports(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            reply_sink: Arc::clone(&reply_sink),
+            requires_enrollment: false,
         }),
         Arc::new(NoStoredReplyContext),
         Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
@@ -1071,6 +1276,7 @@ fn build_harness_with_gate_ports(
             backoff: Duration::ZERO,
         },
     ));
+    start_test_reply_publication(&coordinator, &turns, &threads, &project_files);
     let services = RunDeliveryServices {
         binding_service: Arc::new(StaticBindingService {
             binding: resolved_binding,
@@ -1081,10 +1287,7 @@ fn build_harness_with_gate_ports(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        notification_inbox: Some(
-            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
-        ),
-        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        notification_inbox: Some(notification_inbox_port),
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: Vec::new(),
         }) as Arc<dyn OutboundDeliveryTargetProvider>,
@@ -1109,12 +1312,23 @@ fn build_harness_with_gate_ports(
         project_files,
         connection_notices,
         adapter,
+        reply_sink,
         store,
         route_store,
         notification_inbox,
         turns,
         threads,
     }
+}
+
+/// The answers the channel's reply sink was asked to present at its terminal
+/// reconcile points — where a run's reply lands now.
+fn terminal_answers(sink: &RecordingReplySink) -> Vec<String> {
+    sink.requests()
+        .iter()
+        .filter(|request| request.point == ReplyReconcilePoint::Terminal)
+        .map(|request| request.revision.document.answer.text.as_str().to_string())
+        .collect()
 }
 
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
@@ -1158,7 +1372,7 @@ async fn seed_final_message_with_attachments(
 // ── Observer rows ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn observer_delivers_final_reply_through_the_coordinator() {
+async fn observer_publishes_the_final_reply_through_the_channels_reply_sink() {
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         false,
@@ -1176,24 +1390,56 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
         )
         .await;
 
-    let texts = harness.adapter.texts();
-    assert_eq!(texts, vec!["hello from the run".to_string()]);
-    let envelopes = harness.adapter.envelopes();
-    assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "the answer never rides the delivery half"
+    );
+    let requests = harness.reply_sink.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "one terminal reconcile on a message channel"
+    );
+    let request = &requests[0];
+    assert_eq!(request.point, ReplyReconcilePoint::Terminal);
+    assert_eq!(
+        request.revision.document.answer.text.as_str(),
+        "hello from the run"
+    );
+    assert!(request.revision.document.answer.finalized);
+    assert_eq!(
+        request
+            .target
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.conversation_id()),
+        Some("conv-1")
+    );
+    assert_eq!(request.target.audience, ReplyAudience::Private);
     let attempts = harness
         .store
         .list_delivery_attempts(binding_scope())
         .await
         .expect("attempts");
-    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts.len(), 1, "the publication row is the one attempt");
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+    let publications = harness
+        .store
+        .list_reply_publications(binding_scope(), run_id)
+        .await
+        .expect("publications");
+    assert_eq!(publications.len(), 1);
+    assert_eq!(
+        publications[0].publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Delivered)
+    );
 }
 
 #[tokio::test]
-async fn observer_suppresses_durable_nothing_to_report_before_transport_dispatch() {
+async fn observer_publishes_a_nothing_to_report_completion_as_an_empty_terminal_revision() {
     let harness = build_harness(
         vec![scripted_completed_outcome(
             TurnExecutionOutcome::NothingToReport,
@@ -1212,20 +1458,42 @@ async fn observer_suppresses_durable_nothing_to_report_before_transport_dispatch
         )
         .await;
 
-    assert!(harness.adapter.texts().is_empty());
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "nothing rides the delivery half"
+    );
+    let requests = harness.reply_sink.requests();
+    assert_eq!(requests.len(), 1, "the channel still learns the run ended");
+    assert_eq!(requests[0].point, ReplyReconcilePoint::Terminal);
+    assert!(
+        requests[0]
+            .revision
+            .document
+            .answer
+            .text
+            .as_str()
+            .is_empty(),
+        "no answer text is invented for a nothing-to-report completion"
+    );
+    assert_eq!(requests[0].revision.document.phase, ReplyPhase::Completed);
     let attempts = harness
         .store
         .list_delivery_attempts(binding_scope())
         .await
         .expect("attempts");
-    assert!(
-        attempts.is_empty(),
-        "suppression must precede delivery reservation"
+    assert_eq!(
+        attempts.len(),
+        1,
+        "only the publication row: no discrete send was reserved"
+    );
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
 }
 
 #[tokio::test]
-async fn observer_materializes_finalized_attachment_refs_for_delivery() {
+async fn observer_publishes_finalized_attachments_with_the_terminal_revision() {
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         false,
@@ -1260,17 +1528,32 @@ async fn observer_materializes_finalized_attachment_refs_for_delivery() {
         )
         .await;
 
-    let envelopes = harness.adapter.envelopes();
-    assert_eq!(envelopes.len(), 1);
-    assert!(matches!(
-        envelopes[0].parts.as_slice(),
-        [OutboundPart::Text(text), OutboundPart::File(file)]
-            if text == "report attached"
-                && file.path.as_str() == "/workspace/report.txt"
-                && file.filename.as_deref() == Some("renamed-report.txt")
-                && file.mime_type == "text/plain"
-                && file.bytes == b"hello"
-    ));
+    assert!(harness.adapter.envelopes().is_empty());
+    let requests = harness.reply_sink.requests();
+    assert_eq!(requests.len(), 1);
+    let terminal = &requests[0];
+    assert_eq!(terminal.point, ReplyReconcilePoint::Terminal);
+    assert_eq!(
+        terminal.revision.document.answer.text.as_str(),
+        "report attached"
+    );
+    assert_eq!(terminal.revision.document.attachments.len(), 1);
+    assert_eq!(
+        terminal.revision.document.attachments[0].filename.as_str(),
+        "renamed-report.txt"
+    );
+    assert!(
+        matches!(
+            terminal.materialized_attachments.as_slice(),
+            [file]
+                if file.path.as_str() == "/workspace/report.txt"
+                    && file.filename.as_deref() == Some("renamed-report.txt")
+                    && file.mime_type == "text/plain"
+                    && file.bytes == b"hello"
+        ),
+        "the workspace bytes are materialized for the terminal reconcile only: {:?}",
+        terminal.materialized_attachments
+    );
 }
 
 #[tokio::test]
@@ -1486,7 +1769,7 @@ async fn observer_skips_resolution_ack_after_final_reply_was_delivered() {
         )
         .await;
     assert_eq!(
-        harness.adapter.texts(),
+        terminal_answers(&harness.reply_sink),
         vec!["approved and finished".to_string()]
     );
 
@@ -1509,10 +1792,11 @@ async fn observer_skips_resolution_ack_after_final_reply_was_delivered() {
         .await;
 
     assert_eq!(
-        harness.adapter.texts(),
+        terminal_answers(&harness.reply_sink),
         vec!["approved and finished".to_string()],
         "a resolution ack landing after delivery must not re-post the final reply"
     );
+    assert!(harness.adapter.texts().is_empty());
 }
 
 #[tokio::test]
@@ -1542,15 +1826,22 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         .await;
 
     let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert_eq!(
+        texts.len(),
+        1,
+        "the working indicator is the only discrete send; the answer is published"
+    );
     assert!(
         !texts[0].is_empty() && texts[0] != "done thinking",
         "a distinct working indicator precedes the final reply, got {:?}",
         texts[0]
     );
-    assert_eq!(texts[1], "done thinking");
+    assert_eq!(
+        terminal_answers(&harness.reply_sink),
+        vec!["done thinking".to_string()]
+    );
     // The working indicator's vendor ref came back through the coordinator
-    // outcome and was retracted after the final reply (Cleanup intent).
+    // outcome and was retracted after the answer landed (Cleanup intent).
     let retracted = harness.adapter.retracted_refs();
     assert_eq!(retracted.len(), 1, "exactly one retraction");
     let attempts = harness
@@ -1558,7 +1849,7 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         .list_delivery_attempts(binding_scope())
         .await
         .expect("attempts");
-    // working + final + cleanup, all coordinator-persisted.
+    // working + cleanup + the reply publication row, all coordinator-persisted.
     assert_eq!(attempts.len(), 3);
     assert!(
         attempts
@@ -1662,13 +1953,28 @@ async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction(
         )
         .await;
 
-    // Working indicator, then a distinct, non-empty failure notice — not silence.
-    let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 2, "working indicator then failure notice");
+    // Reply publication owns the terminal failure copy: the sink's terminal
+    // document carries the failure summary, and it is the ONE user-visible
+    // terminal reply — the conventional RUN_FAILED notice must not also land.
+    let requests = harness.reply_sink.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "one terminal reconcile publishes the failure"
+    );
     assert!(
-        !texts[1].is_empty() && texts[1] != texts[0],
-        "the failure notice is distinct from the working indicator, got {:?}",
-        texts[1]
+        matches!(
+            requests[0].revision.document.outcome,
+            Some(ironclaw_extension_contracts::reply::ReplyOutcome::Failed { .. })
+        ),
+        "the terminal document is the failed reply: {:?}",
+        requests[0].revision.document.outcome
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        1,
+        "only the working indicator rides the delivery half — a delivered          reply means no second failure message: {texts:?}"
     );
     assert_eq!(
         harness.adapter.retracted_refs().len(),
@@ -1696,6 +2002,221 @@ async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction(
             ),
         ],
         "a failed run swaps 👀 for ❌"
+    );
+}
+
+/// Another target's delivery must not silence THIS channel's failure notice:
+/// the session channel (a different extension) registered for the same run
+/// and delivered, but the channel's own publication settled Failed — the
+/// conventional fallback still posts here.
+#[tokio::test]
+async fn a_foreign_targets_delivery_does_not_suppress_this_channels_failure_notice() {
+    use ironclaw_outbound::{
+        ClaimReplyPublicationLeaseRequest, OpenReplyPublicationRequest, OutboundDeliveryAttempt,
+        OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind, PublisherId,
+        ReplyPublicationTarget, ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
+        SettleReplyPublicationRequest,
+    };
+
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Failed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    harness.reply_sink.script(std::iter::repeat_n(
+        ironclaw_extension_contracts::reply::ReplySinkOutcome::Permanent {
+            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
+                "channel refused the reply",
+            ),
+        },
+        8,
+    ));
+    let run_id = TurnRunId::new();
+
+    // A DELIVERED publication for the same run on a DIFFERENT extension (the
+    // session channel's target), settled before the channel's own flow runs.
+    let scope = binding_scope();
+    let now = chrono::Utc::now();
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(run_id),
+            target: ironclaw_host_api::turn::ReplyTargetBindingRef::new("reply:session-1").unwrap(),
+            kind: OutboundPushKind::FinalReply,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(format!(
+                "projection:session:{run_id}"
+            ))
+            .unwrap(),
+            requires_reply_target_revalidation: true,
+        },
+        status: OutboundDeliveryStatus::Prepared,
+        attempted_at: now,
+        failure_kind: None,
+    };
+    harness
+        .store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: ReplyPublicationTarget {
+                run_id,
+                key: ReplyPublicationTargetKey::new("session:web").unwrap(),
+            },
+            descriptor: Some(ReplyPublicationTargetDescriptor {
+                extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
+                    "web-app".to_string(),
+                ),
+                actor: TurnActor::new(user()),
+                reply_target: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
+                    "reply:session-1",
+                )
+                .unwrap(),
+                conversation: None,
+                thread_anchor: None,
+                audience: ironclaw_extension_contracts::reply::ReplyAudience::Private,
+                transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+                reply_context: None,
+            }),
+            now,
+        })
+        .await
+        .expect("foreign publication opens");
+    let claim = harness
+        .store
+        .claim_reply_publication_lease(ClaimReplyPublicationLeaseRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            owner: PublisherId::new("publisher-foreign").unwrap(),
+            ttl: Duration::from_secs(30),
+            now,
+        })
+        .await
+        .expect("foreign claim");
+    let fence = match claim {
+        ironclaw_outbound::ReplyPublicationClaim::Acquired(record) => record.publication.fence,
+        other => panic!("foreign claim must acquire, got {other:?}"),
+    };
+    harness
+        .store
+        .advance_reply_publication(ironclaw_outbound::AdvanceReplyPublicationRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            fence,
+            desired_revision: 1,
+            published_revision: 1,
+            terminal_revision: Some(1),
+            generation: Some(1),
+            checkpoint: None,
+            evidence: ironclaw_outbound::ReplyPublicationEvidence::default(),
+            now,
+        })
+        .await
+        .expect("foreign publication applies its terminal revision");
+    harness
+        .store
+        .settle_reply_publication(SettleReplyPublicationRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            fence,
+            settlement: ironclaw_outbound::ReplyPublicationSettlement::Delivered,
+            now,
+        })
+        .await
+        .expect("foreign publication settles Delivered");
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-foreign-delivered",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "the foreign target's delivery must not silence this channel's failure notice: {texts:?}"
+    );
+    assert!(
+        texts[1].contains("didn't finish") || texts[1].to_lowercase().contains("wrong"),
+        "the second message is the failure notice: {texts:?}"
+    );
+}
+
+/// The other half of the single-terminal-reply rule: when the reply
+/// publication cannot deliver (the sink fails permanently), the conventional
+/// failure notice is the fallback that keeps the user out of silence —
+/// exactly one terminal user-visible message either way.
+#[tokio::test]
+async fn observer_posts_the_failure_notice_only_when_the_reply_did_not_deliver() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Failed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    // Every reconcile of the terminal failure document is refused by the
+    // provider: the publication settles Failed and delivers nothing.
+    harness.reply_sink.script(std::iter::repeat_n(
+        ironclaw_extension_contracts::reply::ReplySinkOutcome::Permanent {
+            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
+                "channel refused the reply",
+            ),
+        },
+        8,
+    ));
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-fail-fallback",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "working indicator, then the fallback failure notice: {texts:?}"
+    );
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[0],
+        "the failure notice is distinct from the working indicator, got {:?}",
+        texts[1]
     );
 }
 
@@ -1806,20 +2327,19 @@ async fn observer_refreshes_working_indicator_with_escalating_nudges_on_a_long_r
 
     let texts = harness.adapter.texts();
     assert!(
-        texts.len() >= 3,
-        "initial working notice + at least one nudge + final reply, got {texts:?}"
+        texts.len() >= 2,
+        "initial working notice + at least one nudge, got {texts:?}"
     );
     assert_eq!(
-        texts.last().map(String::as_str),
-        Some("slow done"),
-        "the final reply is delivered last"
+        terminal_answers(&harness.reply_sink),
+        vec!["slow done".to_string()],
+        "the final reply is published once, at terminal"
     );
-    let (notices, reply) = texts.split_at(texts.len() - 1);
+    let notices = texts.as_slice();
     assert!(
         notices.iter().all(|t| !t.is_empty()),
         "every working/nudge notice is non-empty, got {notices:?}"
     );
-    assert_eq!(reply, ["slow done".to_string()]);
     // Each nudge refreshes in place (retracts the prior indicator); the final
     // reply retracts the last one.
     assert!(
@@ -1874,13 +2394,20 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
         "the scripted run must cross the previous delivery deadline"
     );
     let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 2, "working indicator then final reply");
+    assert_eq!(
+        texts.len(),
+        1,
+        "the working indicator is the only discrete send"
+    );
     assert!(
         !texts[0].is_empty() && texts[0] != "slow run finished",
         "a distinct working indicator precedes the final reply, got {:?}",
         texts[0]
     );
-    assert_eq!(texts[1], "slow run finished");
+    assert_eq!(
+        terminal_answers(&harness.reply_sink),
+        vec!["slow run finished".to_string()]
+    );
     assert_eq!(harness.adapter.retracted_refs().len(), 1);
 }
 
@@ -1911,14 +2438,21 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
         .await;
 
     let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 3, "auth prompt + working + final reply");
+    assert_eq!(
+        texts.len(),
+        2,
+        "auth prompt + working; the answer is published"
+    );
     assert!(texts[0].contains("Authentication required"));
     assert!(
-        !texts[1].is_empty() && texts[1] != texts[0] && texts[1] != texts[2],
-        "a distinct working indicator sits between the auth prompt and the reply, got {:?}",
+        !texts[1].is_empty() && texts[1] != texts[0],
+        "a distinct working indicator follows the auth prompt, got {:?}",
         texts[1]
     );
-    assert_eq!(texts[2], "authenticated and finished");
+    assert_eq!(
+        terminal_answers(&harness.reply_sink),
+        vec!["authenticated and finished".to_string()]
+    );
     assert_eq!(
         harness.adapter.retracted_refs(),
         vec!["ts-2".to_string(), "ts-1".to_string()],
@@ -1942,6 +2476,89 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
         NotificationKind::AuthenticationRequired
     );
     assert!(inbox.notifications[0].resolved_at.is_some());
+}
+
+#[tokio::test]
+async fn observer_keeps_resource_block_off_channels_and_continues_after_recovery() {
+    const GATE: &str = "gate:resource-budget-00000000000000000000000001";
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "resource recovered").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-resource-block"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    assert_eq!(
+        terminal_answers(&harness.reply_sink),
+        vec!["resource recovered".to_string()]
+    );
+    let texts = harness.adapter.texts();
+    assert!(
+        texts.iter().all(|text| !text.contains("resource-budget")),
+        "resource policy metadata must not reach the channel: {texts:?}"
+    );
+    assert!(
+        harness.reply_sink.requests().iter().all(|request| {
+            let document = &request.revision.document;
+            !document.answer.text.as_str().contains("resource-budget")
+                && document
+                    .status
+                    .as_ref()
+                    .is_none_or(|status| !status.as_str().contains("resource-budget"))
+        }),
+        "nor the published document"
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "the process-journal observer, not this bounded delivery watcher, owns resource-block notifications"
+    );
+}
+
+#[tokio::test]
+async fn observer_does_not_treat_gate_less_resource_block_as_surfaced() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedResource, None),
+        ],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-gate-less-resource"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("taking longer than expected")),
+        "a resource block without a stable gate cannot claim durable notification; the live path must retain timeout feedback: {texts:?}"
+    );
 }
 
 #[tokio::test]
@@ -2199,6 +2816,176 @@ async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
             .notifications
             .iter()
             .all(|notification| { notification.kind == NotificationKind::AuthenticationRequired })
+    );
+}
+
+#[tokio::test]
+async fn observer_does_not_publish_an_auth_inbox_item_without_a_gate_ref() {
+    let harness = build_harness(
+        vec![
+            // The first state satisfies the foreign-run existence guard; the
+            // second is the actionable state observed by the delivery loop.
+            scripted_state(TurnStatus::BlockedAuth, None),
+            scripted_state(TurnStatus::BlockedAuth, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_millis(40),
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-without-gate"),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "auth without a gate ref is not actionable and must not leave an unresolved Inbox item"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "auth without a gate ref must not produce an external prompt"
+    );
+}
+
+#[tokio::test]
+async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000001";
+    let harness = build_harness_with_gate_ports(
+        vec![scripted_state(TurnStatus::BlockedAuth, Some(GATE))],
+        false,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        Some(Arc::new(FailingAuthPromptSource)),
+        None,
+        None,
+    );
+    let run_id = TurnRunId::new();
+
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        harness.observer.observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-enrichment-down"),
+            accepted_ack(run_id),
+        ),
+    )
+    .await
+    .expect("failed auth enrichment must release the sole delivery permit");
+
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert_eq!(inbox.notifications[0].source.turn_run_id, Some(run_id));
+    assert_eq!(
+        inbox.notifications[0]
+            .source
+            .lifecycle_ref
+            .as_ref()
+            .map(|reference| reference.as_str()),
+        Some(GATE)
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_none(),
+        "the durable auth notification remains actionable while the run is parked"
+    );
+    assert!(
+        harness
+            .adapter
+            .texts()
+            .iter()
+            .all(|text| !text.contains("Authentication required")),
+        "a failed enrichment must not invent an auth channel prompt"
+    );
+
+    let unrelated_run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, unrelated_run_id, "unrelated run finished").await;
+    harness
+        .turns
+        .set_state(scripted_state(TurnStatus::Completed, None));
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        harness.observer.observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unrelated-run"),
+            accepted_ack(unrelated_run_id),
+        ),
+    )
+    .await
+    .expect("an unrelated run must acquire the released delivery permit");
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::AuthenticationRequired,
+        GATE,
+    )
+    .await;
+    assert_eq!(
+        terminal_answers(&harness.reply_sink)
+            .last()
+            .map(String::as_str),
+        Some("unrelated run finished"),
+        "the released permit must remain available to unrelated replies"
+    );
+}
+
+#[tokio::test]
+async fn observer_reports_failed_auth_enrichment_when_inbox_publication_also_fails() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000002";
+    let harness = build_harness_with_gate_ports(
+        vec![scripted_state(TurnStatus::BlockedAuth, Some(GATE))],
+        false,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        Some(Arc::new(FailingAuthPromptSource)),
+        None,
+        Some(Arc::new(NoopNotificationInboxStore)),
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(
+                ProductTriggerReason::DirectChat,
+                "evt-auth-enrichment-and-inbox-down",
+            ),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts().last().map(String::as_str),
+        Some("Something went wrong delivering the result here. Check the WebUI."),
+        "without durable Inbox evidence, enrichment failure must remain caller-visible"
+    );
+    assert!(
+        inbox_records(harness.notification_inbox.as_ref())
+            .await
+            .notifications
+            .is_empty(),
+        "the failing Inbox port must not invent durable notification evidence"
     );
 }
 
@@ -2762,6 +3549,60 @@ async fn observer_non_oauth_auth_block_cancels_run_and_posts_unavailable_notice(
 
 // ── Triggered rows ─────────────────────────────────────────────────────────
 
+struct HangingNotificationInbox;
+
+#[async_trait]
+impl NotificationInboxStorePort for HangingNotificationInbox {
+    async fn publish(
+        &self,
+        _request: PublishNotificationRequest,
+    ) -> Result<NotificationRecord, NotificationInboxError> {
+        std::future::pending().await
+    }
+
+    async fn list(
+        &self,
+        request: ListNotificationsRequest,
+    ) -> Result<NotificationPage, NotificationInboxError> {
+        NoopNotificationInboxStore.list(request).await
+    }
+
+    async fn mark_read(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.mark_read(request).await
+    }
+
+    async fn mark_all_read(
+        &self,
+        request: MarkAllNotificationsReadRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.mark_all_read(request).await
+    }
+
+    async fn resolve(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.resolve(request).await
+    }
+
+    async fn reopen(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.reopen(request).await
+    }
+
+    async fn archive(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.archive(request).await
+    }
+}
+
 fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDeliveryRequest {
     TriggeredRunDeliveryRequest {
         run_id,
@@ -2796,6 +3637,13 @@ struct TriggeredHarness {
     threads: Arc<InMemorySessionThreadService>,
 }
 
+#[derive(Clone, Copy)]
+enum TriggeredHarnessDeliveryMode {
+    Normal,
+    RequiresEnrollment,
+    FailTerminalDeliveredWrite,
+}
+
 /// `catalog` is the creator-owned notification catalog the notifier resolves
 /// stored target ids through; the same entries back the codec, so a resolved
 /// id decodes to a conversation and answers the DM predicate consistently.
@@ -2818,11 +3666,16 @@ fn build_triggered_harness_with_turns(
     let initially_active = catalog.clone();
     build_triggered_harness_with_turns_catalog(
         turns,
-        auth_url,
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
         catalog,
         initially_active,
         None,
         None,
+        TriggeredHarnessDeliveryMode::Normal,
     )
 }
 
@@ -2867,24 +3720,31 @@ fn build_triggered_harness_with_catalog(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     build_triggered_harness_with_turns_catalog(
         turns,
-        auth_url,
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
         catalog,
         initially_active,
         communication_preferences,
         delivery_targets,
+        TriggeredHarnessDeliveryMode::Normal,
     )
 }
 
 /// [`build_triggered_harness_with_catalog`] with a prebuilt turn coordinator.
 fn build_triggered_harness_with_turns_catalog(
     turns: Arc<ScriptedTurnCoordinator>,
-    auth_url: Option<&str>,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     catalog: Vec<TestNotificationTarget>,
     initially_active: Vec<TestNotificationTarget>,
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
     delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+    delivery_mode: TriggeredHarnessDeliveryMode,
 ) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
+    let reply_sink = Arc::new(RecordingReplySink::new("acme"));
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -2894,10 +3754,25 @@ fn build_triggered_harness_with_turns_catalog(
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
+    let coordinator_store: Arc<dyn OutboundStateStorePort> = if matches!(
+        delivery_mode,
+        TriggeredHarnessDeliveryMode::FailTerminalDeliveredWrite
+    ) {
+        Arc::new(TerminalDeliveredWriteFailingStore {
+            inner: Arc::clone(&store),
+        })
+    } else {
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>
+    };
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        Arc::clone(&coordinator_store),
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            reply_sink: Arc::clone(&reply_sink),
+            requires_enrollment: matches!(
+                delivery_mode,
+                TriggeredHarnessDeliveryMode::RequiresEnrollment
+            ),
         }),
         Arc::new(NoStoredReplyContext),
         Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
@@ -2906,6 +3781,7 @@ fn build_triggered_harness_with_turns_catalog(
             backoff: Duration::ZERO,
         },
     ));
+    start_test_reply_publication(&coordinator, &turns, &threads, &project_files);
     let services = RunDeliveryServices {
         binding_service: Arc::new(StaticBindingService {
             binding: binding(),
@@ -2913,14 +3789,13 @@ fn build_triggered_harness_with_turns_catalog(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        outbound_store: coordinator_store,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: communication_preferences
             .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
         notification_inbox: Some(
             Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
         ),
-        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: delivery_targets.unwrap_or_else(|| {
             Arc::new(StaticTargetCatalog { targets: catalog })
                 as Arc<dyn OutboundDeliveryTargetProvider>
@@ -2929,11 +3804,7 @@ fn build_triggered_harness_with_turns_catalog(
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: auth_url.map(|url| {
-            Arc::new(OAuthPromptSource {
-                authorization_url: Some(url.to_string()),
-            }) as Arc<dyn BlockedAuthPromptSource>
-        }),
+        blocked_auth_prompts,
         auth_flow_cancel: None,
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
@@ -3072,6 +3943,76 @@ async fn triggered_project_scoped_fire_is_denied_without_delivery() {
 }
 
 #[tokio::test]
+async fn pre_submit_failure_reaches_inbox_without_channel_delivery() {
+    let inbox = notification_inbox();
+    let default_notifier = PreSubmitFailureInboxNotifier::new(
+        Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>
+    );
+    default_notifier
+        .on_trigger_submitted(triggered_request(TurnRunId::new(), false))
+        .await;
+    assert!(
+        inbox_records_with_archived(inbox.as_ref(), true)
+            .await
+            .notifications
+            .is_empty(),
+        "the pre-submit notifier ignores accepted runs"
+    );
+    let notifier = PreSubmitFailureInboxNotifier::with_publish_timeout(
+        Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+        Duration::from_millis(20),
+    );
+    let scope = binding_scope();
+
+    let request = TriggeredFireFailureDeliveryRequest {
+        scope: scope.clone(),
+        creator_user_id: user(),
+        project_scoped: false,
+        prompt: "Send the daily summary".to_string(),
+        failure_ref: ironclaw_outbound::ProjectionUpdateRef::new("trigger-failure:inbox-only")
+            .expect("failure ref"),
+    };
+    notifier
+        .on_trigger_failed_before_submit(request.clone())
+        .await;
+    notifier.on_trigger_failed_before_submit(request).await;
+
+    let records = inbox_records(inbox.as_ref()).await;
+    assert_eq!(records.notifications.len(), 1);
+    assert_eq!(records.notifications[0].kind, NotificationKind::RunFailed);
+    assert_eq!(records.notifications[0].action, NotificationAction::None);
+    assert!(
+        records.notifications[0].source.thread_id.is_none(),
+        "a pre-submit failure has no canonical thread identity"
+    );
+    assert!(records.notifications[0].resolved_at.is_some());
+}
+
+#[tokio::test]
+async fn stalled_pre_submit_inbox_publication_is_bounded() {
+    let notifier = PreSubmitFailureInboxNotifier::with_publish_timeout(
+        Arc::new(HangingNotificationInbox),
+        Duration::from_millis(5),
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        notifier.on_trigger_failed_before_submit(TriggeredFireFailureDeliveryRequest {
+            scope: binding_scope(),
+            creator_user_id: user(),
+            project_scoped: false,
+            prompt: "Send the daily summary".to_string(),
+            failure_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                "trigger-failure:stalled-inbox",
+            )
+            .expect("failure ref"),
+        }),
+    )
+    .await
+    .expect("Inbox publication must respect its deadline");
+}
+
+#[tokio::test]
 async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_run() {
     let harness = build_triggered_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
@@ -3174,6 +4115,13 @@ async fn project_scoped_pre_submit_failure_is_not_sent_to_personal_channels() {
             .await
             .expect("attempts")
             .is_empty()
+    );
+    assert!(
+        inbox_records(harness.notification_inbox.as_ref())
+            .await
+            .notifications
+            .is_empty(),
+        "a project-scoped fire must not publish to a personal Inbox"
     );
 }
 
@@ -3500,6 +4448,100 @@ async fn triggered_failed_gate_fanout_still_resolves_the_inbox_after_resume() {
     );
 }
 
+#[tokio::test]
+async fn triggered_no_delivery_outcome_is_not_recorded_as_external_success() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000024";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns_catalog(
+        turns,
+        None,
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+        TriggeredHarnessDeliveryMode::RequiresEnrollment,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed,
+        "NoDelivery carries no adapter/provider evidence and cannot latch Delivered"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "an enrollment-required channel with no registrations performs no egress"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("list delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::NoTarget,
+        "the caller test must exercise the coordinator's typed NoDelivery outcome"
+    );
+}
+
+#[tokio::test]
+async fn triggered_unconfirmed_delivery_is_not_recorded_as_confirmed_or_retried() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000025";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns_catalog(
+        turns,
+        None,
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+        TriggeredHarnessDeliveryMode::FailTerminalDeliveredWrite,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        serde_json::to_value(outcome).expect("serialize outcome"),
+        serde_json::json!("unconfirmed"),
+        "provider acceptance without a durable Delivered write must retain weaker evidence"
+    );
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "unconfirmed provider acceptance must not retry egress"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("list delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_ne!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+        "the failed confirmation write must not fabricate durable delivery"
+    );
+}
+
 /// Spec §7: an OAuth `authorization_url` may only land in a personal DM.
 /// Non-DM notification channels get a redacted "needs re-auth, open the app"
 /// notice instead, and the run is NO LONGER cancelled — it parks so the user
@@ -3550,6 +4592,83 @@ async fn triggered_auth_prompt_reaches_only_dm_targets_and_run_stays_parked() {
     assert_eq!(
         delivered_conversations(&harness.adapter),
         vec!["dm-creator".to_string(), "chan-eng".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn triggered_auth_without_a_gate_ref_does_not_publish_an_inbox_item() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedAuth, None)],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "a background auth block without a gate ref must not leave an unresolved Inbox item"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "a background auth block without a gate ref must not reach external channels"
+    );
+}
+
+#[tokio::test]
+async fn triggered_auth_prompt_failure_keeps_inbox_lifecycle_observable() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000002";
+    let harness = build_triggered_harness_with_turns_catalog(
+        Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ])),
+        Some(Arc::new(FailingAuthPromptSource)),
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+        TriggeredHarnessDeliveryMode::Normal,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::AuthenticationRequired,
+        GATE,
+    )
+    .await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "failed enrichment must not invent or retry external auth copy"
     );
 }
 
@@ -4065,6 +5184,199 @@ async fn triggered_empty_notification_set_delivers_nothing() {
 }
 
 #[tokio::test]
+async fn triggered_resource_block_stays_external_silent_and_continues_after_recovery() {
+    const GATE: &str = "gate:resource-budget-00000000000000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped
+    );
+    assert!(harness.adapter.texts().is_empty());
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "the authoritative process-journal observer owns the durable resource-block lifecycle"
+    );
+}
+
+#[tokio::test]
+async fn triggered_persistent_resource_block_does_not_claim_external_delivery() {
+    const GATE: &str = "gate:resource-budget-00000000000000000000000002";
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedResource, Some(GATE))],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped,
+        "an Inbox-only resource block is not external delivery evidence"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "resource details never reach a configured channel"
+    );
+    assert!(
+        harness
+            .store
+            .list_delivery_attempts(binding_scope())
+            .await
+            .expect("delivery attempts")
+            .is_empty(),
+        "no adapter call means no durable external-delivery attempt"
+    );
+}
+
+#[tokio::test]
+async fn triggered_gate_less_resource_block_delivers_timeout_notice() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedResource, None)],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "a gate-less resource block has no durable Inbox identity, so timeout feedback must be externally delivered"
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one timeout notice is delivered: {texts:?}");
+    assert!(texts[0].contains("taking longer than expected"));
+}
+
+#[tokio::test]
+async fn triggered_auth_prompt_is_retracted_after_an_intervening_resource_block() {
+    const AUTH_GATE: &str = "gate:auth-before-resource-00000000000000000001";
+    const RESOURCE_GATE: &str = "gate:resource-after-auth-0000000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_GATE)),
+            scripted_state(TurnStatus::BlockedResource, Some(RESOURCE_GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "the successfully delivered auth prompt remains durable external-delivery evidence"
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        1,
+        "only the auth prompt is external: {texts:?}"
+    );
+    assert!(texts[0].contains("Setup link: https://provider.example/oauth"));
+    assert_eq!(
+        harness.adapter.retracted_refs(),
+        vec!["ts-1".to_string()],
+        "the OAuth prompt must be removed after recovery despite the intervening resource block"
+    );
+}
+
+#[tokio::test]
+async fn triggered_resource_block_keeps_watching_for_a_later_approval_gate() {
+    const RESOURCE_GATE: &str = "gate:resource-before-approval-00000000000000001";
+    const APPROVAL_GATE: &str = "gate:approval-after-resource-00000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedResource, Some(RESOURCE_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_GATE)),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "resource detail stays private: {texts:?}");
+    assert!(texts[0].contains("Approval needed"));
+}
+
+#[tokio::test]
+async fn triggered_resource_block_keeps_watching_for_a_later_auth_gate() {
+    const RESOURCE_GATE: &str = "gate:resource-before-auth-000000000000000000001";
+    const AUTH_GATE: &str = "gate:auth-after-resource-0000000000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedResource, Some(RESOURCE_GATE)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_GATE)),
+        ],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "resource detail stays private: {texts:?}");
+    assert!(texts[0].contains("Setup link: https://provider.example/oauth"));
+}
+
+#[tokio::test]
 async fn triggered_notification_preference_read_failure_is_not_reported_as_no_configuration() {
     let harness = build_triggered_harness_with_preferences(
         vec![
@@ -4408,6 +5720,7 @@ impl ProductOutboundTargetResolver for StaticOutboundTargetMetadata {
 /// was deactivated since the user picked it.
 struct ResolverMissingOneExtension {
     adapter: Arc<RecordingChannelAdapter>,
+    reply_sink: Arc<RecordingReplySink>,
     missing: &'static str,
 }
 
@@ -4420,10 +5733,11 @@ impl ChannelDeliveryResolver for ResolverMissingOneExtension {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("install_alpha")
                 .expect("valid installation id"),
-            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            reply: Some(Arc::clone(&self.reply_sink) as Arc<dyn ReplySink>),
             delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            generation: 0,
             requires_enrollment: false,
             declared_egress_hosts: Vec::new(),
         })
@@ -4449,13 +5763,23 @@ fn notify_user_fixture(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let reply_sink = Arc::new(RecordingReplySink::new("acme"));
+    // notify_user never reads run state; the coordinator double just has
+    // to exist, and its constructor requires a non-empty script.
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::Completed,
+        None,
+    )]));
     let channel_resolver: Arc<dyn ChannelDeliveryResolver> = match missing_extension {
         Some(missing) => Arc::new(ResolverMissingOneExtension {
             adapter: Arc::clone(&adapter),
+            reply_sink: Arc::clone(&reply_sink),
             missing,
         }),
         None => Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            reply_sink: Arc::clone(&reply_sink),
+            requires_enrollment: false,
         }),
     };
     let coordinator = Arc::new(DeliveryCoordinator::new(
@@ -4476,23 +5800,18 @@ fn notify_user_fixture(
             .expect("allowlist")
             .insert(ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"));
     }
+    start_test_reply_publication(&coordinator, &turns, &threads, &project_files);
     let services = RunDeliveryServices {
         binding_service: Arc::new(StaticBindingService {
             binding: binding(),
             fail: true,
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
-        // notify_user never reads run state; the coordinator double just has
-        // to exist, and its constructor requires a non-empty script.
-        turn_coordinator: Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
-            TurnStatus::Completed,
-            None,
-        )])) as Arc<dyn TurnCoordinator>,
+        turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         notification_inbox: None,
-        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: catalog.clone(),
         }) as Arc<dyn OutboundDeliveryTargetProvider>,
@@ -4628,4 +5947,112 @@ async fn notify_user_isolates_one_failing_target_and_still_delivers_the_rest() {
         1,
         "exactly the healthy channel received a delivery"
     );
+}
+
+/// The turn-kernel view reply publication reads for terminal facts: the
+/// scripted coordinator's LAST state, served without consuming a scripted
+/// poll call so the observer's script is untouched. Cancels are forwarded
+/// to the scripted coordinator; everything else is unreachable from the
+/// publication lane.
+struct PublicationKernelView {
+    turns: Arc<ScriptedTurnCoordinator>,
+}
+
+#[async_trait]
+impl TurnCoordinator for PublicationKernelView {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel view".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel view".to_string(),
+        })
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel view".to_string(),
+        })
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.turns.cancel_run(request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        let scripted = self.turns.last_state();
+        Ok(TurnRunState {
+            scope: request.scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: scripted.status,
+            accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
+            resolved_model_route: None,
+            model_usage: None,
+            execution_outcome: scripted.execution_outcome,
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: scripted.gate_ref,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: scripted.failure,
+            event_cursor: EventCursor(1),
+            product_context: None,
+            resume_disposition: None,
+        })
+    }
+}
+
+/// Start the coordinator's production publication lane, with fast pacing so
+/// a scripted run settles within a test's patience.
+fn start_test_reply_publication(
+    coordinator: &Arc<DeliveryCoordinator>,
+    turns: &Arc<ScriptedTurnCoordinator>,
+    threads: &Arc<InMemorySessionThreadService>,
+    project_files: &Arc<ScriptedProjectFilesystemReader>,
+) {
+    use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new()),
+        turn_coordinator: Arc::new(PublicationKernelView {
+            turns: Arc::clone(turns),
+        }),
+        thread_service: Arc::clone(threads) as Arc<dyn ironclaw_threads::SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::clone(project_files)
+            as Arc<dyn ironclaw_assistant::ProjectFilesystemReader>,
+        session_channel: None,
+        settings: ReplyPublicationSettings {
+            lease_ttl: Duration::from_secs(5),
+            min_progress_interval: Duration::ZERO,
+            retry_backoff: Duration::from_millis(5),
+            max_retry_backoff: Duration::from_millis(50),
+            terminal_attempt_budget: 3,
+            reconcile_timeout: Duration::from_secs(2),
+            terminal_fact_attempts: 3,
+            heartbeat_interval: Duration::from_secs(60),
+        },
+    }));
 }

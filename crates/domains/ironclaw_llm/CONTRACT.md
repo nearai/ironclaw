@@ -43,7 +43,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `image_models.rs` | Image-generation model metadata table |
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
 | `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
-| `models.rs` | Top-level model-name catalog and helpers |
+| `models.rs` | Provider-neutral discovered-model capabilities plus the top-level model-name catalog and helpers |
 | `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `test-support` cargo feature for downstream test harnesses |
 
 ## Sub-owner map
@@ -64,15 +64,15 @@ owner, and a deleted one fails until its entry goes.
 | Sub-owner | Owns | Never contains | Files |
 |---|---|---|---|
 | `core-contract` | The `LlmProvider` trait, the request/response vocabulary, the error taxonomy, the config types, shared HTTP hardening, and the factory that assembles everything | A vendor protocol, or reliability behavior | `lib.rs`, `provider.rs`, `agent_message.rs`, `error.rs`, `config.rs`, `url_check.rs` |
-| `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
+| `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `github_copilot/tests.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
 | `auth-sessions` | Acquiring, persisting, refreshing and revoking provider credentials, plus the host seam that stores them | Request/response shaping | `auth.rs`, `session.rs`, `openai_codex_session.rs`, `github_copilot_auth.rs`, `codex_auth.rs`, `token_refreshing.rs`, `host.rs` |
-| `registry` | The **provider** catalog: definitions, protocols, base-URL and api-key resolution | Model facts (that is `model-catalog`) | `registry.rs`, `resolution.rs` |
+| `registry` | The **provider** catalog: definitions, protocols, base-URL and api-key resolution | Model facts (that is `model-catalog`) | `registry.rs`, `resolution.rs`, `resolution/tests.rs` |
 | `decorators` | Anything that wraps `dyn LlmProvider` and is not credential work: retry, breaker, failover, cache, hot-reload, cost routing | Vendor protocol | `retry.rs`, `circuit_breaker.rs`, `failover.rs`, `response_cache.rs`, `runtime.rs`, `smart_routing.rs` |
 | `normalization` | Cross-provider wire hygiene in all three directions: outbound tool schemas, inbound tool arguments, inbound content text | A fix that only one provider needs — that belongs beside it in `providers` | `tool_schema.rs`, `tool_schema/placeholder_stripping.rs`, `tool_args.rs`, `reasoning.rs` |
 | `model-catalog` | Facts about **models**: what an endpoint lists, and which models see images, generate images, or think natively | Provider identity or routing | `models.rs`, `reasoning_models.rs`, `vision_models.rs`, `image_models.rs` |
 | `recording` | Trace capture and replay, and binding recorded tool arguments to earlier results | Live provider behavior | `recording.rs`, `trace_binding.rs` |
 | `transcription` | The `TranscriptionProvider` trait and its implementations — a **different trait** from `LlmProvider`, sharing only transports | Anything implementing `LlmProvider` | `transcription/mod.rs`, `transcription/chat_completions.rs`, `transcription/openai.rs` |
-| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs`, `anthropic_oauth/tests.rs` |
+| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs`, `anthropic_oauth/tests.rs`, `anthropic_oauth/tests/prompt_cache_tests.rs` |
 
 Four placement calls worth stating, because each is a file whose *shape*
 suggests one owner and whose *purpose* is another:
@@ -221,6 +221,7 @@ pub trait LlmProvider: Send + Sync {
 
     // Optional (have defaults)
     async fn list_models(&self) -> Result<Vec<String>, LlmError> { Ok(vec![]) }
+    async fn list_model_catalog(&self) -> Result<Vec<DiscoveredModel>, LlmError> { /* IDs with optional directional modalities */ }
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> { /* name only */ }
     fn effective_model_name(&self, requested_model: Option<&str>) -> String { /* uses active */ }
     fn active_model_name(&self) -> String { self.model_name().to_string() }
@@ -231,6 +232,7 @@ pub trait LlmProvider: Send + Sync {
 
 Key notes:
 - `model_name()` returns the configured model name; `active_model_name()` returns the currently active model (may differ if `set_model()` was called — only `NearAiChatProvider` supports this).
+- `list_model_catalog()` is additive to `list_models()`: its default projects legacy model IDs with empty capability metadata. Provider decorators must delegate the detailed method so metadata survives the production chain. NEAR AI preserves recognized top-level or `architecture` input/output modalities from `/models`; unknown or absent modality values are ignored rather than failing discovery. Capabilities are display metadata only and never participate in routing or authorization.
 - `cost_per_token()` returns `(Decimal, Decimal)` using `rust_decimal`. Look up via `costs::model_cost()` in your constructor; fall back to `costs::default_cost()` for unknowns.
 - `RigAdapter` forwards per-request model overrides through rig-core's typed request model field. Do not put `model` in flattened `additional_params`, which would serialize a duplicate top-level JSON key.
 - `complete_with_tools()` is never cached (tool calls can have side effects) — `CachedProvider` always passes them through.
@@ -359,9 +361,66 @@ Both Anthropic transports emit explicit `cache_control` breakpoints when
   1h automatic marker is an API error (TTL conflict on the last block).
 
 All markers within a request share one TTL, satisfying Anthropic's
-longer-TTL-first ordering rule. Models without cache support (claude-2 era)
-downgrade to `none` via `supports_prompt_cache`. Wire shape is pinned by
+longer-TTL-first ordering rule. `supports_prompt_cache` is a **denylist**:
+every Claude model supports caching except the documented-unsupported
+`claude-2*` and `claude-instant*` families, so a new model family (e.g.
+`claude-fable-5-1`) caches by default without needing an allowlist update.
+Downgrade-to-`none` decisions and their `tracing::warn!` go through the
+single `effective_cache_retention` chokepoint, shared by `with_cache_retention`
+and both transports' construction paths. Wire shape is pinned by
 capture-server tests in both files.
+
+**OpenAI Responses `prompt_cache_key`**: `openai_codex_provider.rs` and
+`codex_chatgpt.rs` set `prompt_cache_key` on the wire to whatever value
+`ToolCompletionRequest`/`CompletionRequest.metadata` carries under
+`ironclaw_llm::PROMPT_CACHE_KEY_METADATA` — a stable per-conversation key
+raises OpenAI's cache hit rate. The loop-host gateway
+(`ironclaw_loop_host::model_gateway::add_request_metadata`) is the one seam
+that inserts it, and it is **never the raw thread id**: `ThreadId` is
+caller-authoritative free text, so the gateway derives a domain-separated
+SHA-256 of `HostManagedModelRequest.thread_id`, hex-encoded and truncated to
+32 characters (`derive_prompt_cache_key`), before it ever reaches an
+outbound request. The field is omitted, never backfilled from `run_id`, when
+no thread id is known (a per-run key would fragment the cache across a
+conversation's turns).
+
+**OpenAI-compatible Chat Completions `prompt_cache_key`**: the same
+metadata-sourced value also reaches the three OpenAI-compatible Chat
+Completions transports, so provider-side prefix caches route consistently
+regardless of which wire shape a turn happens to use:
+
+- `rig_adapter.rs` (`RigAdapter::prompt_cache_key`, called from all four
+  `LlmProvider` methods): merged into rig-core's `additional_params` via the
+  same `merge_additional_params` fill-missing-only helper used for provider
+  defaults, so it never clobbers an existing key. Gated on
+  `prompt_cache_key_supported`, a dedicated flag set `true` by the generic
+  OpenAI-compatible, DeepSeek, and OpenRouter factories — every rig-core path
+  here that serializes an OpenAI Chat Completions request. It stays **false**
+  for the Anthropic protocol, where
+  `prompt_cache_key` is meaningless and `additional_params` already carries
+  `cache_control`, and for the native Gemini and Ollama protocols, whose
+  request shapes are not OpenAI Chat Completions.
+- `nearai_chat.rs` (`NearAiChatProvider::prompt_cache_key`): a
+  `#[serde(skip_serializing_if = "Option::is_none")] prompt_cache_key: Option<String>`
+  field on `ChatCompletionRequest`, populated from request metadata in all
+  four `LlmProvider` methods.
+- `github_copilot.rs` (`GithubCopilotProvider::prompt_cache_key`): same
+  field/gate shape on `OpenAiRequest`, populated in `complete()` and
+  `complete_with_tools()`.
+
+**Kill switch**: `RegistryProviderConfig`/dedicated provider
+`unsupported_params`
+accepts `"prompt_cache_key"` (validated against `registry.rs`'s
+shared `provider.rs::UnsupportedParam::VALID_NAMES`) so an operator can
+suppress the field per provider when a server 400s on unknown fields. The
+checked-in Groq definition uses this switch because Groq caches supported
+models automatically and does not accept this request extension. The
+shared `provider.rs::prompt_cache_key_from_metadata` helper applies that gate
+before reading metadata for rig, NEAR AI, GitHub Copilot, Codex ChatGPT, and
+OpenAI Codex adapters. Catalog resolution carries the same list through
+`RegistryProviderConfig` or `ResolvedDedicatedProviderConfig`; the latter
+populates `NearAiConfig` or `OpenAiCodexConfig` for the corresponding dedicated
+backend.
 
 ## rig_adapter.rs Details
 

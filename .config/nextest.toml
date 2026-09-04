@@ -25,6 +25,30 @@ success-output = "never"
 # against the workflow-level 25-minute cap.
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+# These binaries currently use process-local locks to protect shared ports or
+# full-runtime state. Nextest launches each test in its own process, so the
+# runner owns their cross-process serialization explicitly.
+[test-groups.ironclaw-smoke-process-local]
+max-threads = 1
+
+[test-groups.composition-runtime-process-local]
+max-threads = 1
+
+[test-groups.ironclaw-cli-global-policy]
+max-threads = 1
+
+[[profile.ci.overrides]]
+filter = "package(ironclaw) & binary(smoke)"
+test-group = "ironclaw-smoke-process-local"
+
+[[profile.ci.overrides]]
+filter = "package(ironclaw_composition) & (binary(budget_e2e) | binary(runtime))"
+test-group = "composition-runtime-process-local"
+
+[[profile.ci.overrides]]
+filter = "package(ironclaw) & binary(ironclaw) & test(~commands::traces::tests::)"
+test-group = "ironclaw-cli-global-policy"
+
 # Per-test windows for the handful of scenarios that genuinely need more
 # than 60s (live-recorded fixtures + heavy integration).
 [[profile.default.overrides]]
@@ -34,3 +58,21 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = "test(~e2e_thread_scheduling) | test(~heavy_integration)"
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+# Group binaries may contain several independent top-level tests. Nextest runs
+# each in its own process; scenarios inside one test remain sequential.
+[[profile.ci.overrides]]
+filter = "binary(~reborn_group_)"
+slow-timeout = { period = "28m", terminate-after = 1 }
+
+# ironclaw_architecture_tests: reborn_{extension_contract,loop_port,product_contract}_location_scan
+# and reborn_sealed_evidence_mint_ratchet each contain one whole-crates/-tree
+# scan test. On the last green run the location-scan tests finished at
+# 176.8s against the default 60s/3 = 180s hard kill; the very next run was
+# terminated at 180.008s. reborn_sealed_evidence_mint_ratchet rides the same
+# ladder to 136-141s. Locally these take ~110s. 60s/6 = 360s keeps the same
+# SLOW cadence but gives real headroom instead of raising the default for
+# every binary in the crate.
+[[profile.ci.overrides]]
+filter = 'binary(/_location_scan$/) | binary(~reborn_sealed_evidence_mint_ratchet)'
+slow-timeout = { period = "60s", terminate-after = 6 }

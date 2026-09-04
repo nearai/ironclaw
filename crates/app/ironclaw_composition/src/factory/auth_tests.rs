@@ -22,6 +22,11 @@ use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
 };
+use ironclaw_notifications::{
+    LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInitialState,
+    NotificationKind, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
+};
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
     ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId, SuspendProcessRequest,
@@ -219,6 +224,36 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         Vec::new(),
     )
     .await;
+    let notification_recipient = NotificationRecipient {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: actor.user_id.clone(),
+    };
+    services
+        .notification_inbox
+        .publish(PublishNotificationRequest {
+            id: ironclaw_assistant::run_notification_inbox_id_for_test(
+                run_id,
+                NotificationKind::AuthenticationRequired,
+                Some(gate_ref.as_str()),
+            )
+            .expect("notification id"),
+            recipient: notification_recipient.clone(),
+            kind: NotificationKind::AuthenticationRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: Some(scope.thread_id.clone()),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref")),
+                credential_providers: Vec::new(),
+            },
+            action: NotificationAction::OpenThread {
+                thread_id: scope.thread_id.clone(),
+            },
+            initial_state: NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed durable auth notification");
     let auth_scope = auth_scope_for_turn(&scope, &actor);
     let flow = product_auth
         .flow_manager()
@@ -278,6 +313,18 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         .expect("run state");
     assert_eq!(state.status, TurnStatus::Queued);
     assert_eq!(state.gate_ref, None);
+    let notifications = services
+        .notification_inbox
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient,
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list durable auth notifications");
+    assert_eq!(notifications.notifications.len(), 1);
+    assert!(notifications.notifications[0].resolved_at.is_some());
 }
 
 #[tokio::test]
@@ -404,6 +451,10 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     let process_transitions = services.processes.transitions();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let first_scope = turn_scope();
+    let notification_recipient = NotificationRecipient {
+        tenant_id: first_scope.tenant_id.clone(),
+        user_id: actor.user_id.clone(),
+    };
     let second_scope = TurnScope::new_with_owner(
         first_scope.tenant_id.clone(),
         first_scope.agent_id.clone(),
@@ -431,6 +482,42 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         "github",
     )
     .await;
+    for (scope, run_id, gate_ref) in [
+        (&first_scope, first_run, "gate:fanout-first"),
+        (&second_scope, second_run, "gate:fanout-second"),
+    ] {
+        services
+            .notification_inbox
+            .publish(PublishNotificationRequest {
+                id: ironclaw_assistant::run_notification_inbox_id_for_test(
+                    run_id,
+                    NotificationKind::AuthenticationRequired,
+                    Some(gate_ref),
+                )
+                .expect("fan-out notification id"),
+                recipient: notification_recipient.clone(),
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: Some(scope.thread_id.clone()),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(gate_ref).expect("fan-out lifecycle ref"),
+                    ),
+                    credential_providers: vec![
+                        ironclaw_host_api::ids::VendorId::new("github")
+                            .expect("credential provider"),
+                    ],
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: scope.thread_id.clone(),
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed fan-out auth notification");
+    }
     let auth_scope = auth_scope_for_turn(&first_scope, &actor);
     let flow_id = create_flow(
         product_auth,
@@ -459,6 +546,24 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         );
         assert_eq!(state.gate_ref, None);
     }
+    let notifications = services
+        .notification_inbox
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient,
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list fan-out auth notifications");
+    assert_eq!(notifications.notifications.len(), 2);
+    assert!(
+        notifications
+            .notifications
+            .iter()
+            .all(|notification| notification.resolved_at.is_some()),
+        "every resumed provider gate must retire its Inbox record"
+    );
 }
 
 #[tokio::test]

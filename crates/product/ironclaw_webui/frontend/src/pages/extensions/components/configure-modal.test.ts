@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import {
   channelConnection,
@@ -78,7 +79,7 @@ function renderModal({
   runEffects = false,
   blockPopup = false,
   initialConnection = null,
-} = {}) {
+}: DynamicTestOptions = {}) {
   const calls = [];
   const invalidations = [];
   const stateSets = [];
@@ -89,11 +90,13 @@ function renderModal({
   const openedPopups = [];
   const notifications = [];
   let stateIndex = 0;
-  const context = {
+  const context: vm.Context = {
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
     }),
     DeviceLinkPanel() {},
+    InlineNotice() {},
+    Input() {},
     PairingWebCodePanel() {},
     Button() {},
     Icon() {},
@@ -199,6 +202,8 @@ function renderModal({
     calls,
     context,
     DeviceLinkPanel: context.DeviceLinkPanel,
+    InlineNotice: context.InlineNotice,
+    Input: context.Input,
     PairingWebCodePanel: context.PairingWebCodePanel,
     SetupReadiness: context.globalThis.__testExports.SetupReadiness,
     AdminSetupFieldsNotice:
@@ -214,6 +219,91 @@ function renderModal({
     stateSets,
   };
 }
+
+test("ConfigureModal renders manual credentials with the shared Input", () => {
+  const view = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [{ kind: "credential" }],
+      secrets: [
+        {
+          name: "api_token",
+          prompt: "API token",
+          setup: { kind: "manual_token" },
+        },
+      ],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.Input),
+    true,
+    "manual credentials must use the design-system Input",
+  );
+});
+
+test("ConfigureModal renders configuration feedback with InlineNotice", () => {
+  const loadFailure = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: new Error("setup unavailable"),
+    },
+  });
+  assert.equal(
+    renderedContainsComponent(loadFailure.rendered, loadFailure.InlineNotice),
+    true,
+    "setup load errors must use InlineNotice",
+  );
+
+  const configured = renderModal({
+    surfaces: toolSurfaces,
+    installationState: "active",
+    setupResult: {
+      phase: "active",
+      blockers: [{ kind: "policy" }],
+      secrets: [
+        {
+          name: "api_token",
+          provided: true,
+          setup: { kind: "manual_token" },
+        },
+      ],
+      fields: [{ name: "tenant_url" }],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+  assert.equal(
+    renderedContainsComponent(configured.rendered, configured.InlineNotice),
+    true,
+    "configuration status must use InlineNotice",
+  );
+  const readiness = renderFirstComponent(configured.rendered, configured.SetupReadiness);
+  assert.equal(
+    renderedContainsComponent(readiness, configured.InlineNotice),
+    true,
+    "setup readiness feedback must use InlineNotice",
+  );
+  const adminFields = renderFirstComponent(
+    configured.rendered,
+    configured.AdminSetupFieldsNotice,
+  );
+  assert.equal(
+    renderedContainsComponent(adminFields, configured.InlineNotice),
+    true,
+    "administrator setup feedback must use InlineNotice",
+  );
+});
 
 test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit choices", () => {
   const saved = [];

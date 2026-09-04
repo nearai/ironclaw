@@ -12,7 +12,8 @@ mod store_adapter;
 
 pub use event_projection::{
     TurnEventProjectionFromProcessJournal, turn_event_page_from_process_journal,
-    turn_lifecycle_event_from_process_journal_entry, turn_status_from_process_status,
+    turn_lifecycle_event_from_process_journal_entry, turn_scope_from_process_scope,
+    turn_status_from_process_status,
 };
 pub use loop_checkpoint::ProcessLoopCheckpointStore;
 pub use metadata::{AgentTurnProcessStateMetadata, agent_turn_metadata_from_claimed};

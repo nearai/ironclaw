@@ -1,5 +1,18 @@
 use super::*;
 
+fn assert_parallel_batch_progress_policy(host: &MockHost) {
+    assert!(
+        host.progress_events().iter().any(|event| matches!(
+            event,
+            ironclaw_loop_contracts::LoopProgressEvent::CapabilityBatchStarted {
+                policy: ironclaw_loop_contracts::BatchPolicyKind::Parallel,
+                ..
+            }
+        )),
+        "capability batch progress must report the contract-owned parallel policy"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn model_emitted_batch_overlaps_calls_by_default_and_preserves_input_order() {
     let first_ref = LoopResultRef::new("result:parallel-first").expect("valid");
@@ -55,6 +68,7 @@ async fn model_emitted_batch_overlaps_calls_by_default_and_preserves_input_order
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_parallel_batch_progress_policy(&host);
     assert_eq!(host.max_concurrent_single_invocations(), 2);
     assert!(host.batch_invocations().is_empty());
     assert_eq!(host.single_invocations().len(), 2);
@@ -108,6 +122,7 @@ async fn parallel_batch_uses_batch_port_when_ordered_middleware_requires_it() {
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_parallel_batch_progress_policy(&host);
     assert_eq!(host.batch_invocations().len(), 1);
     assert!(host.single_invocations().is_empty());
     assert_eq!(
@@ -212,6 +227,24 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
         final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock).result_refs,
         persisted_refs,
         "the suspension checkpoint must retain all completed siblings"
+    );
+    let expected_signatures = (0..4)
+        .map(|index| {
+            CapabilityCallSignature::from_call(
+                capability_id(),
+                &serde_json::json!({ "input_ref": format!("input:parallel-{index}") }),
+            )
+            .expect("signature")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock)
+            .recent_call_signatures
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_signatures,
+        "the checkpoint must exclude signatures for calls that never launched"
     );
 }
 

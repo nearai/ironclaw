@@ -9,8 +9,9 @@ scripts/ci/run-hermetic-deterministic-suite.sh all
 
 It composes the same checked-in discovery and entrypoints used by
 `reborn-tests.yml` and `reborn-e2e.yml`: the production Reborn package closure
-and allowlist with CI feature flags, root test partitions, shared-state group
-suites, the complete registered Reborn integration tier, recorded-QA fixture
+and allowlist with CI feature flags, root test partitions, the complete
+registered integration tier (flat and shared-state group targets in one
+inventory-selected runner invocation), recorded-QA fixture
 checks and replay, the Rust Reborn E2E gate, WebUI unit tests, standalone binary
 build, and the merge-gating Python E2E/provider lanes. It deliberately excludes
 live canaries, nightly Playwright shards, stress, release, and platform
@@ -32,12 +33,23 @@ as a network exception.
 
 Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. The boundary
 uses a default-deny environment allowlist: only required compiler/tool paths and
-named deterministic test controls survive. Cargo receives a temporary home that
-links only the existing offline `registry` and `git` caches, never host Cargo
-credentials or configuration; the resolved Rust sysroot is placed directly on
+named deterministic test controls survive. Cargo receives a suite-owned home
+(`ironclaw-hermetic-cargo-home` under `RUNNER_TEMP`, else the temp directory;
+`IRONCLAW_HERMETIC_CARGO_HOME` relocates it) that links only the existing
+offline `registry` and `git` caches, never host Cargo credentials or
+configuration. That home is one stable path per host rather than a fresh
+directory per invocation: cargo hashes each registry crate's absolute source
+path into its fingerprint, so a per-invocation home invalidated the whole
+dependency closure between one guarded command and the next and left every
+restored CI build cache stale. Because that home outlives an invocation, the
+runner removes any Cargo configuration or credential file from it on entry
+(only the two cache links and Cargo's own lock and cache-tracker files may
+persist) and refuses an `IRONCLAW_HERMETIC_CARGO_HOME` that resolves to, or
+contains, the host Cargo home. The resolved Rust sysroot is placed directly on
 `PATH` without exporting the host Rustup home. Compiler output remains in the
 repository's explicit `target/` build directory so prebuilt E2E binaries and
-incremental CI artifacts keep their documented paths.
+incremental CI artifacts keep their documented paths, and so a `target/`
+restored from the `reborn-hermetic` Actions cache is fresh inside the boundary.
 
 That boundary:
 

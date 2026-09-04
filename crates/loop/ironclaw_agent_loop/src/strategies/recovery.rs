@@ -247,8 +247,8 @@ pub(crate) enum RetryScope {
 ///   attempt before aborting. Provider outages (5xx storms) routinely outlast
 ///   a couple of quick retries; a long-running agentic turn must ride them out
 ///   rather than discard all prior work.
-/// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`, then
-///   gives the compacted prompt one observation-assisted attempt before aborting.
+/// - Retries `ContextOverflow` exactly once at iteration scope with
+///   `ShrinkContext`; the checkpointed attempt bit makes a second overflow terminal.
 /// - Retries `StaleRequest` at iteration scope (rebuilding the capability
 ///   surface and prompt bundle) up to [`Self::max_attempts_per_class`] times,
 ///   then gives the refreshed iteration one typed observation-assisted
@@ -374,13 +374,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     ModelErrorRecoveryObservation::stale_request(),
                 )
             }
-            ModelErrorClass::ContextOverflow => retry_observe_or_abort(
-                state,
-                self.max_attempts_per_class,
-                RetryScope::Iteration,
-                |_| Some(RetryAlteration::ShrinkContext),
-                ModelErrorRecoveryObservation::context_overflow(),
-            ),
+            ModelErrorClass::ContextOverflow => recover_context_overflow_once(state),
             ModelErrorClass::InvalidOutput => {
                 let reason =
                     ModelInvalidOutputDetailReason::from_safe_summary(err.safe_summary.as_str());
@@ -489,6 +483,26 @@ fn retry_or_abort(
             recovery: next,
             scope,
             alter: alteration(attempts),
+        }
+    }
+}
+
+fn recover_context_overflow_once(state: &LoopExecutionState) -> RecoveryOutcome {
+    let attempt_class = RecoveryAttemptClass::ModelContextOverflow;
+    let attempts = state.recovery_state.attempts_for(attempt_class);
+    let next = state
+        .recovery_state
+        .with_incremented_attempts_for(attempt_class);
+    if attempts == 0 {
+        RecoveryOutcome::Retry {
+            recovery: next,
+            scope: RetryScope::Iteration,
+            alter: Some(RetryAlteration::ShrinkContext),
+        }
+    } else {
+        RecoveryOutcome::Abort {
+            recovery: next,
+            failure_kind: LoopFailureKind::ModelError,
         }
     }
 }
@@ -1426,7 +1440,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn model_context_overflow_retries_then_observes_once_before_abort() {
+        async fn model_context_overflow_compacts_once_then_aborts() {
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();
 
@@ -1434,7 +1448,7 @@ mod tests {
                 .on_model_error(&state, &model_err(ModelErrorClass::ContextOverflow))
                 .await;
 
-            match outcome {
+            let recovery = match outcome {
                 RecoveryOutcome::Retry {
                     recovery,
                     scope,
@@ -1446,43 +1460,33 @@ mod tests {
                     );
                     assert_eq!(scope, RetryScope::Iteration);
                     assert_eq!(alter, Some(RetryAlteration::ShrinkContext));
-                }
-                other => panic!("expected context overflow retry, got {other:?}"),
-            }
-
-            let state = state_with_attempts_for(2, RecoveryAttemptClass::ModelContextOverflow);
-            let outcome = strategy
-                .on_model_error(&state, &model_err(ModelErrorClass::ContextOverflow))
-                .await;
-            let recovery = match outcome {
-                RecoveryOutcome::ModelErrorObservation {
-                    recovery,
-                    scope,
-                    alter,
-                    observation,
-                } => {
-                    assert_eq!(scope, RetryScope::Iteration);
-                    assert_eq!(alter, Some(RetryAlteration::ShrinkContext));
-                    assert_eq!(
-                        observation,
-                        ModelErrorRecoveryObservation::context_overflow()
-                    );
                     recovery
                 }
-                other => panic!("expected context-overflow observation, got {other:?}"),
+                other => panic!("expected context overflow retry, got {other:?}"),
             };
-            let mut state = state_with_no_attempts();
-            state.recovery_state = recovery;
+
+            let mut resumed = state_with_no_attempts();
+            resumed.recovery_state = recovery;
             let outcome = strategy
-                .on_model_error(&state, &model_err(ModelErrorClass::ContextOverflow))
+                .on_model_error(&resumed, &model_err(ModelErrorClass::ContextOverflow))
                 .await;
-            assert!(matches!(
-                outcome,
+            match outcome {
                 RecoveryOutcome::Abort {
-                    failure_kind: LoopFailureKind::ModelError,
-                    ..
+                    recovery,
+                    failure_kind,
+                } => {
+                    assert_eq!(failure_kind, LoopFailureKind::ModelError);
+                    assert_eq!(
+                        recovery.attempts_for(RecoveryAttemptClass::ModelContextOverflow),
+                        2
+                    );
+                    assert!(
+                        !recovery
+                            .observation_attempted_for(ModelErrorObservationClass::ContextOverflow)
+                    );
                 }
-            ));
+                other => panic!("second context overflow must abort, got {other:?}"),
+            }
         }
 
         #[tokio::test]

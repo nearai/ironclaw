@@ -28,5 +28,6 @@ pub(crate) fn test_codex_config(session_path: std::path::PathBuf) -> OpenAiCodex
         client_id: "test_client_id".to_string(),
         session_path,
         token_refresh_margin_secs: 300,
+        unsupported_params: Vec::new(),
     }
 }

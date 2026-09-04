@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { InlineNotice } from "../../../design-system/inline-notice";
@@ -9,6 +8,26 @@ import { saveBlob } from "../../../lib/download";
 import { useFilePicker } from "../../../hooks/useFilePicker";
 import { NoSupportedSettingsImportError } from "../lib/settings-api";
 
+type SettingsImportPayload = { settings: Record<string, unknown> };
+type SettingsToolbarProps = {
+  settingsExport: object | null;
+  onImport: (payload: SettingsImportPayload) => Promise<unknown>;
+  isImporting: boolean;
+  searchQuery: string;
+  onSearchChange: (value: string) => void;
+  onSearchClear: () => void;
+  onBack?: () => void;
+  canGoBack: boolean;
+};
+
+function isSettingsImportPayload(value: unknown): value is SettingsImportPayload {
+  if (!value || typeof value !== "object") return false;
+  const settings = Reflect.get(value, "settings");
+  return Boolean(
+    settings && typeof settings === "object" && !Array.isArray(settings),
+  );
+}
+
 function downloadJson(filename, data) {
   saveBlob(
     new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
@@ -16,11 +35,14 @@ function downloadJson(filename, data) {
   );
 }
 
-function readJsonFile(file) {
+function readJsonFile(file: File): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       try {
+        if (typeof reader.result !== "string") {
+          throw new Error("Unable to read file as text");
+        }
         resolve(JSON.parse(reader.result));
       } catch (error) {
         reject(error);
@@ -41,7 +63,7 @@ export function SettingsToolbar({
   onSearchClear,
   onBack,
   canGoBack,
-}) {
+}: SettingsToolbarProps) {
   const t = useT();
   const messageTimerRef = React.useRef(null);
   const [message, setMessage] = React.useState(null);
@@ -73,13 +95,7 @@ export function SettingsToolbar({
     async (file) => {
       try {
         const payload = await readJsonFile(file);
-        if (
-          !payload ||
-          typeof payload !== "object" ||
-          !payload.settings ||
-          typeof payload.settings !== "object" ||
-          Array.isArray(payload.settings)
-        ) {
+        if (!isSettingsImportPayload(payload)) {
           throw new Error(t("settings.importInvalid"));
         }
         await onImport(payload);

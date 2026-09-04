@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Source types the presenter understands. Rows with other source types are
 // silently excluded from the list (the original intent of the "schedule"-only
 // guard) — adding a new backend source type requires a one-line addition here.
@@ -209,7 +208,12 @@ export function scheduleLabel(cron, timezone, t, locale) {
 // When `timezone` is a non-empty string it is forwarded to `Intl` so the wall
 // clock reflects that timezone. The catch fallback deliberately omits timeZone
 // (browser-local) — never substitute UTC.
-export function formatAutomationDate(value, fallback = "Unknown", locale, timezone) {
+export function formatAutomationDate(
+  value,
+  fallback = "Unknown",
+  locale,
+  timezone = undefined,
+) {
   if (!value) return fallback;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return fallback;

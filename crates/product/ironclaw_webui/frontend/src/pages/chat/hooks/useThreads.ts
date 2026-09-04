@@ -41,7 +41,7 @@ export function useThreads() {
     loadMoreAbortRef.current = null;
   }, []);
 
-  const handleCreateThread = React.useCallback(async (projectId) => {
+  const handleCreateThread = React.useCallback(async (projectId?: string) => {
     const scopeKey = projectId || "__global__";
     const inFlight = createInFlightRef.current.get(scopeKey);
     if (inFlight) return inFlight;

@@ -113,12 +113,11 @@ OAuth client credentials are configured after startup from Admin
 Configuration. These deployment values are never shown in a user's extension
 setup flow.
 
-> **"Admin Configuration" and the "Slack card" are the same place.** This guide
-> uses the operator-facing name; [Slack](/channels/slack) uses the UI path.
-> Concretely: web interface -> **Extensions** -> **Channels** tab -> scroll to the
-> bottom of the Built-in section -> **Configure** on the Slack card. (Extensions
-> opens on the **Registry** tab, which is *not* where channels are connected.)
-> Every "Admin Configuration" reference below means that dialog.
+> **"Admin Configuration" and the "Slack deployment configuration card" are the
+> same place.** Concretely: web interface -> **Admin** -> **Configuration** ->
+> **Slack deployment configuration**. (The **Extensions** page handles only the
+> personal half — installing the extension and connecting your own account.)
+> Every "Admin Configuration" reference below means that card.
 
 As an operator, open Admin, Configuration, then Slack deployment configuration.
 Save:
@@ -164,6 +163,50 @@ because nothing reads it.
 
 Create or edit a Slack app at `api.slack.com/apps`.
 
+### Native Agent (required)
+
+Replies reach Slack through its native Agent surface, not as a finished
+`chat.postMessage`: each run is one agent session in the conversation's thread
+(`agents.sessions.setStatus` — `processing` while the run works, `suspended`
+while it waits on an approval or sign-in, `active` when it ends) and one
+streaming message (`chat.startStream` → `chat.appendStream` per delta / task
+card → `chat.stopStream`). The app therefore needs:
+
+- The **Agents** feature enabled (app settings sidebar → Agents; in a manifest,
+  `features.agent_view` with an `agent_description` of at most 300 characters
+  and `suggested_prompts` entries of `{title, message}`). Slack adds the
+  `assistant:write` bot scope when the feature is enabled; declare it in the
+  manifest as well so an import carries it.
+- The Messages tab enabled and writable (`features.app_home.messages_tab_enabled
+  = true`, `messages_tab_read_only_enabled = false`).
+- Bot scopes `assistant:write` and `chat:write` (every session and streaming
+  method requires `chat:write`).
+- Bot event subscriptions `app_home_opened`, `app_context_changed`,
+  `message.im`, `agent_session_stopped` (this is what makes Slack show the
+  **Stop** button; pressing it is normalized into the channel's `stop`
+  command), and `agent_session_title_changed`. Do not subscribe to the
+  legacy `assistant_thread_*` events — Slack's Agent View validator rejects
+  a manifest that carries them (the parser still tolerates them arriving
+  from older installs).
+
+Two things to know before switching an existing app:
+
+- **`agent_view` is irreversible.** Slack: "Once you change your app's manifest
+  from `assistant_view` to `agent_view`, you can't revert to the Assistant
+  messaging experience."
+- **There is no conventional-message fallback.** A workspace whose app lacks
+  the Agents feature answers `feature_disabled` (or `not_agent_app`) to
+  `agents.sessions.setStatus`; the reply fails clearly, recorded as a failed
+  delivery whose reason names `features.agent_view`, until an operator enables
+  the feature and reinstalls the app. A bot token without `chat:write` fails
+  the same way with `missing_scope`.
+
+The canonical, directly importable Agent-enabled app manifest is
+`crates/extensions/packages/slack/app_manifest.json`; the public page
+`docs/channels/slack.mdx` embeds a test-pinned identical copy, and
+`tests/agent_app_manifest_lockstep.rs` in the Slack package pins both against
+the extension manifest's egress allowlist and the calls the code makes.
+
 Basic Information:
 
 - Copy `Signing Secret` into Admin Configuration for Slack.
@@ -178,7 +221,8 @@ https://<public-host>/api/reborn/product-auth/oauth/slack/callback
 ```
 
 - Add bot token scopes:
-  - `chat:write` for final replies and temporary working messages.
+  - `assistant:write` (added by the Agents feature) and `chat:write` for the
+    agent session and the streamed reply, plus temporary notices.
   - `im:write` for opening DMs after a user has connected with OAuth.
   - `app_mentions:read` for channel mentions.
   - `im:history` for direct-message events.
@@ -208,6 +252,10 @@ https://<public-host>/webhooks/extensions/slack/events
 - Subscribe to bot events:
   - `app_mention`
   - `message.im`
+  - The Agent family (see Native Agent above): `app_home_opened`,
+    `app_context_changed`, `agent_session_stopped`,
+    `agent_session_title_changed` — and NOT the rejected legacy
+    `assistant_thread_*` pair
   - Optional: `message.channels`
   - Optional: `message.groups`
   - Optional: `message.mpim`
@@ -234,7 +282,8 @@ https://<public-host>/webhooks/extensions/slack/events
 
 App Home:
 
-- Enable messages so users can DM the app.
+- Enable messages so users can DM the app (the Messages tab is where an Agent
+  DM lives; it must not be read-only).
 
 Install:
 
@@ -247,6 +296,17 @@ Minimal app manifest sketch:
 display_information:
   name: IronClaw Reborn
 features:
+  agent_view:
+    agent_description: "IronClaw is your autonomous assistant: it researches, drafts, runs tools, and acts across your connected apps, streaming each step into the thread."
+    suggested_prompts:
+      - title: Summarize a thread
+        message: Summarize the discussion in the thread I share next and list the open questions.
+      - title: Check my integrations
+        message: Which integrations are connected for me right now, and what can you do with them?
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: IronClaw Reborn
     always_online: false
@@ -261,6 +321,7 @@ oauth_config:
     - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
   scopes:
     bot:
+      - assistant:write
       - chat:write
       - im:write
       - app_mentions:read
@@ -282,6 +343,10 @@ settings:
       - message.channels
       - message.groups
       - message.mpim
+      - app_home_opened
+      - app_context_changed
+      - agent_session_stopped
+      - agent_session_title_changed
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
@@ -323,7 +388,10 @@ Verification checklist:
   binds that Slack user to the authenticated Reborn user.
 - A DM to the app routes through the OAuth-connected Reborn user.
 - `/ironclaw status` sent in the bot DM replies with the rendered status result.
-- A channel `@app` mention replies in the same channel thread.
+- A channel `@app` mention replies in the same channel thread, as a streaming
+  agent message: the session shows *processing* while the run works, task
+  cards appear per tool call, and the text grows until the run ends.
+- Slack's **Stop** button cancels the run and the session leaves *processing*.
 - Bot-originated and subtyped Slack messages are ignored.
 
 ## Troubleshooting
@@ -358,9 +426,25 @@ Confirm the Admin Configuration Slack signing secret matches the app signing sec
 
 ### Slack replies fail with missing_scope
 
-Add or confirm `chat:write` for text, `files:read` for inbound attachments, and
-`files:write` for outbound attachments. Reinstall the Slack app, and update the
-bot token in Admin Configuration if Slack issued a new token.
+Add or confirm `chat:write` for text (it also covers the session and streaming
+methods), `assistant:write` for the Agent feature, `files:read` for inbound
+attachments, and `files:write` for outbound attachments. Reinstall the Slack
+app, and update the bot token in Admin Configuration if Slack issued a new
+token.
+
+### Slack replies fail with feature_disabled or not_agent_app
+
+The app is installed without Slack's Agents feature. There is no fallback to
+plain messages: enable **Agents** in the app settings (`features.agent_view`
+in the manifest), confirm `assistant:write` and `chat:write` are among the bot
+scopes, reinstall the app, and update the bot token in Admin Configuration if
+Slack issued a new one. The failed delivery's reason names the missing
+capability.
+
+### The Stop button never appears in Slack
+
+Slack shows it only while a session is `processing` and only when the app
+subscribes to `agent_session_stopped`. Add the subscription and reinstall.
 
 ### Slack OAuth callback fails
 
@@ -393,3 +477,13 @@ This is by design: `/ironclaw` requires a direct conversation, so an invocation 
 - Sending messages: https://docs.slack.dev/messaging/sending-and-scheduling-messages/
 - Slash commands: https://docs.slack.dev/interactivity/implementing-slash-commands/
 - Request signing: https://docs.slack.dev/authentication/verifying-requests-from-slack/
+- Developing agents: https://docs.slack.dev/ai/developing-agents
+- Agent sessions: https://docs.slack.dev/ai/agent-sessions
+- Migrating to agent messaging (irreversibility): https://docs.slack.dev/ai/migrating-to-agent-messaging
+- App manifest (`features.agent_view`): https://docs.slack.dev/reference/app-manifest
+- Streaming: https://docs.slack.dev/reference/methods/chat.startStream,
+  https://docs.slack.dev/reference/methods/chat.appendStream,
+  https://docs.slack.dev/reference/methods/chat.stopStream
+- Sessions: https://docs.slack.dev/reference/methods/agents.sessions.setStatus
+- Events: https://docs.slack.dev/reference/events/agent_session_stopped,
+  https://docs.slack.dev/reference/events/agent_session_title_changed

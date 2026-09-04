@@ -331,14 +331,46 @@ fn assert_projection_parity_with_additions(dir: &str, additions: &PackageAdditio
                     a.input_schema_ref, b.input_schema_ref,
                     "{dir}/{id}: input_schema_ref"
                 );
-                // Most v3 manifests drop `output_schema_ref` (schemas remain
-                // package assets); the dialect regained the field with the
-                // redirect-egress tool port, and a v3 declaration must then
-                // match the v2 baseline.
-                assert!(
-                    b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
-                    "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
-                );
+                if dir == "github" && id == "github.get_file_content" {
+                    assert_eq!(
+                        a.output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str()),
+                        Some("schemas/github/raw_output.v1.json"),
+                        "{dir}/{id}: frozen v2 baseline must remain on provider output"
+                    );
+                    assert_eq!(
+                        b.output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str()),
+                        Some("schemas/github/get_file_content.output.v1.json"),
+                        "{dir}/{id}: semantic output graduation"
+                    );
+                } else if dir == "gmail" && id == "gmail.get_message" {
+                    assert_eq!(
+                        a.output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str()),
+                        Some("schemas/gmail/get_message.output.v1.json"),
+                        "{dir}/{id}: frozen v2 baseline must remain on provider output"
+                    );
+                    assert_eq!(
+                        b.output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str()),
+                        Some("schemas/gmail/get_message.output.v2.json"),
+                        "{dir}/{id}: semantic output graduation"
+                    );
+                } else {
+                    // Most v3 manifests drop `output_schema_ref` (schemas remain
+                    // package assets); the dialect regained the field with the
+                    // redirect-egress tool port, and a v3 declaration must then
+                    // match the v2 baseline.
+                    assert!(
+                        b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
+                        "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
+                    );
+                }
             }
         }
         assert_eq!(
@@ -784,6 +816,14 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
             "/api/files.completeUploadExternal",
             "/api/reactions.add",
             "/api/reactions.remove",
+            // The native Agent reply surface (stream reply transport). Every
+            // path is exact — the sink never calls a method the manifest does
+            // not name (`tests/agent_app_manifest_lockstep.rs` in the slack
+            // package pins the sink half of that contract).
+            "/api/chat.startStream",
+            "/api/chat.appendStream",
+            "/api/chat.stopStream",
+            "/api/agents.sessions.setStatus",
         ]
     );
     assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));

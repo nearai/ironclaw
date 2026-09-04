@@ -12,7 +12,7 @@
 //! `#[serde(flatten)]`, so the JSON checkpoint shape is byte-identical to
 //! the previous three top-level fields (same names, same `#[serde(default)]`
 //! / `skip_serializing_if` behavior). See the frozen-shape test in
-//! `state.rs`.
+//! `state/tests/checkpoint_wire.rs`.
 
 use chrono::{DateTime, Utc};
 use ironclaw_loop_contracts::ResourceBudgetPolicy;

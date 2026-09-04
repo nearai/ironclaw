@@ -390,6 +390,10 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.list_models().await
     }
 
+    async fn list_model_catalog(&self) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
+        self.inner.list_model_catalog().await
+    }
+
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.inner.model_metadata().await
     }

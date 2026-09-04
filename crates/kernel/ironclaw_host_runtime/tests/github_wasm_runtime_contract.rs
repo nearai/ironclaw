@@ -361,6 +361,230 @@ async fn host_runtime_services_compact_github_pull_list_preserves_page_shape() {
 }
 
 #[tokio::test]
+async fn host_runtime_services_compact_github_repo_list_preserves_page_shape() {
+    let capability_id = CapabilityId::new("github.list_repos").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let large_detail = "x".repeat(16 * 1024);
+    let provider_items = (0..30)
+        .map(|index| {
+            json!({
+                "id": 30_000 + index,
+                "node_id": format!("R_{index}"),
+                "name": format!("repo-{index}"),
+                "full_name": format!("nearai/repo-{index}"),
+                "private": false,
+                "fork": false,
+                "archived": false,
+                "visibility": "public",
+                "html_url": format!("https://github.com/nearai/repo-{index}"),
+                "description": format!("Repository {index}"),
+                "language": "Rust",
+                "default_branch": "main",
+                "stargazers_count": 100 + index,
+                "open_issues_count": index,
+                "updated_at": "2026-08-30T00:00:00Z",
+                "pushed_at": "2026-08-29T00:00:00Z",
+                "owner": {
+                    "login": "nearai",
+                    "avatar_url": "https://example.test/avatar",
+                    "organizations_url": large_detail
+                },
+                "license": {
+                    "spdx_id": "MIT",
+                    "url": large_detail
+                },
+                "permissions": {
+                    "admin": false,
+                    "maintain": false,
+                    "push": true,
+                    "pull": true
+                },
+                "archive_url": large_detail,
+                "issues_url": large_detail,
+                "pulls_url": large_detail,
+                "_links": {"self": {"href": large_detail}}
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_body = serde_json::to_string(&provider_items).expect("provider fixture JSON");
+    assert!(provider_body.len() > 2 * 1024 * 1024);
+    let network = RecordingNetworkHttpEgress::with_body(provider_body.into_bytes());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "type": "all",
+                "page": 2,
+                "limit": 30
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            let items = completed.output.as_array().expect("list remains an array");
+            assert_eq!(items.len(), 30);
+            assert_eq!(items[0]["full_name"], "nearai/repo-0");
+            assert_eq!(items[0]["owner"], json!({"login": "nearai"}));
+            assert_eq!(items[0]["license"], json!({"spdx_id": "MIT"}));
+            assert_eq!(
+                items[0]["permissions"],
+                json!({"admin": false, "push": true, "pull": true})
+            );
+            assert!(items[0].get("archive_url").is_none());
+            assert!(items[0]["owner"].get("avatar_url").is_none());
+            assert!(
+                completed.output.to_string().len() < 30 * 1024,
+                "host-visible repository list output should remain compact"
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/user/repos?per_page=30&type=all&page=2"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_compact_github_repository_search_preserves_envelope() {
+    let capability_id = CapabilityId::new("github.search_repositories").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let large_detail = "x".repeat(16 * 1024);
+    let provider_items = (0..2)
+        .map(|index| {
+            json!({
+                "id": 40_000 + index,
+                "node_id": format!("R_search_{index}"),
+                "name": format!("search-repo-{index}"),
+                "full_name": format!("nearai/search-repo-{index}"),
+                "private": false,
+                "fork": false,
+                "archived": false,
+                "visibility": "public",
+                "html_url": format!("https://github.com/nearai/search-repo-{index}"),
+                "description": format!("Search repository {index}"),
+                "language": "Rust",
+                "default_branch": "main",
+                "stargazers_count": 500 + index,
+                "open_issues_count": index,
+                "updated_at": "2026-08-30T00:00:00Z",
+                "pushed_at": "2026-08-29T00:00:00Z",
+                "owner": {
+                    "login": "nearai",
+                    "avatar_url": "https://example.test/avatar",
+                    "organizations_url": large_detail
+                },
+                "license": {
+                    "spdx_id": "MIT",
+                    "url": large_detail
+                },
+                "permissions": {
+                    "admin": false,
+                    "maintain": false,
+                    "push": true,
+                    "pull": true
+                },
+                "archive_url": large_detail,
+                "issues_url": large_detail,
+                "pulls_url": large_detail,
+                "_links": {"self": {"href": large_detail}}
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_body = json!({
+        "total_count": 200,
+        "incomplete_results": false,
+        "items": provider_items
+    })
+    .to_string();
+    let network = RecordingNetworkHttpEgress::with_body(provider_body.into_bytes());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "query": "language:rust",
+                "page": 3,
+                "limit": 2,
+                "sort": "stars",
+                "order": "desc"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["total_count"], 200);
+            assert_eq!(completed.output["incomplete_results"], false);
+            let items = completed.output["items"]
+                .as_array()
+                .expect("search envelope keeps its items array");
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["full_name"], "nearai/search-repo-0");
+            assert_eq!(items[0]["owner"], json!({"login": "nearai"}));
+            assert_eq!(items[0]["license"], json!({"spdx_id": "MIT"}));
+            assert_eq!(
+                items[0]["permissions"],
+                json!({"admin": false, "push": true, "pull": true})
+            );
+            assert!(items[0].get("archive_url").is_none());
+            assert!(items[0]["owner"].get("avatar_url").is_none());
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/search/repositories?q=language%3Arust&per_page=2&page=3&sort=stars&order=desc"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_restages_github_product_auth_for_multi_request_wasm_capability() {
     let capability_id = CapabilityId::new("github.create_branch").unwrap();
     let scope = sample_scope(InvocationId::new());
@@ -621,6 +845,74 @@ async fn host_runtime_services_extracts_google_drive_download_binary_into_text()
     let requests = network.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].url.contains("alt=media"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_strip_google_drive_download_bytes_when_extraction_fails() {
+    let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    let network = SequencedGoogleDriveDownloadEgress::new(
+        br#"{"id":"file-1","name":"opaque.png","mimeType":"image/png"}"#.to_vec(),
+        vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02],
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("google_drive_failed_extract_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-drive",
+        policy,
+        network,
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"file_id": "file-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert!(
+                completed.output.get("content_base64").is_none(),
+                "failed extraction must not leak the guest-to-host base64 handoff: {:?}",
+                completed.output
+            );
+            let content = completed.output["content"].as_str().unwrap_or_default();
+            let encoded_handoff = "iVBORwABAg==";
+            assert!(
+                !content.contains(encoded_handoff),
+                "failed extraction must not copy the exact encoded handoff into content: {content}"
+            );
+            let serialized_output = serde_json::to_string(&completed.output)
+                .expect("completed output must serialize for the model");
+            assert!(
+                !serialized_output.contains(encoded_handoff),
+                "failed extraction must not expose the exact encoded handoff in serialized output: {serialized_output}"
+            );
+            assert!(
+                content.starts_with('[') && content.ends_with(']'),
+                "the model needs a clear unsupported/failure marker, got: {content}"
+            );
+        }
+        other => panic!("expected completed outcome with a semantic marker, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1995,6 +2287,272 @@ async fn bundled_github_wasm_rejects_relative_file_path_segments_before_egress()
     assert!(
         http.requests().unwrap().is_empty(),
         "relative path segment validation should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_normalize_bundled_github_text_file_content() {
+    let capability_id = CapabilityId::new("github.get_file_content").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{
+            "path":"src/main.rs",
+            "type":"file",
+            "encoding":"base64",
+            "content":"Zm4gbWFpbigpIHt9"
+        }"#
+        .to_vec(),
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "path": "src/main.rs",
+                "ref": "main"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["content"], json!("fn main() {}"));
+            assert_eq!(completed.output["encoding"], json!("utf-8"));
+            assert!(completed.output.get("blob").is_none());
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/contents/src/main.rs?ref=main"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_marks_bundled_github_binary_file_content_unsupported() {
+    let capability_id = CapabilityId::new("github.get_file_content").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{
+            "path":"assets/data.bin",
+            "type":"file",
+            "encoding":"base64",
+            "content":"//4="
+        }"#
+        .to_vec(),
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "path": "assets/data.bin"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["encoding"], json!("binary_unsupported"));
+            assert!(completed.output.get("content").is_none());
+            assert!(completed.output.get("blob").is_none());
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(requests[0].policy, github_policy());
+    assert_github_token_header(&requests[0], "ghp_fake_fixture_token");
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/contents/assets/data.bin"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_bundled_github_malformed_file_content_to_operation_failed() {
+    let encoded_blob = "%%%not-base64%%%";
+    let capability_id = CapabilityId::new("github.get_file_content").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_body(
+        format!(
+            r#"{{"path":"src/main.rs","type":"file","encoding":"base64","content":"{encoded_blob}"}}"#
+        )
+        .into_bytes(),
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "path": "src/main.rs"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(failure.capability_id, capability_id);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure.message.as_deref().is_some_and(
+            |message| message.starts_with("provider error code: github_api_invalid_response")
+        ),
+        "malformed provider output should retain only its sanitized error code: {failure:?}"
+    );
+    assert!(!format!("{failure:?}").contains(encoded_blob));
+
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(requests[0].policy, github_policy());
+    assert_github_token_header(&requests[0], "ghp_fake_fixture_token");
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/contents/src/main.rs"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_marks_binary_file_content_unsupported() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{
+            "path":"assets/data.bin",
+            "type":"file",
+            "encoding":"base64",
+            "content":"//4="
+        }"#
+        .to_vec(),
+    }));
+
+    let file = execute_bundled_github_wasm(
+        "github.get_file_content",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "path": "assets/data.bin"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(wasm_typed_failure(&file), None);
+    let file: serde_json::Value =
+        serde_json::from_str(wasm_output_json(&file).as_deref().unwrap()).unwrap();
+    assert_eq!(file["encoding"], json!("binary_unsupported"));
+    assert!(file.get("content").is_none());
+    assert!(file.get("blob").is_none());
+    assert_single_wasm_request(
+        &http,
+        "GET",
+        "https://api.github.com/repos/nearai/ironclaw/contents/assets/data.bin",
+        None,
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_surfaces_malformed_file_content_as_typed_failure() {
+    let encoded_blob = "%%%not-base64%%%";
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: format!(
+            r#"{{"path":"src/main.rs","type":"file","encoding":"base64","content":"{encoded_blob}"}}"#
+        )
+        .into_bytes(),
+    }));
+
+    let file = execute_bundled_github_wasm(
+        "github.get_file_content",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "path": "src/main.rs"
+        }),
+        Arc::clone(&http),
+    );
+
+    let failure = wasm_typed_failure(&file).expect("malformed base64 must be a typed failure");
+    assert_eq!(failure.kind, WitErrorKind::OperationFailed);
+    assert!(failure.code.is_some());
+    assert!(!format!("{file:?}").contains(encoded_blob));
+    assert_single_wasm_request(
+        &http,
+        "GET",
+        "https://api.github.com/repos/nearai/ironclaw/contents/src/main.rs",
+        None,
     );
 }
 

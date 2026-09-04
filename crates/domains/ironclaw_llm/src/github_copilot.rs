@@ -21,11 +21,13 @@ use serde::{Deserialize, Serialize};
 use crate::config::RegistryProviderConfig;
 use crate::error::LlmError;
 use crate::github_copilot_auth::CopilotTokenManager;
+#[cfg(test)]
+use crate::provider::PROMPT_CACHE_KEY_METADATA;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
-    openai_json_schema_response_format, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    openai_json_schema_response_format, prompt_cache_key_from_metadata,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
@@ -113,6 +115,17 @@ impl GithubCopilotProvider {
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
         strip_unsupported_tool_params(&self.unsupported_params, req);
+    }
+
+    /// Resolve the derived prompt-cache-key value for this request's
+    /// metadata, unless an operator listed `"prompt_cache_key"` in
+    /// `unsupported_params` to suppress it (e.g. a Copilot-compatible proxy
+    /// that 400s on unknown fields).
+    fn prompt_cache_key(
+        &self,
+        metadata: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        prompt_cache_key_from_metadata(&self.unsupported_params, metadata)
     }
 
     fn map_token_error(error: crate::github_copilot_auth::GithubCopilotAuthError) -> LlmError {
@@ -246,6 +259,7 @@ impl LlmProvider for GithubCopilotProvider {
         self.strip_unsupported_completion_params(&mut req);
         let messages = convert_messages(req.messages);
 
+        let prompt_cache_key = self.prompt_cache_key(&req.metadata);
         let request = OpenAiRequest {
             model,
             messages,
@@ -255,6 +269,7 @@ impl LlmProvider for GithubCopilotProvider {
             response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
+            prompt_cache_key,
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
@@ -316,6 +331,7 @@ impl LlmProvider for GithubCopilotProvider {
             }),
         });
 
+        let prompt_cache_key = self.prompt_cache_key(&req.metadata);
         let request = OpenAiRequest {
             model,
             messages,
@@ -325,6 +341,7 @@ impl LlmProvider for GithubCopilotProvider {
             response_format: req.response_format.map(openai_json_schema_response_format),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
+            prompt_cache_key,
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
@@ -421,6 +438,10 @@ struct OpenAiRequest {
     tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
+    /// Stable per-conversation routing key for the Copilot backend's
+    /// OpenAI-compatible prompt cache (`crate::provider::PROMPT_CACHE_KEY_METADATA`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -660,253 +681,6 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
     (content, tool_calls)
 }
 
+// Keep the provider implementation within the architecture file-size budget.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn context_overflow_413_maps_to_context_length_exceeded() {
-        // A raw HTTP 413 (payload too large) must become ContextLengthExceeded
-        // so the loop's context-shrink recovery fires.
-        match context_length_error_for_status(413, "Request Entity Too Large") {
-            Some(LlmError::ContextLengthExceeded { .. }) => {}
-            other => panic!("expected ContextLengthExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn context_overflow_400_body_maps_to_context_length_exceeded() {
-        let body = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens.","code":"context_length_exceeded"}}"#;
-        match context_length_error_for_status(400, body) {
-            Some(LlmError::ContextLengthExceeded { .. }) => {}
-            other => panic!("expected ContextLengthExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unrelated_400_is_not_context_overflow() {
-        // A plain bad-request (e.g. invalid tool schema) must NOT be classified
-        // as context overflow — the caller falls through to RequestFailed.
-        assert!(
-            context_length_error_for_status(400, r#"{"error":{"message":"invalid tool schema"}}"#)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn unrelated_5xx_is_not_context_overflow() {
-        assert!(context_length_error_for_status(500, "internal server error").is_none());
-    }
-
-    #[test]
-    fn test_convert_messages_basic() {
-        let messages = vec![
-            ChatMessage::system("You are helpful."),
-            ChatMessage::user("Hello"),
-            ChatMessage::assistant("Hi there!"),
-        ];
-        let converted = convert_messages(messages);
-        assert_eq!(converted.len(), 3);
-        assert_eq!(converted[0].role, "system");
-        assert_eq!(converted[1].role, "user");
-        assert_eq!(converted[2].role, "assistant");
-    }
-
-    #[test]
-    fn test_convert_messages_tool_calls() {
-        let tool_calls = vec![ToolCall {
-            id: "call_1".to_string(),
-            name: "search".to_string(),
-            arguments: serde_json::json!({"q": "test"}),
-            reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
-        }];
-        let messages = vec![
-            ChatMessage::user("Search"),
-            ChatMessage::assistant_with_tool_calls(Some("Searching...".to_string()), tool_calls),
-            ChatMessage::tool_result("call_1", "search", "found it"),
-        ];
-        let converted = convert_messages(messages);
-        assert_eq!(converted.len(), 3);
-        assert!(converted[1].tool_calls.is_some());
-        assert_eq!(converted[2].role, "tool");
-        assert_eq!(converted[2].tool_call_id, Some("call_1".to_string()));
-    }
-
-    #[test]
-    fn copilot_request_serializes_native_response_schema() {
-        let schema = crate::provider::JsonSchemaResponseFormat::strict(
-            "suggestions",
-            serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
-        );
-        let request = OpenAiRequest {
-            model: "gpt-4o".to_string(),
-            messages: convert_messages(vec![ChatMessage::user("Return suggestions")]),
-            max_tokens: None,
-            temperature: None,
-            stop: None,
-            response_format: Some(openai_json_schema_response_format(
-                crate::provider::CompletionResponseFormat::JsonSchema(schema),
-            )),
-            tools: None,
-            tool_choice: None,
-        };
-        let json = serde_json::to_value(request).expect("serialize Copilot request");
-        assert_eq!(
-            json["response_format"],
-            serde_json::json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "suggestions",
-                    "strict": true,
-                    "schema": {"type": "object", "properties": {"items": {"type": "array"}}}
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn copilot_request_serializes_native_json_object_mode() {
-        let request = OpenAiRequest {
-            model: "gpt-4o".to_string(),
-            messages: convert_messages(vec![ChatMessage::user("Return an object")]),
-            max_tokens: None,
-            temperature: None,
-            stop: None,
-            response_format: Some(openai_json_schema_response_format(
-                crate::provider::CompletionResponseFormat::JsonObject,
-            )),
-            tools: None,
-            tool_choice: None,
-        };
-        let json = serde_json::to_value(request).expect("serialize Copilot request");
-        assert_eq!(
-            json["response_format"],
-            serde_json::json!({"type": "json_object"})
-        );
-    }
-
-    #[test]
-    fn test_convert_messages_defaults_missing_image_detail_to_auto() {
-        let messages = vec![ChatMessage::user_with_parts(
-            "describe this",
-            vec![ContentPart::ImageUrl {
-                image_url: crate::ImageUrl {
-                    url: "data:image/jpeg;base64,Zm9v".to_string(),
-                    detail: None,
-                },
-            }],
-        )];
-
-        let converted = convert_messages(messages);
-        let content = serde_json::to_value(&converted[0].content).expect("serialize content");
-        assert_eq!(
-            content[1]["image_url"]["url"],
-            "data:image/jpeg;base64,Zm9v"
-        );
-        assert_eq!(content[1]["image_url"]["detail"], "auto");
-    }
-
-    #[test]
-    fn test_convert_messages_preserves_explicit_image_detail() {
-        for expected in ["low", "high"] {
-            let messages = vec![ChatMessage::user_with_parts(
-                "describe this",
-                vec![ContentPart::ImageUrl {
-                    image_url: crate::ImageUrl {
-                        url: format!("https://example.com/{expected}.png"),
-                        detail: Some(expected.to_string()),
-                    },
-                }],
-            )];
-
-            let converted = convert_messages(messages);
-            let content = serde_json::to_value(&converted[0].content).expect("serialize content");
-            assert_eq!(content[1]["image_url"]["detail"], expected);
-        }
-    }
-
-    #[test]
-    fn copilot_flattens_top_level_oneof_at_the_provider_boundary() {
-        let tool = convert_tool_definition(ToolDefinition {
-            name: "evm-rpc.invoke".to_string(),
-            description: "Invoke an EVM RPC operation.".to_string(),
-            parameters: serde_json::json!({
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "action": {"const": "get_balance"},
-                            "address": {"type": "string"}
-                        },
-                        "required": ["action", "address"]
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "action": {"const": "get_block"},
-                            "block": {"type": "string"}
-                        },
-                        "required": ["action", "block"]
-                    }
-                ]
-            }),
-        });
-
-        assert_eq!(tool.function.parameters["type"], "object");
-        assert!(tool.function.parameters.get("oneOf").is_none());
-        assert!(
-            tool.function.parameters["properties"]
-                .get("action")
-                .is_some()
-        );
-        assert!(
-            tool.function.parameters["properties"]
-                .get("address")
-                .is_some()
-        );
-        assert!(
-            tool.function.parameters["properties"]
-                .get("block")
-                .is_some()
-        );
-        assert!(tool.function.description.contains("Upstream JSON schema"));
-    }
-
-    #[test]
-    fn test_extract_choice_text_only() {
-        let choice = OpenAiChoice {
-            message: OpenAiResponseMessage {
-                content: Some("Hello!".to_string()),
-                tool_calls: None,
-            },
-            finish_reason: Some("stop".to_string()),
-        };
-        let (content, tool_calls) = extract_choice_content(&choice);
-        assert_eq!(content, Some("Hello!".to_string()));
-        assert!(tool_calls.is_empty());
-    }
-
-    #[test]
-    fn test_extract_choice_with_tool_calls() {
-        let choice = OpenAiChoice {
-            message: OpenAiResponseMessage {
-                content: Some("Let me search.".to_string()),
-                tool_calls: Some(vec![OpenAiResponseToolCall {
-                    id: "call_1".to_string(),
-                    function: OpenAiResponseFunction {
-                        name: "search".to_string(),
-                        arguments: r#"{"q":"test"}"#.to_string(),
-                    },
-                }]),
-            },
-            finish_reason: Some("tool_calls".to_string()),
-        };
-        let (content, tool_calls) = extract_choice_content(&choice);
-        assert_eq!(content, Some("Let me search.".to_string()));
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].name, "search");
-        assert_eq!(tool_calls[0].arguments["q"], "test");
-    }
-}
+mod tests;

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ids::{TenantId, ThreadId, UserId},
+    ids::{TenantId, ThreadId, UserId, VendorId},
     turn::TurnRunId,
 };
 use serde::{Deserialize, Serialize};
@@ -168,14 +168,25 @@ pub enum NotificationInitialState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotificationAction {
-    OpenThread { thread_id: ThreadId },
+    /// Present the notification without linking to a workflow surface.
+    None,
+    OpenThread {
+        thread_id: ThreadId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationSource {
-    pub thread_id: ThreadId,
+    /// Canonical workflow thread when one was materialized. A terminal fact
+    /// that settles before submission has no thread and must not reuse the
+    /// trigger route key as one.
+    pub thread_id: Option<ThreadId>,
     pub turn_run_id: Option<TurnRunId>,
     pub lifecycle_ref: Option<LifecycleRef>,
+    /// Trusted credential-authority namespaces associated with an auth
+    /// notification. Empty for non-auth notifications and legacy records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_providers: Vec<VendorId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,9 +245,9 @@ pub struct MarkAllNotificationsReadRequest {
 }
 
 /// Whether a mutation actually changed durable state. A repeated mark-read,
-/// resolve, or archive succeeds without changing anything, and a caller that
-/// reports success as a change would be inventing evidence the store never
-/// produced.
+/// resolve, reopen, or archive succeeds without changing anything, and a
+/// caller that reports success as a change would be inventing evidence the
+/// store never produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationMutationOutcome {
     Applied,
@@ -272,6 +283,14 @@ pub trait NotificationInboxStorePort: Send + Sync {
     ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
 
     async fn resolve(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
+
+    /// Restore an actionable notification that authoritative workflow
+    /// reconciliation proves is current. Read and archive state remain
+    /// orthogonal and are not changed.
+    async fn reopen(
         &self,
         request: NotificationMutationRequest,
     ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
@@ -316,6 +335,13 @@ impl NotificationInboxStorePort for NoopNotificationInboxStore {
     }
 
     async fn resolve(
+        &self,
+        _request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        Err(notification_store_unavailable())
+    }
+
+    async fn reopen(
         &self,
         _request: NotificationMutationRequest,
     ) -> Result<NotificationMutationOutcome, NotificationInboxError> {

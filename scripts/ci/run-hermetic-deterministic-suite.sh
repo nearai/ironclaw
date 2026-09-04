@@ -85,14 +85,11 @@ run_crate_tests() {
   done < <(discover_reborn_packages)
 }
 
-run_integration_tier() {
-  local test_name
-  prepare_postgres_test_image
-  while IFS= read -r test_name; do
-    [[ "${test_name}" == --test ]] && continue
-    run cargo test -p ironclaw_integration_tests \
-      --test "${test_name}" -- --nocapture
-  done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")
+run_integration_lanes() {
+  local lanes_json="$1"
+  REBORN_COV_COLLECT=false \
+    REBORN_COV_LANES_JSON="${lanes_json}" \
+    run "${repo_root}/scripts/ci/reborn-coverage-lane-run.sh"
 }
 
 run_python_e2e() {
@@ -172,13 +169,12 @@ case "${stage}" in
     ;;
   groups)
     prepare_rust_dependencies
-    REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
-      RUST_MIN_STACK=67108864 \
-      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
+    run_integration_lanes '["groups"]'
     ;;
   integration)
     prepare_rust_dependencies
-    run_integration_tier
+    prepare_postgres_test_image
+    run_integration_lanes '[0,1,2,3]'
     ;;
   qa)
     prepare_rust_dependencies
@@ -206,10 +202,7 @@ case "${stage}" in
     prepare_rust_dependencies
     run_crate_tests
     run_root_partitions
-    REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
-      RUST_MIN_STACK=67108864 \
-      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
-    run_integration_tier
+    run_integration_lanes '[0,1,2,3,"groups"]'
     run "${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
     run cargo test -p ironclaw_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture

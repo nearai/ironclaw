@@ -69,7 +69,6 @@ use crate::delivery_coordinator::DeliveryCoordinator;
 use crate::filesystem_ledger::RebornFilesystemIdempotencyLedger;
 use crate::inbound_turn::DefaultInboundTurnService;
 use crate::ledger::IdempotencyLedger;
-use crate::reborn_services::ProjectFilesystemReader;
 use crate::run_delivery::{
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
@@ -99,14 +98,12 @@ pub struct ChannelWorkflowIdentity {
 /// composed runtime has no delivery coordinator — graphs are then ingress-only
 /// (turns run; nothing watches them for channel replies).
 pub struct ChannelWorkflowDeliveryServices {
+    /// The coordinator every send goes through; its reply-publication
+    /// surface owns every run's answer.
     pub coordinator: Arc<DeliveryCoordinator>,
-    /// Canonical project-filesystem authority the delivery coordinator
-    /// materializes `/workspace/...` references through.
-    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    pub notification_inbox: Option<Arc<dyn ironclaw_notifications::NotificationInboxStorePort>>,
     /// The owner-scoped outbound target catalog. The background-run notifier
     /// resolves the creator's stored notification-channel ids through it at
     /// fire time.
@@ -137,6 +134,9 @@ pub struct RebornChannelWorkflowServices {
     pub llm_config: Option<Arc<dyn LlmConfigService>>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
+    /// Durable product-owned Inbox. It is independent from optional channel
+    /// egress so web-only runtimes can still publish settled trigger facts.
+    pub notification_inbox: Option<Arc<dyn ironclaw_notifications::NotificationInboxStorePort>>,
     pub identity: ChannelWorkflowIdentity,
     pub delivery: Option<ChannelWorkflowDeliveryServices>,
 }
@@ -163,8 +163,21 @@ impl RebornChannelWorkflowFactory {
         Arc::clone(&self.services.inbound_attachments)
     }
 
-    /// The single background-run notifier, or `None` when the composed
-    /// runtime has no delivery coordinator (nothing can notify).
+    /// Durable Inbox publisher for fires that settle before a run exists.
+    ///
+    /// Unlike channel delivery this remains available without an egress
+    /// coordinator, so web-only deployments do not lose the failure fact.
+    pub fn pre_submit_failure_notifier(&self) -> Option<Arc<dyn TriggeredRunDelivery>> {
+        self.services.notification_inbox.as_ref().map(|inbox| {
+            Arc::new(crate::run_delivery::PreSubmitFailureInboxNotifier::new(
+                Arc::clone(inbox),
+            )) as Arc<dyn TriggeredRunDelivery>
+        })
+    }
+
+    /// The single external-channel background-run notifier, or `None` when
+    /// the composed runtime has no delivery coordinator. Durable Inbox
+    /// publication is wired separately by [`Self::pre_submit_failure_notifier`].
     ///
     /// One notifier serves every channel extension: it resolves the creator's
     /// stored notification channels at fire time and decodes each target
@@ -192,14 +205,13 @@ impl RebornChannelWorkflowFactory {
                 }
             };
         let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
             outbound_store: Arc::clone(&delivery.outbound_store),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
-            notification_inbox: delivery.notification_inbox.clone(),
+            notification_inbox: self.services.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
             extension_id: BACKGROUND_RUN_NOTIFIER_ID.to_string(),
@@ -465,14 +477,13 @@ impl RebornChannelWorkflowFactory {
         let notice_thread_id = ThreadId::new(format!("{extension_id}-channel-notices"))
             .map_err(|error| format!("invalid channel-notice thread id: {error}"))?;
         let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: binding,
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
             outbound_store: Arc::clone(&delivery.outbound_store),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
-            notification_inbox: delivery.notification_inbox.clone(),
+            notification_inbox: self.services.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
             extension_id: extension_id.to_string(),

@@ -252,10 +252,9 @@ mod tests {
             "list_repos schema should not expose username"
         );
         assert!(find_schema("GitHub list_pull_requests input")["properties"]["head"].is_object());
-        assert!(
-            find_schema("GitHub get_file_content input")["properties"]["path"]["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("base64"))
+        assert_eq!(
+            find_schema("GitHub get_file_content input")["properties"]["path"]["description"],
+            "Repository file path."
         );
         assert!(
             find_schema("GitHub search_issues_pull_requests input")["properties"]["sort"]["enum"]
@@ -1444,6 +1443,229 @@ mod tests {
         assert_eq!(requests[0].path, "/user/repos?per_page=30");
     }
 
+    fn realistic_repository(index: usize, large_detail: &str) -> serde_json::Value {
+        json!({
+            "id": 30_000 + index,
+            "node_id": format!("R_{index}"),
+            "name": format!("repo-{index}"),
+            "full_name": format!("nearai/repo-{index}"),
+            "private": index.is_multiple_of(2),
+            "fork": false,
+            "archived": false,
+            "visibility": "public",
+            "html_url": format!("https://github.com/nearai/repo-{index}"),
+            "description": format!("Repository {index}"),
+            "language": "Rust",
+            "default_branch": "main",
+            "stargazers_count": 100 + index,
+            "open_issues_count": index,
+            "updated_at": "2026-08-30T00:00:00Z",
+            "pushed_at": "2026-08-29T00:00:00Z",
+            "owner": {
+                "login": "nearai",
+                "id": 1,
+                "avatar_url": "https://avatars.githubusercontent.com/u/1",
+                "organizations_url": large_detail
+            },
+            "license": {
+                "key": "mit",
+                "name": "MIT License",
+                "spdx_id": "MIT",
+                "url": large_detail
+            },
+            "permissions": {
+                "admin": false,
+                "maintain": false,
+                "push": true,
+                "triage": false,
+                "pull": true
+            },
+            "archive_url": large_detail,
+            "assignees_url": large_detail,
+            "branches_url": large_detail,
+            "collaborators_url": large_detail,
+            "commits_url": large_detail,
+            "contents_url": large_detail,
+            "forks_url": large_detail,
+            "git_url": large_detail,
+            "hooks_url": large_detail,
+            "issues_url": large_detail,
+            "pulls_url": large_detail,
+            "releases_url": large_detail,
+            "subscribers_url": large_detail,
+            "trees_url": large_detail,
+            "_links": {"self": {"href": large_detail}}
+        })
+    }
+
+    #[test]
+    fn list_repos_compacts_realistic_large_provider_response() {
+        let large_detail = "x".repeat(4 * 1024);
+        let provider_items = (0..100)
+            .map(|index| realistic_repository(index, &large_detail))
+            .collect::<Vec<_>>();
+        let provider_output =
+            serde_json::to_string(&provider_items).expect("provider fixture JSON");
+        assert!(provider_output.len() > 5 * 1024 * 1024);
+        let provider_output_len = provider_output.len();
+        test_support::set_response(Ok(provider_output));
+
+        let output = execute_inner(
+            r#"{"type":"all","page":2,"limit":100}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("github.list_repos should compact the provider response");
+
+        assert!(
+            output.len() < 100 * 1024,
+            "100 compact repositories should stay model-useful, got {} bytes",
+            output.len()
+        );
+        assert!(
+            provider_output_len > output.len() * 10,
+            "repository projection should reduce the provider payload by at least 10x"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact repository list should be JSON");
+        let items = parsed.as_array().expect("list shape remains an array");
+        assert_eq!(items.len(), 100, "pagination item count must be preserved");
+        assert_eq!(items[0]["full_name"], "nearai/repo-0");
+        assert_eq!(items[0]["owner"], json!({"login": "nearai"}));
+        assert_eq!(items[0]["license"], json!({"spdx_id": "MIT"}));
+        assert_eq!(
+            items[0]["permissions"],
+            json!({"admin": false, "push": true, "pull": true})
+        );
+        assert!(
+            items[0].get("archive_url").is_none()
+                && items[0]["owner"].get("avatar_url").is_none()
+                && items[0].get("_links").is_none(),
+            "provider-only detail must remain available through github.get_repo"
+        );
+        assert_eq!(
+            test_support::requests()[0].path,
+            "/user/repos?per_page=100&type=all&page=2"
+        );
+    }
+
+    #[test]
+    fn search_repositories_compacts_items_and_preserves_envelope() {
+        let large_detail = "x".repeat(4 * 1024);
+        let provider_items = (0..100)
+            .map(|index| realistic_repository(index, &large_detail))
+            .collect::<Vec<_>>();
+        let provider_output = json!({
+            "total_count": 400,
+            "incomplete_results": false,
+            "items": provider_items,
+        })
+        .to_string();
+        assert!(provider_output.len() > 5 * 1024 * 1024);
+        let provider_output_len = provider_output.len();
+        test_support::set_response(Ok(provider_output));
+
+        let output = execute_inner(
+            r#"{"query":"language:rust","page":3,"limit":100,"sort":"stars","order":"desc"}"#,
+            Some(r#"{"capability_id":"github.search_repositories"}"#),
+        )
+        .expect("github.search_repositories should compact the provider response");
+
+        assert!(
+            output.len() < 100 * 1024,
+            "100 compact repository results should stay model-useful, got {} bytes",
+            output.len()
+        );
+        assert!(
+            provider_output_len > output.len() * 10,
+            "repository search projection should reduce the provider payload by at least 10x"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact repository search should be JSON");
+        assert_eq!(parsed["total_count"], 400);
+        assert_eq!(parsed["incomplete_results"], false);
+        let items = parsed["items"]
+            .as_array()
+            .expect("search envelope keeps its items array");
+        assert_eq!(items.len(), 100, "pagination item count must be preserved");
+        assert_eq!(items[0]["full_name"], "nearai/repo-0");
+        assert!(items[0].get("archive_url").is_none());
+        assert_eq!(
+            test_support::requests()[0].path,
+            "/search/repositories?q=language%3Arust&per_page=100&page=3&sort=stars&order=desc"
+        );
+    }
+
+    #[test]
+    fn list_repos_rejects_missing_or_mistyped_projected_fields() {
+        let mut missing_field = realistic_repository(0, "detail");
+        missing_field
+            .as_object_mut()
+            .expect("repository fixture")
+            .remove("full_name");
+        let mut wrong_scalar_type = realistic_repository(0, "detail");
+        wrong_scalar_type["stargazers_count"] = json!("100");
+        let mut wrong_nested_type = realistic_repository(0, "detail");
+        wrong_nested_type["owner"]["login"] = json!(42);
+
+        for malformed_item in [missing_field, wrong_scalar_type, wrong_nested_type] {
+            test_support::set_response(Ok(json!([malformed_item]).to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    r#"{"limit":1}"#,
+                    Some(r#"{"capability_id":"github.list_repos"}"#),
+                )
+                .unwrap_err(),
+                "github_api_invalid_response"
+            );
+        }
+    }
+
+    #[test]
+    fn list_repos_preserves_documented_nullable_fields() {
+        let mut repository = realistic_repository(0, "detail");
+        repository["description"] = serde_json::Value::Null;
+        repository["language"] = serde_json::Value::Null;
+        repository["license"] = serde_json::Value::Null;
+        test_support::set_response(Ok(json!([repository]).to_string()));
+
+        let output = execute_inner(
+            r#"{"limit":1}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("documented nullable repository fields should remain valid");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact repository list should be JSON");
+
+        assert!(parsed[0]["description"].is_null());
+        assert!(parsed[0]["language"].is_null());
+        assert!(parsed[0]["license"].is_null());
+    }
+
+    #[test]
+    fn search_repositories_rejects_missing_or_mistyped_envelope_fields() {
+        let repository = realistic_repository(0, "detail");
+        let malformed_responses = [
+            json!({"incomplete_results": false, "items": [repository.clone()]}),
+            json!({"total_count": "1", "incomplete_results": false, "items": [repository.clone()]}),
+            json!({"total_count": 1, "items": [repository.clone()]}),
+            json!({"total_count": 1, "incomplete_results": 0, "items": [repository]}),
+        ];
+
+        for malformed_response in malformed_responses {
+            test_support::set_response(Ok(malformed_response.to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    r#"{"query":"language:rust","limit":1}"#,
+                    Some(r#"{"capability_id":"github.search_repositories"}"#),
+                )
+                .unwrap_err(),
+                "github_api_invalid_response"
+            );
+        }
+    }
+
     #[test]
     fn list_repos_appends_type_for_authenticated_user() {
         test_support::set_response(Ok(json!([]).to_string()));
@@ -1587,24 +1809,156 @@ mod tests {
     }
 
     #[test]
-    fn get_file_content_uses_ref_query() {
+    fn get_file_content_decodes_whitespace_wrapped_base64_and_uses_ref_query() {
         test_support::set_response(Ok(json!({
             "path": "src/lib.rs",
+            "type": "file",
             "encoding": "base64",
-            "content": "Zm4gbWFpbigpIHt9"
+            "content": " \nZm4g\tbWFpbigp\nIHt9 "
         })
         .to_string()));
 
-        execute_inner(
+        let output = execute_inner(
             r#"{"owner":"nearai","repo":"ironclaw","path":"src/lib.rs","ref":"main"}"#,
             Some(r#"{"capability_id":"github.get_file_content"}"#),
         )
         .expect("github.get_file_content should fetch content");
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("mock output should be JSON");
+        assert_eq!(output["content"], "fn main() {}");
+        assert_eq!(output["encoding"], "utf-8");
 
         let requests = test_support::requests();
         assert_eq!(
             requests[0].path,
             "/repos/nearai/ironclaw/contents/src/lib.rs?ref=main"
+        );
+    }
+
+    #[test]
+    fn get_file_content_marks_non_utf8_as_unsupported_without_content() {
+        test_support::set_response(Ok(json!({
+            "path": "assets/data.bin",
+            "type": "file",
+            "encoding": "base64",
+            "content": "//4="
+        })
+        .to_string()));
+
+        let output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"assets/data.bin"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("binary file metadata should remain a successful result");
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("mock output should be JSON");
+        assert_eq!(output["encoding"], "binary_unsupported");
+        assert!(!output
+            .as_object()
+            .expect("file response should remain an object")
+            .contains_key("content"));
+    }
+
+    #[test]
+    fn get_file_content_rejects_malformed_responses_without_returning_provider_content() {
+        let malformed_blob = "%%%not-base64%%%";
+        let unknown_blob = "opaque-provider-content";
+        let missing_encoding_blob = "missing-encoding-provider-content";
+        let missing_content_blob = "missing-base64-content-provider-blob";
+        test_support::set_responses([
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "base64",
+                "content": malformed_blob
+            })
+            .to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "rot13",
+                "content": unknown_blob
+            })
+                .to_string()),
+            Ok(r#"{"path":"src/lib.rs","type":"file","encoding":"base64","content":"malformed-json-provider-content""#.to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "content": missing_encoding_blob
+            })
+            .to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "base64",
+                "blob": missing_content_blob
+            })
+            .to_string()),
+        ]);
+
+        for (expected_code, provider_content) in [
+            ("github_api_invalid_response", malformed_blob),
+            ("github_api_unsupported_file_encoding", unknown_blob),
+            (
+                "github_api_invalid_response",
+                "malformed-json-provider-content",
+            ),
+            ("github_api_invalid_response", missing_encoding_blob),
+            ("github_api_invalid_response", missing_content_blob),
+        ] {
+            let error = execute_inner(
+                r#"{"owner":"nearai","repo":"ironclaw","path":"src/lib.rs"}"#,
+                Some(r#"{"capability_id":"github.get_file_content"}"#),
+            )
+            .expect_err("malformed file responses should fail visibly");
+            assert!(
+                error.starts_with(expected_code),
+                "expected {expected_code} for malformed file response, got: {error}"
+            );
+            assert!(
+                !error.contains(provider_content),
+                "provider content must not be returned in the failure: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_file_content_preserves_directory_and_large_file_responses() {
+        let directory = json!([
+            {
+                "name": "src",
+                "path": "src",
+                "type": "dir"
+            }
+        ]);
+        let large_file = json!({
+            "path": "assets/data.bin",
+            "type": "file",
+            "encoding": "none",
+            "size": 10_000_000
+        });
+        test_support::set_responses([Ok(directory.to_string()), Ok(large_file.to_string())]);
+
+        let directory_output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"src"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("directory response should remain successful");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&directory_output)
+                .expect("directory output should be JSON"),
+            directory
+        );
+
+        let large_file_output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"assets/data.bin"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("large-file response should remain successful");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&large_file_output)
+                .expect("large-file output should be JSON"),
+            large_file
         );
     }
 

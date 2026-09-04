@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { NearConnector } from "@hot-labs/near-connect";
 
 // Fixed NEP-413 login message NEAR AI's `/v1/auth/near` validates. Both values
@@ -8,7 +7,7 @@ const MESSAGE = "Sign in to NEAR AI Cloud";
 const RECIPIENT = "cloud.near.ai";
 
 const statusEl = document.getElementById("status");
-function setStatus(text, isError) {
+function setStatus(text: string, isError = false) {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", Boolean(isError));
 }
@@ -24,7 +23,7 @@ function buildNonce() {
 
 const channelName = new URLSearchParams(window.location.search).get("channel");
 
-function postResult(payload) {
+function postResult(payload: unknown) {
   if (!channelName || typeof BroadcastChannel !== "function") {
     return;
   }
@@ -44,8 +43,7 @@ async function run() {
       features: { signMessage: true },
     });
     setStatus("Choose a wallet to continue…");
-    await connector.connect();
-    const wallet = await connector.wallet();
+    const wallet = await connector.connect();
 
     setStatus("Approve the signature in your wallet…");
     const nonce = buildNonce();

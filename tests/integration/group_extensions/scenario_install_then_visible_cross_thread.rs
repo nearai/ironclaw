@@ -36,8 +36,38 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     installer
         .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
+
+    // The install result is larger than the automatic first-look budget, so
+    // the model follows the host-minted durable reference to the omitted
+    // semantic field instead of assuming every nested field is inlined.
+    let install_result_ref = installer.latest_tool_result_ref().await?;
+    installer.push_script([
+        RebornScriptedReply::tool_call(
+            "builtin.result_read",
+            json!({
+                "result_ref": install_result_ref,
+                "offset": 0,
+                "max_bytes": ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+                "json_pointer": "/payload/installed",
+            }),
+        ),
+        RebornScriptedReply::text("install result inspected"),
+    ]);
     installer
-        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .submit_turn("inspect whether the stored install result succeeded")
+        .await?;
+    installer.assert_tool_invoked("builtin.result_read").await?;
+    installer
+        .assert_tool_result_contains(r#""json_pointer":"/payload/installed""#)
+        .await?;
+    installer
+        .assert_tool_result_contains(r#""content":true"#)
+        .await?;
+    installer
+        .assert_model_message_content_contains(r#"\"json_pointer\":\"/payload/installed\""#)
+        .await?;
+    installer
+        .assert_model_message_content_contains(r#"\"content\":true"#)
         .await?;
 
     // ── Thread B: viewer (DIFFERENT conversation, SAME shared store) ─────────

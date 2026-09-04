@@ -48,7 +48,8 @@ Adapters implement **behavior only** (overview §4): they never report ids,
 schemas, effects, scopes, routes, or credentials — the resolved manifest is the
 sole authority. Trait homes:
 `ToolAdapter` — `crates/contracts/ironclaw_extension_contracts/src/tool_adapter.rs`;
-`ChannelAdapter` — `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`;
+`ChannelIngress`/`ChannelDelivery` — `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`;
+`ReplySink` — `crates/contracts/ironclaw_extension_contracts/src/reply.rs`;
 `ExtensionEntrypoint`/`ExtensionBindings` —
 `crates/extensions/ironclaw_extension_host/src/entrypoint.rs`. Auth has **no** adapter
 trait — it is one host engine driving manifest recipes (overview §4.3).
@@ -111,9 +112,19 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    generic, host-built-in tool for reaching any other target explicitly,
    `builtin.outbound_deliver` (lane 2) — it is not a per-channel tool an
    extension declares.
-3. Behavior lives in the extension's `ChannelAdapter` (`inbound` parse →
-   normalized outcome; `deliver` render+send; idempotent `activate`/`cleanup`
-   vendor wiring) — see the trait doc for the method contract. The binary
+3. Behavior lives in the extension's channel adapter: `ChannelIngress::receive`
+   (parse → normalized outcome), `ChannelDelivery::deliver` (render+send a
+   discrete message), and — for a declared `[channel.reply]` — one
+   `ReplySink::reconcile` (`crates/contracts/ironclaw_extension_contracts/src/reply.rs`)
+   that converges the vendor's presentation onto the run's reply document
+   (`transport = "stream"` hears every revision, `"message"` the terminal
+   one; the host publishes, the sink renders; verify with
+   `rg -n "impl ReplySink for" crates/extensions/packages`) — see each trait
+   doc for the method contract. Vendor-side webhook wiring is manifest data,
+   not adapter code: the `[channel.ingress.registration]` /
+   `[channel.ingress.deregistration]` recipes the host executes (worked
+   example: `rg -n "channel.ingress.registration" crates/extensions/packages/telegram/manifest.toml`).
+   The binary
    supplies the adapter to composition through the
    `RebornHostBindings::with_channel_extension_bindings` seam
    (`crates/app/ironclaw_composition/src/input.rs`, `ChannelExtensionBinding`);

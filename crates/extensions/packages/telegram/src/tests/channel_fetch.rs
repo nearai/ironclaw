@@ -25,6 +25,7 @@ impl ScriptedEgress {
         body: impl Into<Vec<u8>>,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
         Ok(RestrictedEgressResponse {
+            retry_after: None,
             status,
             body: body.into(),
         })

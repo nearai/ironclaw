@@ -416,27 +416,35 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
     );
 }
 
-#[tokio::test]
-async fn completed_output_digest_is_not_promoted_to_loop_progress_policy() {
-    // The digest remains part of the host result contract, but the loop does not
-    // retain it as heuristic no-progress evidence. Repetition is advisory-only
-    // and keyed by consecutive call signatures.
-    let digest = ironclaw_loop_contracts::ContentDigest(4242);
-    let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+fn host_with_completed_result(
+    result_ref: LoopResultRef,
+    summary: &str,
+    output_digest: Option<ironclaw_loop_contracts::ContentDigest>,
+) -> MockHost {
+    MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
-                result_ref.clone(),
-                "completed with digest".to_string(),
+                result_ref,
+                summary.to_string(),
                 ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
-                Some(digest),
+                output_digest,
                 None,
             )],
             stopped_on_suspension: false,
         },
-    ]);
+    ])
+}
+
+#[tokio::test]
+async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
+    // NOT (re-)promoted to host-reported `CapabilityProgress` — that stays
+    // retired — but IS retained as a (signature, digest) observation the
+    // terminating check (strategies/stop.rs) scans.
+    let digest = ironclaw_loop_contracts::ContentDigest(4242);
+    let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
+    let host = host_with_completed_result(result_ref, "completed with digest", Some(digest));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -451,9 +459,243 @@ async fn completed_output_digest_is_not_promoted_to_loop_progress_policy() {
         .iter()
         .map(|observation| observation.output_digest)
         .collect();
+    assert_eq!(
+        recorded,
+        vec![digest],
+        "digest must be recorded; got {recorded:?}"
+    );
+}
+
+/// Sibling of `completed_output_digest_is_recorded_for_the_no_progress_window`
+/// (same seam: `append_completed_capability_result` through the full executor
+/// caller path), but asserting the opposite final state — a genuinely distinct
+/// case from "digest IS recorded", so it stays a separate test rather than a
+/// branch inside that one: a completed result with `output_digest: None` must
+/// leave `seen_capability_output_digests` fully EMPTY, not merely excluded
+/// from a mixed set. `append_completed_capability_result`
+/// (capability_outcomes.rs) only pushes into the ring `if let Some(output_digest) =
+/// result.output_digest`.
+#[tokio::test]
+async fn completed_result_without_output_digest_leaves_no_progress_window_empty() {
+    let result_ref = LoopResultRef::new("result:no-digest").expect("valid");
+    let host = host_with_completed_result(result_ref, "completed without digest", None);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
     assert!(
-        recorded.is_empty(),
-        "digest policy ring must stay inert; got {recorded:?}"
+        final_staged_state(&host)
+            .seen_capability_output_digests
+            .is_empty(),
+        "a completed result with no output_digest must not populate the no-progress window"
+    );
+}
+
+fn no_progress_batch(
+    result_ref: LoopResultRef,
+    digest: ironclaw_loop_contracts::ContentDigest,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
+        resolutions: vec![resolution::completed(
+            result_ref,
+            "identical output".to_string(),
+            ironclaw_loop_contracts::CapabilityProgress::NoChange,
+            false,
+            0,
+            Some(digest),
+            None,
+        )],
+        stopped_on_suspension: false,
+    }
+}
+
+/// Drives exactly `no_progress_threshold` completed capability observations
+/// with the same call signature and an identical `output_digest` through the
+/// full executor caller path. The first strike must give the run one more
+/// recovery turn (a model-visible warning), not a terminal failure, and
+/// `schedule_no_progress_warning` (turn_stop.rs) must reset
+/// `seen_capability_output_digests` so the reset is observable on the very
+/// next `BeforeModel` checkpoint. A second, SHORTER run of identical
+/// observations after the reset must stay below threshold and never
+/// terminate the run.
+#[tokio::test]
+async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() {
+    let threshold = crate::strategies::RepeatedOutputProgressStrategy::default().threshold();
+    let digest = ironclaw_loop_contracts::ContentDigest(31_337);
+
+    let mut responses = Vec::new();
+    let mut batch_outcomes = Vec::new();
+    // Strike: exactly `threshold` completed observations, same signature
+    // (calls_response() always mints the same capability_id + "input:demo"
+    // signature) and the same output_digest.
+    for i in 0..threshold {
+        responses.push(calls_response());
+        batch_outcomes.push(no_progress_batch(
+            LoopResultRef::new(format!("result:no-progress-{i}")).expect("valid"),
+            digest,
+        ));
+    }
+    // Recovery: fewer than `threshold` further identical observations after
+    // the reset — must stay advisory and never re-trip the check.
+    let recovery_count = threshold - 1;
+    for i in 0..recovery_count {
+        responses.push(calls_response());
+        batch_outcomes.push(no_progress_batch(
+            LoopResultRef::new(format!("result:no-progress-{}", threshold + i)).expect("valid"),
+            digest,
+        ));
+    }
+    responses.push(reply_response_with_text("done after recovery"));
+
+    let host = MockHost::new(responses).with_batch_outcomes(batch_outcomes);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the strike must grant one recovery turn and the shorter follow-up run must not \
+         re-trip the check; got {exit:?}"
+    );
+
+    // The strike must be a recovery warning, not a terminal failure: the very
+    // next model request (the recovery turn) carries the no-progress control
+    // message.
+    let recovery_request = host
+        .model_requests()
+        .get(threshold)
+        .expect("a recovery-turn model request after the strike")
+        .clone();
+    assert!(
+        recovery_request
+            .inline_messages
+            .iter()
+            .any(|message| message.safe_body.as_str().contains("no progress detected")),
+        "the recovery turn must carry the no-progress warning, not a silent continue"
+    );
+
+    // The BeforeModel checkpoint carrying the scheduled (not yet delivered)
+    // warning is the state right after `schedule_no_progress_warning` ran:
+    // seen_capability_output_digests must have been reset to empty there.
+    let post_strike_state = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .find(|state| state.terminal_warning_state.pending().is_some())
+        .expect("a BeforeModel checkpoint must carry the pending no-progress warning");
+    assert!(
+        post_strike_state.seen_capability_output_digests.is_empty(),
+        "schedule_no_progress_warning must reset seen_capability_output_digests on the first strike"
+    );
+}
+
+/// Sibling of `no_progress_strike_schedules_recovery_warning_and_resets_digest_ring`
+/// (same seam: the full executor caller path through `schedule_no_progress_warning`
+/// in turn_stop.rs), but with an ALTERNATING call signature (A, B, A, B, ...) that
+/// still shares the same `output_digest`, so the terminating check
+/// (`RepeatedOutputProgressStrategy::dominant_repeated_output_count`,
+/// strategies/progress.rs) sees signature A's `(signature, output_digest)` pair
+/// dominate the window. The buggy computation this pins against
+/// (`recent_call_signatures.most_common_count_in(8)`) counts bare signatures over
+/// the wrong ring and the wrong window: alternating A/B in the trailing 8 calls
+/// yields 4, not the true dominant digest-window count of `no_progress_threshold`
+/// (8). The recovery warning must report the digest-ring count, not the
+/// signature-ring miscount.
+#[tokio::test]
+async fn no_progress_strike_reports_dominant_digest_count_for_alternating_signatures() {
+    use ironclaw_loop_contracts::{
+        CapabilityCallCandidate, CapabilityInputRef, LoopModelResponse, ModelProfileId,
+        ParentLoopOutput,
+    };
+
+    let threshold = crate::strategies::RepeatedOutputProgressStrategy::default().threshold();
+    let digest = ironclaw_loop_contracts::ContentDigest(90_210);
+
+    fn alternating_calls_response(use_first_signature: bool) -> LoopModelResponse {
+        let input = if use_first_signature {
+            "input:alt-a"
+        } else {
+            "input:alt-b"
+        };
+        LoopModelResponse {
+            chunks: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new(input).expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: None,
+            }]),
+            effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
+        }
+    }
+
+    // 2*threshold - 1 calls alternating A,B,A,B,...,A: signature A's
+    // (signature, output_digest) pair reaches `threshold` occurrences (the
+    // dominant pair, and the strike point) while signature B reaches only
+    // `threshold - 1`.
+    let total_calls = 2 * threshold - 1;
+    let mut responses = Vec::new();
+    let mut batch_outcomes = Vec::new();
+    for i in 0..total_calls {
+        responses.push(alternating_calls_response(i % 2 == 0));
+        batch_outcomes.push(no_progress_batch(
+            LoopResultRef::new(format!("result:alt-{i}")).expect("valid"),
+            digest,
+        ));
+    }
+    responses.push(reply_response_with_text("done after recovery"));
+
+    let host = MockHost::new(responses).with_batch_outcomes(batch_outcomes);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the strike must grant one recovery turn; got {exit:?}"
+    );
+
+    let recovery_request = host
+        .model_requests()
+        .get(total_calls)
+        .expect("a recovery-turn model request after the strike")
+        .clone();
+    let warning_message = recovery_request
+        .inline_messages
+        .iter()
+        .find(|message| message.safe_body.as_str().contains("no progress detected"))
+        .expect("the recovery turn must carry the no-progress warning");
+    assert!(
+        warning_message
+            .safe_body
+            .as_str()
+            .contains(&format!("repeated {threshold} times")),
+        "recovery warning must report the dominant digest-window count ({threshold}), not a \
+         signature-ring miscount; got: {}",
+        warning_message.safe_body.as_str()
     );
 }
 
@@ -1017,6 +1259,49 @@ async fn recoverable_batch_port_error_surfaces_as_model_visible_tool_error() {
         }
         other => panic!("expected GenericFailure observation detail, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn same_signature_with_changing_output_digest_never_stops_or_warns_no_progress() {
+    // Audit's motivating counter-example, driven through the full canonical
+    // executor from fresh state: the SAME call signature repeated exactly at
+    // the no-progress threshold (8), but with a DIFFERENT output digest each
+    // time (a real red/green retry loop) — must never dominate the trailing
+    // window, so the run completes normally instead of stopping (or
+    // scheduling a no-progress warning) as `NoProgressDetected`.
+    let name = "demo.echo";
+    let script = ScenarioScript {
+        model_responses: (0..8)
+            .map(|_| ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new(name)]))
+            .chain(std::iter::once(ScriptedModelResponse::Reply {
+                text: "done".to_string(),
+            }))
+            .collect(),
+        capability_outcomes: (0..8u64)
+            .map(|i| {
+                vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                    format!("result:changing-{i}"),
+                    ironclaw_loop_contracts::ContentDigest(i),
+                )]
+            })
+            .collect(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = DriverMockHost::builder().script(script).build();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "changing output digests must never trigger a no-progress stop: {exit:?}"
+    );
+    assert_eq!(host.model_call_count(), 9);
 }
 
 #[tokio::test]

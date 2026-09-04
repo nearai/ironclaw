@@ -19,7 +19,7 @@ use ironclaw_host_api::{action::NetworkMethod, ids::SecretHandle};
 use serde::Deserialize;
 use url::Url;
 
-use crate::payload::SLACK_API_HOST;
+use crate::api::SlackWebApiMethod;
 
 /// The administrator-configuration handle carrying the bot token (manifest
 /// data; the host injects the secret at egress time).
@@ -165,12 +165,12 @@ fn conversation_context_request(
     let credential = SecretHandle::new(SLACK_BOT_TOKEN_HANDLE)
         .map_err(|error| format!("invalid bot token handle: {error}"))?;
     let mut url = match conversation_context_kind(conversation) {
-        ConversationContextKind::ThreadReplies { .. } => Url::parse(&format!(
-            "https://{SLACK_API_HOST}/api/conversations.replies"
-        )),
-        ConversationContextKind::ChannelHistory => Url::parse(&format!(
-            "https://{SLACK_API_HOST}/api/conversations.history"
-        )),
+        ConversationContextKind::ThreadReplies { .. } => {
+            Url::parse(&SlackWebApiMethod::ConversationsReplies.url())
+        }
+        ConversationContextKind::ChannelHistory => {
+            Url::parse(&SlackWebApiMethod::ConversationsHistory.url())
+        }
     }
     .map_err(|error| format!("conversation context URL is invalid: {error}"))?;
     match conversation_context_kind(conversation) {
@@ -307,6 +307,7 @@ mod tests {
             Self {
                 requests: Mutex::new(Vec::new()),
                 response: Ok(RestrictedEgressResponse {
+                    retry_after: None,
                     status: 200,
                     body: body.as_bytes().to_vec(),
                 }),
@@ -342,6 +343,7 @@ mod tests {
                 .push(request);
             match &self.response {
                 Ok(response) => Ok(RestrictedEgressResponse {
+                    retry_after: None,
                     status: response.status,
                     body: response.body.clone(),
                 }),

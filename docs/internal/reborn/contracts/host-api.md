@@ -170,6 +170,23 @@ recovery context. Producers remain responsible for applying the canonical
 secret-value scrubber and injection fence before construction. Public summaries,
 events, logs, and projections continue to use their stricter redacted contracts.
 
+### 4.2 Model-visible JSON result pages
+
+The host API owns the stable `ironclaw.json_page.v1` wire vocabulary and the
+bounded `ModelResultPreview` safety contract. `ModelResultJsonPage` types only
+the result reference, RFC 6901 pointer, node and offset kinds, omissions, byte
+total, continuation request, and provider `serde_json::Value` content. The
+threads domain owns record interpretation, page construction, and provider
+content redaction; the neutral contract crate adopts no provider schema.
+
+Before model exposure, the complete serialized page passes through the same
+credential-redacted `ModelResultPreview` boundary as other tool output and is
+bounded by both the caller's requested page budget and
+`MODEL_RESULT_PREVIEW_MAX_BYTES` after redaction. Page-control provenance is a
+host-authored observation field; provider output that merely resembles the page
+wire shape remains ordinary untrusted output. Pages are derived views: durable
+storage retains the original serialized tool result unchanged.
+
 ---
 
 ## 5. ID and name contracts

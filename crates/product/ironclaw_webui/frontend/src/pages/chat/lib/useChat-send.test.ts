@@ -1,8 +1,16 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type {
+  DynamicTestOptions,
+  DynamicTestValue,
+} from "../../../test-support/dynamic-test-types";
+import {
+  createMemoryStorage,
+  replaceBrowserGlobal,
+} from "../../../test-support/browser-mocks";
 
 import { messagesFromTimeline } from "./history-messages";
 import { toRenderAttachment, toWireAttachment } from "./attachments";
@@ -53,6 +61,7 @@ import {
 } from "../../../lib/channel-connection-events";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 import { moduleSourceForVm } from "../../../lib/vm-inline-source";
+import { appendRunStoppedMessage } from "./useChatEvents";
 
 const STATE_SLOT = Object.freeze({
   cooldownUntil: 0,
@@ -72,7 +81,7 @@ const ENGLISH_FAILURE_COPY = {
   "chat.commandFailed": "Couldn't run that command.",
 };
 
-function testTranslator(copy = ENGLISH_FAILURE_COPY) {
+function testTranslator(copy: Record<string, string> = ENGLISH_FAILURE_COPY) {
   return (key, params = {}) =>
     (copy[key] || key).replace(/\{(\w+)\}/g, (match, name) =>
       Object.hasOwn(params, name) ? String(params[name]) : match,
@@ -144,6 +153,9 @@ function runUseChatSource(context) {
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
   }
+  if (!("appendRunStoppedMessage" in context)) {
+    context.appendRunStoppedMessage = appendRunStoppedMessage;
+  }
   if (!("failureMessageForRequestError" in context)) {
     context.failureMessageForRequestError = (error) =>
       typeof error?.message === "string" && error.message.trim()
@@ -170,7 +182,7 @@ function createReactStub({
   refs = [],
   runEffects = false,
   runLayoutEffects = runEffects,
-} = {}) {
+}: DynamicTestOptions = {}) {
   let stateIndex = 0;
   let refIndex = 0;
   let effectIndex = 0;
@@ -248,7 +260,7 @@ function createReactStub({
 test("useChat: disconnected SSE rewrites an active driver_unavailable error", () => {
   const threadId = "thread-1";
   const setCalls = [];
-  let renderedMessages = [
+  let renderedMessages: DynamicTestValue[] = [
     {
       id: "err-run-1",
       role: "error",
@@ -260,11 +272,11 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
         "The run failed because the execution driver was temporarily unavailable.",
     },
   ];
-  const initialByIndex = new Map([
+  const initialByIndex = new Map<number, DynamicTestValue>([
     [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
     [STATE_SLOT.isProcessing, true],
   ]);
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -334,7 +346,7 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
   const setCalls = [];
   const historicalFailure =
     "The run failed because the execution driver was temporarily unavailable.";
-  let renderedMessages = [
+  let renderedMessages: DynamicTestValue[] = [
     {
       id: "err-old-run",
       role: "error",
@@ -344,8 +356,8 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
       failureSummary: historicalFailure,
     },
   ];
-  const initialByIndex = new Map([[STATE_SLOT.isProcessing, true]]);
-  const context = {
+  const initialByIndex = new Map<number, DynamicTestValue>([[STATE_SLOT.isProcessing, true]]);
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -415,12 +427,12 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
 test("useChat: disconnected SSE ignores a stale active run after processing ended", () => {
   const threadId = "thread-1";
   const setCalls = [];
-  let renderedMessages = [];
-  const initialByIndex = new Map([
+  let renderedMessages: DynamicTestValue[] = [];
+  const initialByIndex = new Map<number, DynamicTestValue>([
     [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
     [STATE_SLOT.isProcessing, false],
   ]);
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -477,10 +489,10 @@ test("useChat: disconnected SSE ignores a stale active run after processing ende
 
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
   const threadId = "thread-1";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let loadHistory;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -571,8 +583,8 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
 
 function createSendCaptureContext() {
   let sentBody = null;
-  let renderedMessages = [];
-  const context = {
+  let renderedMessages: DynamicTestValue[] = [];
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -735,7 +747,7 @@ test("useChat.send: target-thread send does not append into active thread", asyn
   const seededByThread = new Map();
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -812,7 +824,7 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
   const seededByThread = new Map();
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -889,7 +901,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
   const seededByThread = new Map();
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -971,17 +983,17 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
     toolName: "builtin.shell",
   };
   const stateUpdates = [];
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, pendingGate],
       ]),
@@ -1033,7 +1045,7 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   const chat = context.globalThis.__testExports.useChat(threadId);
   await assert.rejects(
     chat.send("another request"),
-    (error) =>
+    (error: DynamicTestValue) =>
       error?.safeErrorCode === "approval_gate_pending_send_blocked" &&
       /Resolve the approval request/.test(error.message),
   );
@@ -1045,13 +1057,13 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
 
 test("useChat.send: request failures use safe copy in the selected language", async () => {
   const threadId = "thread-1";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendAttempt = 0;
   const zh = testTranslator({
     "chat.failure.request": "请求在发送前失败。",
   });
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -1139,11 +1151,11 @@ test("useChat.send: request failures use safe copy in the selected language", as
 });
 
 test("useChat.send: create-thread failure appends inline error on new chat", async () => {
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let createThreadCalls = 0;
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -1223,18 +1235,18 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
     kind: "gate",
     toolName: "builtin.shell",
   };
-  let renderedMessages = [failedMessage];
+  let renderedMessages: DynamicTestValue[] = [failedMessage];
   let seededMessages = null;
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, pendingGate],
       ]),
@@ -1318,10 +1330,10 @@ test("useChat.retryMessage: retry removes the prior request error bubble", async
     content: "Network unavailable",
     requestForMessageId: "failed-1",
   };
-  let renderedMessages = [failedMessage, failedRequestError];
+  let renderedMessages: DynamicTestValue[] = [failedMessage, failedRequestError];
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -1403,16 +1415,16 @@ test("useChat.send: accepted send does not clear a gate received while in flight
   };
   const stateUpdates = [];
   const stateSlots = new Map();
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let setPendingGateFromEvents = null;
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, null],
       ]),
@@ -1492,17 +1504,17 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
   };
   const stateUpdates = [];
   const stateSlots = new Map();
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let setPendingGateFromEvents = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, null],
       ]),
@@ -1591,17 +1603,17 @@ test("useChat.send: rejected busy seeds notice when active thread changed in fli
   const stateSlots = new Map();
   const refs = [];
   const seededByThread = new Map();
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let setPendingGateFromEvents = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, null],
       ]),
@@ -1687,17 +1699,17 @@ test("useChat.send: rejected busy appends system notice after gate resolves in f
   const threadId = "thread-1";
   const stateUpdates = [];
   const stateSlots = new Map();
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let setPendingGateFromEvents = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, null],
       ]),
@@ -1781,17 +1793,17 @@ test("useChat.send: gate received after callback creation blocks before send", a
   };
   const stateUpdates = [];
   const stateSlots = new Map();
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let setPendingGateFromEvents = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, null],
       ]),
@@ -1848,7 +1860,7 @@ test("useChat.send: gate received after callback creation blocks before send", a
   setPendingGateFromEvents(pendingGate);
   await assert.rejects(
     chat.send("busy after gate arrived"),
-    (error) =>
+    (error: DynamicTestValue) =>
       error?.safeErrorCode === "approval_gate_pending_send_blocked" &&
       /Resolve the approval request/.test(error.message),
   );
@@ -1875,17 +1887,17 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
     toolName: "builtin.shell",
   };
   const stateUpdates = [];
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [3, false],
         [4, pendingGate],
       ]),
@@ -1954,8 +1966,10 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
   const stateUpdates = [];
   let cancelRequest = null;
   let resolveCancelRequest;
+  let stoppedRun = null;
+  let chatEventOptions = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -1964,7 +1978,7 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
     React: createReactStub({
       // useChat state call order: cooldownUntil, now, activeRun,
       // isProcessing, pendingGate.
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId: "run-1", threadId, status: "running" }],
         [3, true],
         [4, { runId: "run-1", gateRef: "gate-1" }],
@@ -1972,6 +1986,12 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
       setCalls: stateUpdates,
     }),
     addPending,
+    appendRunStoppedMessage: (_setMessages, { runId, t: translate }) => {
+      stoppedRun = {
+        runId,
+        content: translate("chat.runStopped"),
+      };
+    },
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async (request) => {
@@ -1998,7 +2018,10 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
-    useChatEvents: () => () => {},
+    useChatEvents: (options) => {
+      chatEventOptions = options;
+      return () => {};
+    },
     useHistory: () => ({
       messages: [],
       hasMore: false,
@@ -2029,20 +2052,31 @@ test("useChat.cancelRun keeps local state until the cancel request succeeds", as
     { index: 3, value: false },
     { index: 2, value: null },
   ]);
+  assert.deepEqual(stoppedRun, {
+    runId: "run-1",
+    content: "chat.runStopped",
+  });
+  assert.equal(
+    chatEventOptions.runTrackingRef.current.locallyStoppedRuns.current.has(
+      "run-1",
+    ),
+    true,
+    "the caller must fence buffered live frames as soon as cancellation is acknowledged",
+  );
 });
 
 test("useChat.cancelRun preserves local state when the cancel request fails", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId: "run-1", threadId, status: "running" }],
         [3, true],
         [4, { runId: "run-1", gateRef: "gate-1" }],
@@ -2099,7 +2133,7 @@ test("useChat.cancelRun preserves local state when the cancel request fails", as
 
 test("useChat clears transient run and gate state during thread switch render", () => {
   const stateUpdates = [];
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -2109,7 +2143,7 @@ test("useChat clears transient run and gate state during thread switch render", 
       // useChat state call order: cooldownUntil, now, activeRun,
       // isProcessing, pendingGate, pendingOnboarding, busyGateNotice,
       // stateThreadId.
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId: "run-old", threadId: "thread-old", status: "awaiting_gate" }],
         [3, true],
         [4, { runId: "run-old", gateRef: "gate-old" }],
@@ -2184,7 +2218,7 @@ test("useChat.approve deny marks the current gated tool declined before resume",
   const runId = "run-1";
   const gateRef = "gate-1";
   const stateUpdates = [];
-  let renderedMessages = [
+  let renderedMessages: DynamicTestValue[] = [
     {
       id: "tool-invocation-1",
       role: "tool_activity",
@@ -2195,14 +2229,14 @@ test("useChat.approve deny marks the current gated tool declined before resume",
   ];
   let resolveRequest = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [3, false],
         [4, {
@@ -2286,14 +2320,14 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
   const gateRef = "gate-queued-response";
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [3, false],
         [4, {
@@ -2360,14 +2394,14 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
   const gateRef = "gate-already-terminal-false";
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [3, false],
         [4, {
@@ -2433,7 +2467,7 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
   const runId = "run-already-terminal-true";
   const gateRef = "gate-already-terminal-true";
   const stateUpdates = [];
-  let renderedMessages = [
+  let renderedMessages: DynamicTestValue[] = [
     {
       id: "tool-existing-terminal",
       role: "tool_activity",
@@ -2444,14 +2478,14 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
     },
   ];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [3, false],
         [4, {
@@ -2528,14 +2562,14 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
   let resolveCancelRequest;
   let updateActiveRun;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId: "run-1", threadId, status: "running" }],
         [3, true],
       ]),
@@ -2627,7 +2661,7 @@ test("useChat.cancelRun completion is fenced after a committed thread switch bef
   let latestEventState;
 
   const react = createReactStub({
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [STATE_SLOT.activeRun, {
         runId: sharedRunId,
         threadId: oldThreadId,
@@ -2643,7 +2677,7 @@ test("useChat.cancelRun completion is fenced after a committed thread switch bef
     runEffects: false,
     runLayoutEffects: true,
   });
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -2737,7 +2771,7 @@ test("useChat.send: connect-like prompts submit to the model", async () => {
   let createThreadCalled = false;
   let sentContent = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -2800,7 +2834,7 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
   let createThreadCalled = false;
   let sentContent = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -2869,9 +2903,12 @@ test("useChat: a channel-connected event refreshes the connection caches without
   const threadId = "thread-cache-refresh";
   const stateUpdates = [];
   const invalidated = [];
-  const originalWindow = globalThis.window;
-  const broadcasts = new Set();
+  const broadcasts = new Set<DynamicTestValue>();
   class FakeBroadcastChannel {
+    name;
+    onmessage;
+    closed;
+
     constructor(name) {
       this.name = name;
       this.onmessage = null;
@@ -2889,15 +2926,15 @@ test("useChat: a channel-connected event refreshes the connection caches without
       broadcasts.delete(this);
     }
   }
-  globalThis.window = {
+  const restoreWindow = replaceBrowserGlobal("window", {
     BroadcastChannel: FakeBroadcastChannel,
-    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    localStorage: createMemoryStorage(),
     addEventListener: () => {},
     removeEventListener: () => {},
-  };
+  });
 
   try {
-    const context = {
+    const context: vm.Context = {
       AbortController,
       Date,
       Error,
@@ -2907,7 +2944,7 @@ test("useChat: a channel-connected event refreshes the connection caches without
       React: createReactStub({
         runEffects: true,
         setCalls: stateUpdates,
-        initialByIndex: new Map([
+        initialByIndex: new Map<number, DynamicTestValue>([
           [
             STATE_SLOT.pendingGate,
             {
@@ -2984,7 +3021,7 @@ test("useChat: a channel-connected event refreshes the connection caches without
       "the channel-connected event must not clear the pending gate itself",
     );
   } finally {
-    globalThis.window = originalWindow;
+    restoreWindow();
   }
 });
 
@@ -2996,7 +3033,7 @@ test("useChat: channel-connected event from extensions clears a mounted waiting 
   const storageValues = new Map();
   let connectionHandler = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -3004,7 +3041,7 @@ test("useChat: channel-connected event from extensions clears a mounted waiting 
     Math,
     Set,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [
           5,
           {
@@ -3106,7 +3143,7 @@ test("useChat: channel-connected event from same chat does not duplicate the con
   const stateUpdates = [];
   let connectionHandler = null;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -3114,7 +3151,7 @@ test("useChat: channel-connected event from same chat does not duplicate the con
     Math,
     Set,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [
           5,
           {
@@ -3217,7 +3254,7 @@ test("useChat: timeline Slack OAuth install guidance does not open a connection 
     },
   ];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -3305,7 +3342,7 @@ test("useChat: Slack-read package install guidance does not render a connection 
     },
   ];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -3373,7 +3410,7 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
   const threadId = "thread-blank-slack-connection";
   const stateUpdates = [];
   let extensionsFetched = false;
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -3487,7 +3524,7 @@ function channelConnectionContext({
   sendMessage,
   startExtensionOauth,
   windowObject,
-}) {
+}: DynamicTestOptions): vm.Context {
   return {
     AbortController,
     Date,
@@ -3738,9 +3775,12 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
   const threadId = "thread-cross-source-resume";
   const stateUpdates = [];
   const invalidated = [];
-  const originalWindow = globalThis.window;
-  const broadcasts = new Set();
+  const broadcasts = new Set<DynamicTestValue>();
   class FakeBroadcastChannel {
+    name;
+    onmessage;
+    closed;
+
     constructor(name) {
       this.name = name;
       this.onmessage = null;
@@ -3758,15 +3798,15 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
       broadcasts.delete(this);
     }
   }
-  globalThis.window = {
+  const restoreWindow = replaceBrowserGlobal("window", {
     BroadcastChannel: FakeBroadcastChannel,
-    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    localStorage: createMemoryStorage(),
     addEventListener: () => {},
     removeEventListener: () => {},
-  };
+  });
 
   try {
-    const context = {
+    const context: vm.Context = {
       AbortController,
       Date,
       Error,
@@ -3776,7 +3816,7 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
       React: createReactStub({
         runEffects: true,
         setCalls: stateUpdates,
-        initialByIndex: new Map([
+        initialByIndex: new Map<number, DynamicTestValue>([
           [5, { state: "connection_required", extensionName: "slack", threadId, sourceMessageId: "tool-x" }],
         ]),
       }),
@@ -3832,7 +3872,7 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
       "the pairing panel clears when the channel connects elsewhere",
     );
   } finally {
-    globalThis.window = originalWindow;
+    restoreWindow();
   }
 });
 
@@ -3869,7 +3909,7 @@ test("useChat: in-chat OAuth start failures use localized messages", async () =>
       threadId,
       messages: [channelConnectionRequiredCard()],
       stateUpdates: [],
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [
           STATE_SLOT.pendingOnboarding,
           {
@@ -3939,7 +3979,7 @@ test("useChat: Slack OAuth completion consumes the in-chat connection card", asy
     messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
     stateUpdates,
     storage,
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [
         STATE_SLOT.pendingOnboarding,
         {
@@ -4034,7 +4074,7 @@ test("useChat: a late flow A status cannot complete or fail newer flow B", async
     messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
     stateUpdates,
     storage,
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [
         STATE_SLOT.pendingOnboarding,
         {
@@ -4124,7 +4164,7 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
     stateUpdates,
     storage,
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [
         STATE_SLOT.pendingOnboarding,
         {
@@ -4257,7 +4297,7 @@ test("useChat: an abandoned Slack OAuth flow times out instead of polling foreve
     messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
     stateUpdates,
     storage,
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [
         STATE_SLOT.pendingOnboarding,
         {
@@ -4350,7 +4390,7 @@ test("useChat: dismissing the connection card stops the pending OAuth flow's pol
     messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
     stateUpdates,
     storage,
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [
         STATE_SLOT.pendingOnboarding,
         {
@@ -4424,7 +4464,7 @@ test("useChat: Slack OAuth completion polls per-user extension state when callba
     threadId,
     messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
     stateUpdates,
-    initialByIndex: new Map([
+    initialByIndex: new Map<number, DynamicTestValue>([
       [
         STATE_SLOT.pendingOnboarding,
         {
@@ -4497,18 +4537,22 @@ test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persi
     getItem: (key) => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => store.set(key, String(value)),
     removeItem: (key) => store.delete(key),
+    clear: () => store.clear(),
+    get length() {
+      return store.size;
+    },
+    key: (index) => Array.from(store.keys())[index] ?? null,
   };
 
-  const originalWindow = globalThis.window;
   // The waiter registry reads window.localStorage; the dismissal store reads the
   // vm context's globalThis.localStorage. Back both with the same map.
-  globalThis.window = {
+  const restoreWindow = replaceBrowserGlobal("window", {
     localStorage,
     addEventListener: () => {},
     removeEventListener: () => {},
-  };
+  });
   try {
-    const context = {
+    const context: vm.Context = {
       AbortController,
       Date,
       Error,
@@ -4518,7 +4562,7 @@ test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persi
       React: createReactStub({
         runEffects: true,
         setCalls: stateUpdates,
-        initialByIndex: new Map([
+        initialByIndex: new Map<number, DynamicTestValue>([
           [2, { runId: "run-cancel", threadId, status: "running" }],
           [
             5,
@@ -4599,16 +4643,16 @@ test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persi
       "cancel forgets the waiter so a later connect won't resume the cancelled chat",
     );
   } finally {
-    globalThis.window = originalWindow;
+    restoreWindow();
   }
 });
 
 test("useChat.send: rejected_busy appends system notice, marks optimistic failed, clears isProcessing", async () => {
   const threadId = "thread-busy";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -4680,10 +4724,10 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
 
 test("useChat.send: rejected_busy without notice still clears isProcessing", async () => {
   const threadId = "thread-busy-no-notice";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   const stateUpdates = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -4754,16 +4798,16 @@ test("useChat.send: admits a follow-up while a run is active and renders it queu
   // follow-up must reach the backend so Reborn can queue it (deferred_busy),
   // and the optimistic bubble renders as "queued" (not an error).
   const threadId = "thread-busy-local";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
-    React: createReactStub({ initialByIndex: new Map([[3, true]]) }),
+    React: createReactStub({ initialByIndex: new Map<number, DynamicTestValue>([[3, true]]) }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -4821,10 +4865,10 @@ test("useChat.send: admits a follow-up while a run is active and renders it queu
 
 test("useChat.send: admits a follow-up submit while a prior run is still active", async () => {
   const threadId = "thread-1";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -4899,13 +4943,13 @@ test("useChat.send: admits a follow-up submit while a prior run is still active"
 
 test("useChat.send: created thread admits a follow-up send while its run is active", async () => {
   const createdThreadId = "thread-created";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let createThreadCalls = 0;
   let sendCalls = 0;
   const seededByThread = new Map();
   const stateSlots = new Map();
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5010,11 +5054,11 @@ test("useChat.send: created thread admits a follow-up send while its run is acti
 
 test("useChat.send: clears local busy when run settles before send response", async () => {
   const createdThreadId = "thread-created";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
   const seededByThread = new Map();
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5100,12 +5144,12 @@ test("useChat.send: clears local busy when run settles before send response", as
 test("useChat.send: clears local admission when navigating away before settlement", async () => {
   const threadA = "thread-a";
   const threadB = "thread-b";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
   const seededByThread = new Map();
   const ReactStub = createReactStub({ runEffects: true });
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5195,10 +5239,10 @@ test("useChat.send: clears local admission when navigating away before settlemen
 
 test("useChat.send: stream error clears same-thread local admission", async () => {
   const threadId = "thread-stream-error";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   let sendCalls = 0;
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5288,10 +5332,10 @@ test("useChat.send: a send to another thread is not blocked by an unsettled run 
   // `activeRunBlocksSend` guard may stop a resubmit into the busy thread.
   const viewedThread = "thread-a";
   let sendCalls = 0;
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   const seededByThread = new Map();
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5377,7 +5421,7 @@ function createResolveGateContext({
     thread_id: "thread-1",
     status: "queued",
   },
-} = {}) {
+}: DynamicTestOptions = {}) {
   // useChat state call order: cooldownUntil(0), now(1), activeRun(2),
   // isProcessing(3), pendingGate(4).
   const pendingGate = {
@@ -5387,14 +5431,14 @@ function createResolveGateContext({
     invocationId: "invocation-1",
     toolName: "web-access.search",
   };
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
     Map,
     Math,
     React: createReactStub({
-      initialByIndex: new Map([
+      initialByIndex: new Map<number, DynamicTestValue>([
         [2, { runId: "run-1", threadId: "thread-1", status: "running" }],
         [3, true],
         [4, pendingGate],
@@ -5571,7 +5615,7 @@ function createParallelSendContext({
   isProcessing,
   createdThreadId = "thread-created",
   stateUpdates = [],
-} = {}) {
+}: DynamicTestOptions = {}) {
   let sentBody = null;
   let createThreadCalls = 0;
   let currentMessages = [];
@@ -5590,7 +5634,7 @@ function createParallelSendContext({
     initialByIndex.set(3, isProcessing);
   }
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5749,9 +5793,9 @@ test("useChat.send: admits a send addressed to a busy thread that is NOT the vie
 
 test("useChat.runCommand: shows the localized chat.commandFailed notice on a client-side error", async () => {
   const threadId = "thread-1";
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5841,10 +5885,10 @@ test("useChat.runCommand: fences the success notice to the thread it executed ag
   const threadId = "thread-a";
   const nextThreadId = "thread-b";
   const refs = [];
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   const seededByThread = new Map();
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -5941,10 +5985,10 @@ test("useChat.runCommand: fences the failure notice to the thread it executed ag
   const threadId = "thread-a";
   const nextThreadId = "thread-b";
   const refs = [];
-  let renderedMessages = [];
+  let renderedMessages: DynamicTestValue[] = [];
   const seededByThread = new Map();
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,
@@ -6034,8 +6078,8 @@ test("useChat: opening another thread resets the run bookkeeping handed to useCh
   const setCalls = [];
   const react = createReactStub({ setCalls, runEffects: true });
   let capturedRunTrackingRef = null;
-  let renderedMessages = [];
-  const context = {
+  let renderedMessages: DynamicTestValue[] = [];
+  const context: vm.Context = {
     AbortController,
     Date,
     Error,

@@ -484,6 +484,7 @@ async fn filesystem_store_summary_creation_requires_complete_sequence_projection
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap_err();
@@ -767,6 +768,7 @@ impl RangeFixture {
                 summary_kind: SummaryKind::Compaction,
                 content: MessageContent::text("summary"),
                 model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+                context_mode: None,
             })
             .await
             .unwrap()

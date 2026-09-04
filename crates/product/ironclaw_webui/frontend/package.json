@@ -24,6 +24,7 @@
     "build-storybook": "storybook build"
   },
   "dependencies": {
+    "@hot-labs/near-connect": "0.11.4",
     "@tanstack/react-query": "5.87.4",
     "dompurify": "3.4.12",
     "event-source-plus": "0.1.15",

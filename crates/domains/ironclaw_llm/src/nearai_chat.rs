@@ -23,10 +23,11 @@ use serde::{Deserialize, Serialize};
 use self::nearai_tool_message_flattening::flatten_tool_messages;
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
+use crate::models::{DiscoveredModel, ModelModality};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    openai_json_schema_response_format,
+    openai_json_schema_response_format, prompt_cache_key_from_metadata,
 };
 use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
@@ -47,18 +48,59 @@ pub struct ModelInfo {
     pub provider: Option<String>,
 }
 
-/// Parse a NEAR AI `/models` response body into [`ModelInfo`] entries.
+/// Parse a NEAR AI `/models` response body into provider-neutral catalog entries.
 ///
 /// Accepts `{models: [...]}`, `{data: [...]}`, or a bare `[...]` array, and
 /// tolerates the various field names different deployments emit. Returns an
 /// empty vec when no recognizable entries are found.
-fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
+fn parse_nearai_models(response_text: &str) -> Vec<DiscoveredModel> {
+    fn deserialize_modalities_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value {
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
+
     #[derive(Deserialize)]
     struct ModelMetadataInner {
         #[serde(default)]
         name: Option<String>,
         #[serde(default, alias = "modelName", alias = "model_name")]
         model_name: Option<String>,
+    }
+
+    #[derive(Default, Deserialize)]
+    struct ModelArchitecture {
+        #[serde(
+            default,
+            alias = "inputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        input_modalities: Vec<String>,
+        #[serde(
+            default,
+            alias = "outputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        output_modalities: Vec<String>,
+    }
+
+    fn deserialize_architecture_lossy<'de, D>(
+        deserializer: D,
+    ) -> Result<ModelArchitecture, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // silent-ok: malformed optional display metadata must not hide routable model IDs.
+        Ok(serde_json::from_value(value).unwrap_or_default())
     }
 
     #[derive(Deserialize)]
@@ -75,6 +117,20 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
         model_id: Option<String>,
         #[serde(default)]
         metadata: Option<ModelMetadataInner>,
+        #[serde(
+            default,
+            alias = "inputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        input_modalities: Vec<String>,
+        #[serde(
+            default,
+            alias = "outputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        output_modalities: Vec<String>,
+        #[serde(default, deserialize_with = "deserialize_architecture_lossy")]
+        architecture: ModelArchitecture,
     }
 
     impl ModelEntry {
@@ -104,6 +160,32 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
                 .or_else(|| self.metadata.as_ref().and_then(|m| clean(&m.model_name)))
                 .or_else(|| self.metadata.as_ref().and_then(|m| clean(&m.name)))
         }
+
+        fn modalities(&self) -> (Vec<ModelModality>, Vec<ModelModality>) {
+            fn normalize(values: &[String]) -> Vec<ModelModality> {
+                let mut modalities = Vec::new();
+                for value in values {
+                    if let Some(modality) = ModelModality::from_provider_value(value)
+                        && !modalities.contains(&modality)
+                    {
+                        modalities.push(modality);
+                    }
+                }
+                modalities
+            }
+
+            let input = if self.input_modalities.is_empty() {
+                &self.architecture.input_modalities
+            } else {
+                &self.input_modalities
+            };
+            let output = if self.output_modalities.is_empty() {
+                &self.architecture.output_modalities
+            } else {
+                &self.output_modalities
+            };
+            (normalize(input), normalize(output))
+        }
     }
 
     #[derive(Deserialize)]
@@ -125,9 +207,13 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
             entries
                 .into_iter()
                 .filter_map(|e| {
-                    e.resolve_id().map(|name| ModelInfo {
-                        name,
-                        provider: None,
+                    e.resolve_id().map(|id| {
+                        let (input_modalities, output_modalities) = e.modalities();
+                        DiscoveredModel {
+                            id,
+                            input_modalities,
+                            output_modalities,
+                        }
                     })
                 })
                 .collect()
@@ -299,6 +385,14 @@ impl NearAiChatProvider {
     /// Returns true if using API key auth, false if session token auth.
     fn uses_api_key(&self) -> bool {
         self.config.api_key.is_some()
+    }
+
+    /// Resolve the derived prompt-cache-key value for this request's
+    /// metadata, unless an operator listed `"prompt_cache_key"` in
+    /// `config.unsupported_params` to suppress it (e.g. a NEAR AI-compatible
+    /// deployment that 400s on unknown fields).
+    fn prompt_cache_key(&self, metadata: &HashMap<String, String>) -> Option<String> {
+        prompt_cache_key_from_metadata(&self.config.unsupported_params, metadata)
     }
 
     /// Resolve the Bearer token for the current auth mode.
@@ -703,20 +797,32 @@ impl NearAiChatProvider {
     /// Handles session renewal on 401 (same pattern as `send_request`).
     /// Supports multiple response formats: `{models: [...]}`, `{data: [...]}`, and plain array.
     pub async fn list_models_full(&self) -> Result<Vec<ModelInfo>, LlmError> {
-        match self.list_models_inner().await {
+        Ok(self
+            .list_model_catalog_full()
+            .await?
+            .into_iter()
+            .map(|model| ModelInfo {
+                name: model.id,
+                provider: None,
+            })
+            .collect())
+    }
+
+    async fn list_model_catalog_full(&self) -> Result<Vec<DiscoveredModel>, LlmError> {
+        match self.list_model_catalog_inner().await {
             Ok(models) => Ok(models),
             Err(LlmError::SessionExpired { .. })
                 if !is_public_nearai_model_catalog(&self.config.base_url)
                     && !self.uses_api_key() =>
             {
                 self.session.handle_auth_failure().await?;
-                self.list_models_inner().await
+                self.list_model_catalog_inner().await
             }
             Err(e) => Err(e),
         }
     }
 
-    async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
+    async fn list_model_catalog_inner(&self) -> Result<Vec<DiscoveredModel>, LlmError> {
         let url = self.api_url("models");
         let requires_auth = !is_public_nearai_model_catalog(&self.config.base_url);
 
@@ -805,6 +911,7 @@ impl LlmProvider for NearAiChatProvider {
             tool_choice: None,
             stream: false,
             stream_options: None,
+            prompt_cache_key: self.prompt_cache_key(&req.metadata),
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -885,6 +992,7 @@ impl LlmProvider for NearAiChatProvider {
             stream_options: Some(ChatCompletionStreamOptions {
                 include_usage: true,
             }),
+            prompt_cache_key: self.prompt_cache_key(&req.metadata),
         };
 
         let response = self.send_streaming_request(&request, sink).await?;
@@ -934,7 +1042,7 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
-        let request = build_chat_completion_request(
+        let mut request = build_chat_completion_request(
             model,
             messages,
             req.tools,
@@ -946,6 +1054,7 @@ impl LlmProvider for NearAiChatProvider {
                 tool_choice: req.tool_choice,
             },
         );
+        request.prompt_cache_key = self.prompt_cache_key(&req.metadata);
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
@@ -1065,6 +1174,7 @@ impl LlmProvider for NearAiChatProvider {
         request.stream_options = Some(ChatCompletionStreamOptions {
             include_usage: true,
         });
+        request.prompt_cache_key = self.prompt_cache_key(&req.metadata);
 
         let response = self.send_streaming_request(&request, sink).await?;
         let provider_reasoning =
@@ -1129,6 +1239,10 @@ impl LlmProvider for NearAiChatProvider {
         Ok(models.into_iter().map(|m| m.name).collect())
     }
 
+    async fn list_model_catalog(&self) -> Result<Vec<DiscoveredModel>, LlmError> {
+        self.list_model_catalog_full().await
+    }
+
     fn active_model_name(&self) -> String {
         match self.active_model.read() {
             Ok(guard) => guard.clone(),
@@ -1179,6 +1293,10 @@ struct ChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<ChatCompletionStreamOptions>,
+    /// Stable per-conversation routing key for NEAR AI's OpenAI-compatible
+    /// prompt cache (`crate::provider::PROMPT_CACHE_KEY_METADATA`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1521,6 +1639,9 @@ fn build_chat_completion_request(
         tool_choice,
         stream: false,
         stream_options: None,
+        // Set by the caller (`complete_with_tools`/`complete_with_tools_streaming`)
+        // from request metadata — this helper has no metadata/gate access.
+        prompt_cache_key: None,
     }
 }
 
@@ -1805,9 +1926,73 @@ mod tests {
         ]}"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["deepseek-ai/DeepSeek-V4-Flash", "qwen/Qwen3-30B"]);
+    }
+
+    #[test]
+    fn parse_models_preserves_top_level_modalities() {
+        let body = r#"{"data":[{
+            "id":"openai/gpt-5-image",
+            "input_modalities":["text","image","unknown"],
+            "output_modalities":["text","image"]
+        }]}"#;
+
+        let models = parse_nearai_models(body);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].input_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+            ]
+        );
+        assert_eq!(
+            models[0].output_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_models_preserves_nested_architecture_modalities() {
+        let body = r#"[{
+            "id":"google/gemini",
+            "architecture": {
+                "inputModalities":["text","image","audio","video"],
+                "outputModalities":["text"]
+            }
+        }]"#;
+
+        let models = parse_nearai_models(body);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].input_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+                crate::models::ModelModality::Audio,
+                crate::models::ModelModality::Video,
+            ]
+        );
+        assert_eq!(
+            models[0].output_modalities,
+            [crate::models::ModelModality::Text]
+        );
+    }
+
+    #[test]
+    fn parse_models_defaults_missing_modalities_to_empty() {
+        let models = parse_nearai_models(r#"[{"id":"legacy/model"}]"#);
+
+        assert_eq!(models.len(), 1);
+        assert!(models[0].input_modalities.is_empty());
+        assert!(models[0].output_modalities.is_empty());
     }
 
     #[test]
@@ -1817,7 +2002,7 @@ mod tests {
         let body = r#"[{"name":"gpt-4o"},{"model":"o3-mini"}]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["gpt-4o", "o3-mini"]);
     }
@@ -1830,7 +2015,7 @@ mod tests {
         ]}"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         // Blank `id` falls through to `name`; second entry uses `model`.
         assert_eq!(models, ["only-display", "meta/Llama-4"]);
@@ -1842,7 +2027,7 @@ mod tests {
         let body = r#"[{"model_id":"vendor/x"},{"modelId":"vendor/y"}]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["vendor/x", "vendor/y"]);
     }
@@ -1854,7 +2039,7 @@ mod tests {
         let body = r#"[{"model_name":"qwen-turbo"},{"modelName":"glm-5"}]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["qwen-turbo", "glm-5"]);
     }
@@ -1869,7 +2054,7 @@ mod tests {
         ]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["meta-model", "meta-display"]);
     }
@@ -1916,6 +2101,13 @@ mod tests {
     }
 
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
+        test_nearai_config_with_unsupported_params(base_url, Vec::new())
+    }
+
+    fn test_nearai_config_with_unsupported_params(
+        base_url: &str,
+        unsupported_params: Vec<String>,
+    ) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
             base_url: base_url.to_string(),
@@ -1931,6 +2123,7 @@ mod tests {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            unsupported_params,
         }
     }
 
@@ -1939,7 +2132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_model_discovery_uses_session_authentication() {
+    async fn private_model_discovery_authenticates_and_tolerates_malformed_capabilities() {
         use tokio::net::TcpListener;
         use tokio::sync::oneshot;
 
@@ -1957,7 +2150,20 @@ mod tests {
                     }
                     write_http_json_response(
                         &mut socket,
-                        serde_json::json!({ "data": [{ "id": "nearai/test-model" }] }),
+                        serde_json::json!({
+                            "data": [
+                                {
+                                    "id": "nearai/malformed-capabilities",
+                                    "input_modalities": ["text", 7, null],
+                                    "output_modalities": null,
+                                    "architecture": null
+                                },
+                                {
+                                    "id": "nearai/valid",
+                                    "architecture": { "input_modalities": ["image"] }
+                                }
+                            ]
+                        }),
                     )
                     .await;
                     break;
@@ -1979,12 +2185,16 @@ mod tests {
         let provider = NearAiChatProvider::new(config, session).expect("provider");
 
         let models = provider
-            .list_models_full()
+            .list_model_catalog_full()
             .await
             .expect("private model discovery should use the session token");
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].name, "nearai/test-model");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "nearai/malformed-capabilities");
+        assert_eq!(models[0].input_modalities, [ModelModality::Text]);
+        assert!(models[0].output_modalities.is_empty());
+        assert_eq!(models[1].id, "nearai/valid");
+        assert_eq!(models[1].input_modalities, [ModelModality::Image]);
         let headers = headers_rx.await.expect("models request headers");
         assert!(
             headers
@@ -3417,6 +3627,167 @@ data: [DONE]
         );
     }
 
+    /// Spawn a capture server for a single `/v1/chat/completions` POST and
+    /// return a provider pointed at it plus the captured raw request body,
+    /// mirroring `complete_with_tools_sends_standard_tool_results_by_default`'s
+    /// capture-server pattern above.
+    async fn nearai_completion_capture_provider(
+        unsupported_params: Vec<String>,
+    ) -> (NearAiChatProvider, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut tx = Some(tx);
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let (headers, body) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("POST /v1/chat/completions ") {
+                    if let Some(tx) = tx.take() {
+                        tx.send(body).expect("send captured request");
+                    }
+                    write_http_json_response(
+                        &mut socket,
+                        serde_json::json!({
+                            "id": "chatcmpl-test",
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "observed"
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+                        }),
+                    )
+                    .await;
+                    break;
+                }
+                write_http_json_response(&mut socket, serde_json::json!({ "models": [] })).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(
+            test_nearai_config_with_unsupported_params(&base_url, unsupported_params),
+            test_session(),
+        )
+        .expect("provider");
+        (provider, rx)
+    }
+
+    /// With `PROMPT_CACHE_KEY_METADATA` present in the request metadata, the
+    /// serialized body carries a top-level `prompt_cache_key` with that
+    /// exact value.
+    #[tokio::test]
+    async fn complete_sends_prompt_cache_key_when_metadata_present() {
+        let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        provider.complete(request).await.expect("completion");
+
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        assert_eq!(body["prompt_cache_key"], "thread-cache-key-abc");
+    }
+
+    /// The four public completion entry points build distinct request values;
+    /// keep the shared cache key pinned across plain/tool and buffered/native
+    /// streaming calls so a future builder cannot silently omit it.
+    #[tokio::test]
+    async fn every_completion_method_sends_prompt_cache_key() {
+        for method in 0..4 {
+            let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+            let mut completion = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+            completion.metadata.insert(
+                crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+                "thread-cache-key-all-methods".to_string(),
+            );
+            let mut tool_completion = ToolCompletionRequest::new(
+                vec![ChatMessage::user("search")],
+                vec![search_tool_definition()],
+            );
+            tool_completion.metadata = completion.metadata.clone();
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let sink = Arc::new(RecordingCompletionStreamSink { sender });
+
+            match method {
+                0 => {
+                    provider.complete(completion).await.expect("completion");
+                }
+                1 => {
+                    provider
+                        .complete_with_tools(tool_completion)
+                        .await
+                        .expect("tool completion");
+                }
+                2 => {
+                    let _ = provider.complete_streaming(completion, sink).await;
+                }
+                3 => {
+                    let _ = provider
+                        .complete_with_tools_streaming(tool_completion, sink)
+                        .await;
+                }
+                _ => unreachable!("four completion methods"),
+            }
+
+            let body: serde_json::Value =
+                serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+            assert_eq!(
+                body["prompt_cache_key"], "thread-cache-key-all-methods",
+                "completion method {method} must carry the shared cache key",
+            );
+        }
+    }
+
+    /// Absent metadata must not synthesize the field.
+    #[tokio::test]
+    async fn complete_omits_prompt_cache_key_when_metadata_absent() {
+        let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        provider.complete(request).await.expect("completion");
+
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "no prompt_cache_key may be emitted when no metadata was supplied: {body}"
+        );
+    }
+
+    /// The kill switch: listing `"prompt_cache_key"` in the config's
+    /// `unsupported_params` suppresses the field even though metadata
+    /// carries a value.
+    #[tokio::test]
+    async fn complete_omits_prompt_cache_key_when_in_unsupported_params() {
+        let (provider, rx) =
+            nearai_completion_capture_provider(vec!["prompt_cache_key".to_string()]).await;
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        provider.complete(request).await.expect("completion");
+
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "unsupported_params must suppress prompt_cache_key: {body}"
+        );
+    }
+
     #[test]
     fn test_assistant_with_tool_calls_conversion() {
         use crate::ToolCall;
@@ -4300,6 +4671,7 @@ data: [DONE]
             tool_choice: None,
             stream: false,
             stream_options: None,
+            prompt_cache_key: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "gpt-4o");
@@ -4337,6 +4709,7 @@ data: [DONE]
             tool_choice: Some(serde_json::Value::String("auto".to_string())),
             stream: false,
             stream_options: None,
+            prompt_cache_key: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         // f32 precision: 0.7f32 serializes as 0.699999988... in JSON

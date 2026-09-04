@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "github"
 name = "GitHub"
-version = "0.2.8"
+version = "0.3.0"
 description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
 trust = "first_party_requested"
 
@@ -10,9 +10,11 @@ kind = "wasm"
 module = "wasm/github_tool.wasm"
 
 # GitHub REST endpoints return heterogeneous provider-owned response shapes.
-# Detail tools preserve those raw JSON contracts. High-cardinality pull request
-# list/search tools keep their established top-level shapes but project compact
-# model-facing summaries; their prompt docs name the dedicated detail tools.
+# Detail tools preserve those raw JSON contracts except where the package owns
+# a documented transport encoding: get_file_content decodes GitHub's base64
+# file content before returning it. High-cardinality pull request list/search
+# tools keep their established top-level shapes but project compact model-facing
+# summaries; their prompt docs name the dedicated detail tools.
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -53,7 +55,7 @@ placeholder_env = "GH_TOKEN"
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.list_issues"
-description = "List issues in one repository."
+description = "List issues in ONE repository. For a question spanning an organisation, prefer github.search_issues_pull_requests with an `org:` qualifier — it answers in a single call, where this tool needs one call per repository and returns full issue objects."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
@@ -563,7 +565,7 @@ placeholder_env = "GH_TOKEN"
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.search_issues_pull_requests"
-description = "Search compact GitHub issue and pull request summaries."
+description = "Search compact GitHub issue and pull request summaries. Accepts GitHub search qualifiers including `org:`, `repo:`, `label:`, `is:open`, so one query can span every repository in an organisation; read `total_count` for counts."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
@@ -619,6 +621,7 @@ effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_file_content.input.v1.json"
+output_schema_ref = "schemas/github/get_file_content.output.v1.json"
 prompt_doc_ref = "prompts/github/get_file_content.md"
 
 [[tools.credentials]]

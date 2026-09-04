@@ -9,7 +9,12 @@ before trusting it.
 
 - `state.rs` defines `LoopExecutionState`, checkpoint payload constants, and
   constructors.
-- `slots.rs` defines per-strategy state slots.
+- `slots.rs` retains only trivial marker and compatibility slots that do not
+  have enough independent behavior to earn a file.
+- `compaction.rs`, `recovery.rs`, `reply_admission.rs`, and `stop_control.rs`
+  own the substantive typed slots for those decision axes.
+- `tests.rs` routes checkpoint/wire and lifecycle state-contract test
+  submodules, kept outside the wire-struct definition.
 - `budget_ledger.rs` owns the three per-run budget counters that used to be
   bare public fields on `LoopExecutionState`.
 - `bounded_ring.rs` defines fixed-window observation history.
@@ -27,6 +32,12 @@ before trusting it.
 - Do not put family-domain durable state here. Mission progress, routine
   cursors, plan trees, and product state belong behind host/workspace context
   sources and are surfaced through prompt/context ports.
+- Before adding a field, name its producer, reader/owner, and fresh-run,
+  rebase, and reset policy. Classify it as durable checkpoint state or
+  ephemeral execution state first; durable additions must preserve the flat
+  wire shape and root `crate::state::*` re-exports.
+- An unread serialized field is a compatibility tombstone until an explicit
+  wire migration removes it. Do not prune it as part of an ownership move.
 - State types may depend on neutral `ironclaw_turns` refs and request types;
   they must not depend on Reborn runtime, product, DB, or capability-host
   implementations.
@@ -45,6 +56,9 @@ before trusting it.
 - Do not make state mutation implicit through interior mutability.
 - Do not change checkpoint wire shape without updating constructor,
   validation, and resume tests together.
+- Keep state mutation with the executor stage that owns the transition; state
+  defines the typed data and reset/rebase rules but does not become a second
+  lifecycle authority.
 - Keep terminal-warning observations and scheduling crate-private. Downstream
   tests should drive the executor or use `test_support` scenario helpers.
 - A delivered warning remains active across capability gates until the stop

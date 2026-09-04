@@ -217,18 +217,32 @@ fn tree_input_schema_accepts_valid_and_rejects_invalid() {
 }
 
 #[test]
-fn document_read_output_schema_requires_word_count() {
+fn document_read_output_schema_requires_content_hash_and_word_count() {
     let validator = validator_for("schemas/memory/document-read.output.v1.json");
 
-    // `read()` always returns word_count (via MemoryServiceReadResponse), so the
-    // output schema requires it alongside path/content.
+    // `read()` always returns both derived fields via
+    // `MemoryServiceReadResponse`, so the output schema requires them alongside
+    // path/content.
     assert!(validator.is_valid(&json!({
         "path": "notes/alpha.md",
         "content": "hello world",
+        "content_hash": "sha256:example",
         "word_count": 2
     })));
     assert!(
-        !validator.is_valid(&json!({"path": "notes/alpha.md", "content": "hello world"})),
+        !validator.is_valid(&json!({
+            "path": "notes/alpha.md",
+            "content": "hello world",
+            "content_hash": "sha256:example"
+        })),
         "word_count is required"
+    );
+    assert!(
+        !validator.is_valid(&json!({
+            "path": "notes/alpha.md",
+            "content": "hello world",
+            "word_count": 2
+        })),
+        "content_hash is required"
     );
 }

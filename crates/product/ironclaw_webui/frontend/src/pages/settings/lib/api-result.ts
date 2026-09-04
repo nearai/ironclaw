@@ -3,9 +3,19 @@
 // Without this, a stub/handler that resolves `{ success: false }` would still
 // flip the optimistic cache and show a fake "Saved" indicator. Returns the
 // data unchanged on success so callers can keep chaining.
-export function throwIfApiFailed(data, fallbackMessage = "Request failed") {
-  if (data && data.success === false) {
-    throw new Error(data.message || fallbackMessage);
+type ApiFailure = { success: false; message?: string };
+
+export function throwIfApiFailed<T>(
+  data: T,
+  fallbackMessage = "Request failed",
+): Exclude<T, ApiFailure> {
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    Reflect.get(data, "success") === false
+  ) {
+    const message = Reflect.get(data, "message");
+    throw new Error(typeof message === "string" ? message : fallbackMessage);
   }
-  return data;
+  return data as Exclude<T, ApiFailure>;
 }

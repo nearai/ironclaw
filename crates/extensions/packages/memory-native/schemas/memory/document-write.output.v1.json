@@ -3,11 +3,11 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["cleared", "patched", "written"],
-      "description": "Write outcome"
+      "enum": ["cleared", "conflict", "patched", "written"],
+      "description": "Write outcome; conflict means the document changed after the caller read it"
     },
-    "path": { "type": "string", "description": "Relative memory document path that was written" },
-    "message": { "type": "string", "description": "Human-readable note (cleared status)" },
+    "path": { "type": "string", "description": "Relative memory document path targeted by the operation" },
+    "message": { "type": "string", "description": "Human-readable note (cleared or conflict status)" },
     "replacements": { "type": "integer", "description": "Number of replacements made (patched status)" },
     "content_length": { "type": "integer", "description": "Resulting content length in bytes" },
     "append": { "type": "boolean", "description": "Whether the write appended (written status)" }

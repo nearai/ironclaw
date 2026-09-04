@@ -2481,6 +2481,9 @@ fn web_app_build_extras(
     });
     input
         .with_first_party_bundles(bundles)
+        .with_session_reply_channel(Some(ExtensionId::from_trusted(
+            ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
+        )))
         .with_channel_extension_bindings(vec![ironclaw_composition::ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted(
                 ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),

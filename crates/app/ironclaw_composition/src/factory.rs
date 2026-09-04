@@ -257,6 +257,8 @@ pub(crate) type ComposedToolPermissionOverrideStore =
     ToolPermissionOverrideStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<CompositeRootFilesystem>;
+pub(crate) type ComposedNotificationInbox =
+    Arc<dyn ironclaw_notifications::NotificationInboxStorePort>;
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
@@ -287,7 +289,7 @@ pub(crate) struct RebornRuntimeStores {
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
-    pub(crate) notification_inbox: Arc<dyn ironclaw_notifications::NotificationInboxStorePort>,
+    pub(crate) notification_inbox: ComposedNotificationInbox,
     pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
@@ -399,6 +401,19 @@ pub(crate) struct RebornRuntimeStores {
     /// are consumed by `build_reborn_runtime` when the channel host assembly
     /// starts.
     pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    /// The binary-bound product projection reply sink, if a channel binding
+    /// carries one; `build_reborn_runtime` binds the live projection publisher
+    /// into it once the projection graph exists.
+    pub(crate) projection_reply_sink:
+        Option<std::sync::Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>>,
+    /// The channel whose `[channel.reply]` the host serves (the
+    /// authenticated-session channel); reply publication registers it as a
+    /// target for every run.
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
+    /// Whether the build's channel-host start also starts reply publication
+    /// (`RebornHostBindings::start_reply_publication_at_build`; always true
+    /// outside deferring test harnesses).
+    pub(crate) start_reply_publication_at_build: bool,
     /// Manifest-declared deployment channel surfaces, independent of user
     /// installation/activation state.
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,

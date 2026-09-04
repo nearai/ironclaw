@@ -19,13 +19,21 @@ use ironclaw_auth::{
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
     TurnRunRef,
 };
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor,
     TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
     resource::ResourceScope,
+};
+use ironclaw_notifications::{
+    LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationId,
+    NotificationInboxStore, NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GateResumeDisposition, GetRunStateRequest,
@@ -632,11 +640,39 @@ async fn credential_provided_resumes_completed_auth_gate() {
     );
     let (service, flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    let inbox = notification_inbox();
+    inbox
+        .publish(PublishNotificationRequest {
+            id: auth_notification_id(run_id, &gate_ref),
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: actor.user_id.clone(),
+            },
+            kind: NotificationKind::AuthenticationRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: Some(scope.thread_id.clone()),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(
+                    LifecycleRef::new(gate_ref.as_str()).expect("auth lifecycle reference"),
+                ),
+                credential_providers: Vec::new(),
+            },
+            action: NotificationAction::OpenThread {
+                thread_id: scope.thread_id.clone(),
+            },
+            initial_state: NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed auth notification");
+    let service =
+        service.with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
 
     let response = service
         .resolve(ResolveAuthInteractionRequest {
-            scope,
-            actor,
+            scope: scope.clone(),
+            actor: actor.clone(),
             run_id_hint: Some(run_id),
             gate_ref,
             decision: AuthInteractionDecision::CredentialProvided {
@@ -657,6 +693,23 @@ async fn credential_provided_resumes_completed_auth_gate() {
     assert_eq!(
         resumes[0].precondition,
         ResumeTurnPrecondition::BlockedAuthGate
+    );
+    let page = inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id,
+                user_id: actor.user_id,
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list auth notification");
+    assert_eq!(page.notifications.len(), 1);
+    assert!(
+        page.notifications[0].resolved_at.is_some(),
+        "verified credential recovery retires the actionable Inbox record"
     );
 }
 
@@ -903,13 +956,41 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
     );
     let (service, flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    let inbox = notification_inbox();
+    inbox
+        .publish(PublishNotificationRequest {
+            id: auth_notification_id(run_id, &gate_ref),
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: actor.user_id.clone(),
+            },
+            kind: NotificationKind::AuthenticationRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: Some(scope.thread_id.clone()),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(
+                    LifecycleRef::new(gate_ref.as_str()).expect("auth lifecycle reference"),
+                ),
+                credential_providers: Vec::new(),
+            },
+            action: NotificationAction::OpenThread {
+                thread_id: scope.thread_id.clone(),
+            },
+            initial_state: NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed denied auth notification");
+    let service =
+        service.with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
 
     let response = service
         .resolve(ResolveAuthInteractionRequest {
-            scope,
-            actor,
+            scope: scope.clone(),
+            actor: actor.clone(),
             run_id_hint: Some(run_id),
-            gate_ref,
+            gate_ref: gate_ref.clone(),
             decision: AuthInteractionDecision::Deny,
             idempotency_key: IdempotencyKey::new("auth-action-deny").unwrap(),
         })
@@ -935,6 +1016,23 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
         Some(GateResumeDisposition::Denied)
     ));
     assert!(coordinator.cancellations().is_empty());
+    let notifications = inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id,
+                user_id: actor.user_id,
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list denied auth notification");
+    assert_eq!(notifications.notifications.len(), 1);
+    assert!(
+        notifications.notifications[0].resolved_at.is_none(),
+        "denial does not prove credential recovery, so the auth action remains available"
+    );
 }
 
 #[tokio::test]
@@ -1746,6 +1844,30 @@ fn service(
     gate_ref: TurnGateRef,
 ) -> DefaultAuthInteractionService {
     service_parts(flow, gates, actor, gate_ref).0
+}
+
+fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("notification mount alias"),
+        VirtualPath::new("/engine/test/auth-interaction-notifications")
+            .expect("notification mount target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("notification mount view");
+    Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ))
+}
+
+fn auth_notification_id(run_id: TurnRunId, gate_ref: &TurnGateRef) -> NotificationId {
+    let lifecycle_key =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, gate_ref.as_str().as_bytes());
+    NotificationId::new(format!("run:{run_id}:authentication:{lifecycle_key}"))
+        .expect("auth notification id")
 }
 
 fn service_parts(

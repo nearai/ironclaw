@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { sendMessage } from "./api";
 const CHANNEL_CONNECTION_BROADCAST = "ironclaw-channel-connection";
 const CHANNEL_CONNECTION_STORAGE_KEY = "ironclaw:channel-connection:connected";
@@ -7,7 +6,31 @@ const CHANNEL_CONNECTION_WAITING_KEY = "ironclaw:channel-connection:waiting:v1";
 const CONTINUATION_SUFFIX = " is connected. Continue the previous request.";
 const WAITER_TTL_MS = 24 * 60 * 60 * 1000;
 
-export function normalizeConnectionChannel(channel) {
+export interface ChannelConnectionEvent {
+  type: string;
+  channel: string;
+  provider?: string | null;
+  providerUserId?: string | null;
+  sourceThreadId?: string | null;
+  source?: string;
+  completedAt?: number;
+  nonce?: string;
+}
+
+interface ChannelConnectionWaiter {
+  channel: string;
+  threadId: string;
+  sourceMessageId: string | null;
+  createdAt: number;
+}
+
+interface WaiterOptions {
+  channel?: string;
+  threadId?: string;
+  sourceMessageId?: string | null;
+}
+
+export function normalizeConnectionChannel(channel: unknown): string {
   return String(channel || "")
     .trim()
     .toLowerCase()
@@ -17,7 +40,10 @@ export function normalizeConnectionChannel(channel) {
 // Prefer the display name the caller already has from the wire (extension
 // info `display_name`); fall back to prettifying the raw channel id. No
 // per-channel special cases live here.
-export function channelConnectionDisplayName(channel, displayName = null) {
+export function channelConnectionDisplayName(
+  channel: unknown,
+  displayName: unknown = null,
+): string {
   const wireName = String(displayName || "").trim();
   if (wireName) return wireName;
   const raw = String(channel || "the channel").trim();
@@ -27,11 +53,14 @@ export function channelConnectionDisplayName(channel, displayName = null) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-export function channelConnectionContinuationMessage(channel) {
+export function channelConnectionContinuationMessage(channel: unknown): string {
   return `${channelConnectionDisplayName(channel)}${CONTINUATION_SUFFIX}`;
 }
 
-export function connectionEventMatchesOnboarding(event, onboarding) {
+export function connectionEventMatchesOnboarding(
+  event: Partial<ChannelConnectionEvent> | null | undefined,
+  onboarding: { extensionName?: string } | null | undefined,
+): boolean {
   const eventChannel = normalizeConnectionChannel(event?.channel);
   const onboardingChannel = normalizeConnectionChannel(onboarding?.extensionName);
   return Boolean(eventChannel && onboardingChannel && eventChannel === onboardingChannel);
@@ -54,7 +83,7 @@ export async function notifyChannelConnected({
 } = {}) {
   const normalized = normalizeConnectionChannel(channel);
   if (!normalized) return;
-  const payload = {
+  const payload: ChannelConnectionEvent = {
     type: CHANNEL_CONNECTION_MESSAGE_TYPE,
     channel: normalized,
     provider,
@@ -92,24 +121,31 @@ export async function notifyChannelConnected({
   });
 }
 
-export function subscribeChannelConnected(handler) {
+export function subscribeChannelConnected(
+  handler: ((payload: ChannelConnectionEvent) => void) | null | undefined,
+): () => void {
   if (typeof handler !== "function" || typeof window === "undefined") {
     return () => {};
   }
 
-  const handlePayload = (payload) => {
-    if (payload?.type !== CHANNEL_CONNECTION_MESSAGE_TYPE) return;
-    if (!normalizeConnectionChannel(payload.channel)) return;
-    handler(payload);
+  const handlePayload = (payload: unknown) => {
+    if (!payload || typeof payload !== "object") return;
+    const candidate = payload as Partial<ChannelConnectionEvent>;
+    if (candidate.type !== CHANNEL_CONNECTION_MESSAGE_TYPE) return;
+    if (!normalizeConnectionChannel(candidate.channel)) return;
+    // The runtime checks above establish the two fields subscribers require;
+    // the remaining fields are authored by notifyChannelConnected and are
+    // optional for compatibility with older cross-tab payloads.
+    handler(candidate as ChannelConnectionEvent);
   };
 
-  let broadcast = null;
+  let broadcast: BroadcastChannel | null = null;
   if (typeof window.BroadcastChannel === "function") {
     broadcast = new window.BroadcastChannel(CHANNEL_CONNECTION_BROADCAST);
     broadcast.onmessage = (event) => handlePayload(event.data);
   }
 
-  const onStorage = (event) => {
+  const onStorage = (event: StorageEvent) => {
     if (event.key !== CHANNEL_CONNECTION_STORAGE_KEY) return;
     handlePayload(parseStoredConnectionEvent(event.newValue));
   };
@@ -121,7 +157,7 @@ export function subscribeChannelConnected(handler) {
   };
 }
 
-function parseStoredConnectionEvent(value) {
+function parseStoredConnectionEvent(value: string | null): unknown {
   if (!value) return null;
   try {
     const parsed = JSON.parse(value);
@@ -135,7 +171,7 @@ export function rememberChannelConnectionWaiter({
   channel,
   threadId,
   sourceMessageId = null,
-} = {}) {
+}: WaiterOptions = {}): void {
   const normalized = normalizeConnectionChannel(channel);
   const normalizedThreadId = String(threadId || "").trim();
   if (!normalized || !normalizedThreadId) return;
@@ -160,7 +196,7 @@ export function forgetChannelConnectionWaiter({
   channel,
   threadId,
   sourceMessageId = null,
-} = {}) {
+}: WaiterOptions = {}): void {
   const normalized = normalizeConnectionChannel(channel);
   const normalizedThreadId = String(threadId || "").trim();
   if (!normalized || !normalizedThreadId) return;
@@ -176,7 +212,9 @@ export function forgetChannelConnectionWaiter({
   );
 }
 
-export async function resumeWaitingChannelConnections(event = {}) {
+export async function resumeWaitingChannelConnections(
+  event: Partial<ChannelConnectionEvent> = {},
+) {
   const eventChannel = normalizeConnectionChannel(event.channel);
   if (!eventChannel) return [];
   const sourceThreadId = event.sourceThreadId || null;
@@ -222,7 +260,7 @@ export async function resumeWaitingChannelConnections(event = {}) {
   return results;
 }
 
-function readWaitingChannelConnections() {
+function readWaitingChannelConnections(): ChannelConnectionWaiter[] {
   const storage = connectionStorage();
   if (!storage) return [];
   try {
@@ -248,7 +286,7 @@ function readWaitingChannelConnections() {
   }
 }
 
-function writeWaitingChannelConnections(waiters) {
+function writeWaitingChannelConnections(waiters: ChannelConnectionWaiter[]): void {
   const storage = connectionStorage();
   if (!storage) return;
   try {
@@ -258,11 +296,11 @@ function writeWaitingChannelConnections(waiters) {
   }
 }
 
-function isExpiredWaiter(createdAt, now) {
+function isExpiredWaiter(createdAt: number, now: number): boolean {
   return createdAt > 0 && now - createdAt > WAITER_TTL_MS;
 }
 
-function connectionStorage() {
+function connectionStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
     return window.localStorage || null;

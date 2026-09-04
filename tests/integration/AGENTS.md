@@ -228,7 +228,7 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`executor/capabilities.rs`: filtered- or stale-surface outcomes; `executor/capability_dispatch.rs`: denied-resume and retry outcomes) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
 
@@ -469,7 +469,7 @@ Group tests live in subdirectories under `tests/integration/`:
 
 ```
 tests/integration/group_approvals/
-    main.rs                              # one #[tokio::test], drives scenarios in order
+    main.rs                              # one or more independent top-level tests
     scenario_gate_then_resolve.rs        # pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()>
     scenario_approve_always_persists.rs
 ```
@@ -482,6 +482,12 @@ Cargo discovers multi-file integration test binaries via `[[test]]` entries in
 name = "reborn_group_approvals"
 path = "tests/integration/group_approvals/main.rs"
 ```
+
+A group binary may contain multiple top-level tests. Each top-level test must
+construct its own `RebornIntegrationGroup`; sibling tests must not depend on
+process-global state or on another test running first. Scenarios driven by one
+group instance may intentionally share state and run sequentially. CI may run
+the independent top-level tests in separate processes and in parallel.
 
 ### `main.rs` boilerplate (required)
 

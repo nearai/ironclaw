@@ -10,6 +10,18 @@ import { SettingsSearchEmpty } from "./settings-search-empty";
 import { useLlmProviders } from "../hooks/useLlmProviders";
 import { UserModelPreferenceSelector } from "./user-model-preference-selector";
 import { ModelSelectionPolicyEditor } from "./model-selection-policy-editor";
+import { modelEntryFor, normalizeModelCatalog } from "../lib/model-capabilities";
+import { ModelCapabilityBadges } from "./model-capability-badges";
+
+type InferenceTabProps = {
+  isAdmin?: boolean;
+  settings: Record<string, unknown> & { selected_model?: string };
+  gatewayStatus?: { llm_backend?: string; llm_model?: string } | null;
+  onSave: (key: string, value: unknown) => void;
+  savedKeys: Record<string, boolean>;
+  isLoading: boolean;
+  searchQuery?: string;
+};
 
 export function InferenceTab({
   isAdmin = false,
@@ -19,7 +31,7 @@ export function InferenceTab({
   savedKeys,
   isLoading,
   searchQuery = "",
-}) {
+}: InferenceTabProps) {
   const t = useT();
   // Source the active backend/model from the `/llm/providers` snapshot (the
   // same query the provider list below renders from) rather than the empty
@@ -45,6 +57,17 @@ export function InferenceTab({
   const model = hasActiveProvider
     ? selectedModel || activeProvider?.default_model || settings.selected_model || ""
     : "";
+  const policyCatalog = normalizeModelCatalog({
+    models:
+      providerState.userModelPolicy?.provider_id === activeProviderId
+        ? providerState.userModelPolicy.allowed_models
+        : [],
+    model_entries:
+      providerState.userModelPolicy?.provider_id === activeProviderId
+        ? providerState.userModelPolicy.model_entries
+        : [],
+  });
+  const activeModelEntry = modelEntryFor(policyCatalog.modelEntries, model);
   const sections = filterSettingsSections(INFERENCE_FIELDS, settings, searchQuery, t);
   const showProviderSummary = matchesSearch(searchQuery, [
     t("inference.provider"),
@@ -91,8 +114,11 @@ export function InferenceTab({
           </div>
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
             <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.model")}</div>
-            <div className="mt-1 font-mono text-lg font-semibold text-[var(--v2-text-strong)]">
-              {model || t("inference.none")}
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="font-mono text-lg font-semibold text-[var(--v2-text-strong)]">
+                {model || t("inference.none")}
+              </span>
+              <ModelCapabilityBadges entry={activeModelEntry} />
             </div>
           </div>
         </div>

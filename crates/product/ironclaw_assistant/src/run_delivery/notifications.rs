@@ -85,6 +85,18 @@ pub enum NotificationDeliveryFailure {
     Other(String),
 }
 
+/// Typed coordinator evidence retained for callers that must distinguish a
+/// real delivery from an accepted request that performed no egress.
+pub(super) enum NotificationDeliveryOutcome {
+    NoDelivery,
+    Rejected,
+    Delivered(Vec<DeliveredChannelMessage>),
+    /// The provider accepted the notification, but its durable terminal
+    /// delivery confirmation failed. Message refs remain valid for routing
+    /// and retraction, while callers retain the weaker evidence state.
+    Unconfirmed(Vec<DeliveredChannelMessage>),
+}
+
 impl std::fmt::Display for NotificationDeliveryFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -113,6 +125,21 @@ pub async fn notify(
     notification: &ChannelNotification,
     target: &NotificationChannelTarget,
 ) -> Result<Vec<DeliveredChannelMessage>, NotificationDeliveryFailure> {
+    match notify_with_outcome(services, context, notification, target).await? {
+        NotificationDeliveryOutcome::Delivered(messages)
+        | NotificationDeliveryOutcome::Unconfirmed(messages) => Ok(messages),
+        NotificationDeliveryOutcome::NoDelivery | NotificationDeliveryOutcome::Rejected => {
+            Ok(Vec::new())
+        }
+    }
+}
+
+pub(super) async fn notify_with_outcome(
+    services: &RunDeliveryServices,
+    context: &ChannelNotificationContext<'_>,
+    notification: &ChannelNotification,
+    target: &NotificationChannelTarget,
+) -> Result<NotificationDeliveryOutcome, NotificationDeliveryFailure> {
     let projection_access_policy = AllowNoProjectionAccess;
     let outbound_policy = OutboundPolicyService::new(
         services.outbound_store.as_ref(),
@@ -149,12 +176,10 @@ pub async fn notify(
         .deliver(
             &outbound_policy,
             context.target_resolver,
-            services.project_filesystem.as_ref(),
             CoordinatedDeliveryRequest {
                 intent: notification.intent,
                 delivery,
                 parts: vec![OutboundPart::Text(notification.text.clone())],
-                attachments: Vec::new(),
                 thread_anchor: None,
                 require_direct_message_target: notification.require_direct_message_target,
                 extension_id: &target.extension_id,
@@ -163,11 +188,19 @@ pub async fn notify(
         )
         .await
         .map_err(classify_notification_delivery_error)?;
-    match outcome {
+    match &outcome {
+        CoordinatedDeliveryOutcome::NoDelivery => Ok(NotificationDeliveryOutcome::NoDelivery),
+        CoordinatedDeliveryOutcome::Rejected { .. } => Ok(NotificationDeliveryOutcome::Rejected),
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
             NotificationDeliveryFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
-        outcome => Ok(delivered_messages_from_outcome(&outcome)),
+        CoordinatedDeliveryOutcome::Delivered { .. }
+        | CoordinatedDeliveryOutcome::AlreadyDelivered { .. } => Ok(
+            NotificationDeliveryOutcome::Delivered(delivered_messages_from_outcome(&outcome)),
+        ),
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. } => Ok(
+            NotificationDeliveryOutcome::Unconfirmed(delivered_messages_from_outcome(&outcome)),
+        ),
     }
 }
 

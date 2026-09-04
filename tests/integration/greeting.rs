@@ -54,3 +54,36 @@ async fn replies_to_greeting() {
         "system-prompt assertion must not match user-role text"
     );
 }
+
+#[tokio::test]
+async fn conversational_turns_reuse_one_pseudonymous_prompt_cache_key() {
+    let harness = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::text("first reply"),
+            RebornScriptedReply::text("second reply"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("first message")
+        .await
+        .expect("first turn");
+    harness
+        .submit_turn("second message")
+        .await
+        .expect("second turn");
+
+    let metadata = harness.scripted_llm.captured_request_metadata();
+    assert_eq!(metadata.len(), 2, "one provider request per plain turn");
+    let first = metadata[0]
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .expect("first turn carries a prompt cache key");
+    let second = metadata[1]
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .expect("second turn carries a prompt cache key");
+    assert_eq!(first, second, "one thread must reuse one cache key");
+    assert_eq!(first.len(), 32, "cache key is the bounded digest");
+    assert!(first.chars().all(|character| character.is_ascii_hexdigit()));
+}

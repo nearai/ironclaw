@@ -90,7 +90,9 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 | Symbol | Role |
 |---|---|
-| `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
+| `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown (`bind_webui_v2` then `serve_bound_webui_v2`) |
+| `bind_webui_v2(addr)` | Bind only; returns a `BoundWebuiListener` whose `local_addr()` is the real port, and whose backlog holds connections until served |
+| `serve_bound_webui_v2(bound, router, shutdown)` | Run `axum::serve` on an already-bound listener with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI; accepted tokens map to operator WebUI capabilities |
 | `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |
@@ -238,10 +240,10 @@ rules to every replayable message in the thread and queries logs at thread
 scope. Its `ironclaw.thread_artifact.v1` messages retain `run_id`, allowing the
 fixture importer to reconstruct multiple turns without mixing threads. Export
 is all-or-nothing and returns `413` when the thread exceeds 10,000 persisted
-messages, 16 MiB of stored message data, or 20 MiB after redaction and log
-assembly. The higher row limit admits tool-heavy trajectories while both byte
-limits remain unchanged. The endpoint is limited to six requests per caller per
-minute.
+messages, 64 MiB of stored message data, or 80 MiB after redaction and log
+assembly. These temporary byte ceilings unblock large tool-heavy trajectories
+while a streaming export path is developed. The endpoint is limited to six
+requests per caller per minute.
 
 **Operator-gating.** LLM provider/configuration routes (including provider
 credentials and model-policy mutation), operator setup/config/service-control,
@@ -301,15 +303,25 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   I/O never gates individual text frames; drain/poll remains only for
   compatibility surfaces without subscriptions.
 - Live assistant text is cumulative within one model call and keyed by both
-  turn run and model-call phase. A later model call therefore starts a new
-  assistant item instead of replacing an earlier utterance from the same run.
-  The SPA marks the prior phase as no longer streaming, retains it as
-  intermediate text, and upgrades only the latest phase when the durable final
-  reply arrives. If the run fails before a final reply, the SPA removes the
-  still-streaming unfinished phase and shows the typed, actionable run failure
-  instead, while preserving earlier completed phases; a late projection frame
-  cannot restore the unfinished draft. These phase items remain
-  live-projection/session state rather than durable transcript records.
+  turn run and model call (`text:{run}:{call}`). A later model call therefore
+  starts a new assistant item instead of replacing an earlier utterance from
+  the same run. A call the loop went on past (a capability invocation, a
+  gate, or another call followed it) was narration, not the answer: the
+  projection republishes its item once under the same id with
+  `narration: true`, ahead of the capability card that proved it. The SPA
+  gives that item its own `narration` role and renders it inside the run's
+  collapsible activity, like reasoning and tool cards, never as a bubble;
+  every `assistant` predicate excludes it by construction. The trailing
+  unflagged call is the streaming bubble; the durable final reply converges
+  into it by identity and collapses earlier unflagged calls, while narration
+  stays with the run's activity. The live and durable rails are independent,
+  so a flagged republish may arrive after the final reply and still joins
+  the activity; a late unflagged call for a finalized run is ignored. If the
+  run fails before a final reply, the SPA removes the still-streaming
+  unfinished call and shows the typed, actionable run failure instead, while
+  preserving earlier completed items; a late projection frame cannot restore
+  the unfinished draft. These items remain live-projection/session state
+  rather than durable transcript records.
 - Active assistant phases render accumulated Markdown through Streamdown's
   incomplete-Markdown-aware streaming mode. The product projection boundary
   publishes cumulative text at most once per 16 ms browser-paint interval,

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { clientActionId, gatewayStatus } from "../../../lib/api";
@@ -32,6 +31,61 @@ import {
 
 const HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF =
   "hosted_mcp_auth_selection_required";
+
+type PackageRef = string | { id?: string };
+type ClientActionPayload = { clientActionId?: string };
+type ActionResult = { type: "success" | "error"; message: string };
+type SetupBlocker = { kind?: string; ref_id?: string };
+type ExtensionMutationResponse = {
+  success?: boolean;
+  message?: string;
+  blockers?: SetupBlocker[];
+  authorization_url?: string;
+  flow_id?: string;
+  flowId?: string;
+  callback_scope?: { invocation_id?: string; invocationId?: string };
+  callbackScope?: { invocation_id?: string; invocationId?: string };
+};
+type SetupSecret = {
+  name?: string;
+  provided?: boolean;
+  setup?: { invocation_id?: string; kind?: string };
+};
+type InstallVariables = ClientActionPayload & {
+  packageRef: PackageRef;
+  displayName?: string;
+  onNeedsSetup?: (request: ReturnType<typeof configureRequest>) => void;
+};
+type RegisterCustomMcpVariables = {
+  desiredId: string;
+  desiredName: string;
+  endpoint: string;
+  authSelection: { kind: "bearer" | "oauth" | "no_auth" };
+  onRegistered?: () => void;
+  onAuthSelectionRequired?: () => void;
+  onRegistrationError?: (message: string) => void;
+};
+type RemoveVariables = ClientActionPayload & {
+  packageRef: PackageRef;
+  displayName?: string;
+};
+type SetupSubmitVariables = ClientActionPayload & {
+  secrets: Record<string, string>;
+};
+type HostedMcpAuthVariables = ClientActionPayload & {
+  authSelection: { kind: "bearer" | "oauth" | "no_auth" };
+};
+type OauthVariables = {
+  secret: SetupSecret;
+  popup: Window;
+  oauthGeneration?: number;
+};
+type OauthWatchOptions = {
+  flowId?: string | null;
+  invocationId?: string | null;
+  requireCallbackCompletion?: boolean;
+  generation?: number;
+};
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
@@ -97,12 +151,24 @@ function catalogSort(a, b) {
   );
 }
 
-function withClientActionId(payload = {}) {
-  const source = payload || {};
+function withClientActionId<T extends ClientActionPayload>(payload: T) {
   return {
-    ...source,
-    clientActionId: source.clientActionId || clientActionId(),
+    ...payload,
+    clientActionId: payload.clientActionId || clientActionId(),
   };
+}
+
+function hasValidationCode(error: unknown, code: string) {
+  if (typeof error !== "object" || error === null || !("payload" in error)) {
+    return false;
+  }
+  const payload = error.payload;
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    "validation_code" in payload &&
+    payload.validation_code === code
+  );
 }
 
 export function useExtensions() {
@@ -149,11 +215,11 @@ export function useExtensions() {
     queryClient.invalidateQueries({ queryKey: ["gateway-status-extensions"] });
   }, [queryClient]);
 
-  const [actionResult, setActionResult] = React.useState(null);
+  const [actionResult, setActionResult] = React.useState<ActionResult | null>(null);
 
   const clearResult = React.useCallback(() => setActionResult(null), []);
 
-  const installMutation = useMutation({
+  const installMutation = useMutation<ExtensionMutationResponse, Error, InstallVariables>({
     mutationFn: ({ packageRef, clientActionId: actionId }) =>
       installExtension(packageRef, { clientActionId: actionId }),
     onSuccess: async (res, { displayName: requestedName, onNeedsSetup, packageRef }) => {
@@ -187,7 +253,11 @@ export function useExtensions() {
     },
   });
 
-  const registerCustomMcpMutation = useMutation({
+  const registerCustomMcpMutation = useMutation<
+    ExtensionMutationResponse,
+    Error,
+    RegisterCustomMcpVariables
+  >({
     mutationFn: ({ desiredId, desiredName, endpoint, authSelection }) =>
       registerCustomMcp({ desiredId, desiredName, endpoint, authSelection }),
     onSuccess: async (
@@ -205,7 +275,7 @@ export function useExtensions() {
       if (typeof onRegistered === "function") onRegistered();
     },
     onError: (err, { onAuthSelectionRequired, onRegistrationError }) => {
-      if (err?.payload?.validation_code === "auth_selection_required") {
+      if (hasValidationCode(err, "auth_selection_required")) {
         if (typeof onAuthSelectionRequired === "function") onAuthSelectionRequired();
         return;
       }
@@ -214,7 +284,7 @@ export function useExtensions() {
     },
   });
 
-  const removeMutation = useMutation({
+  const removeMutation = useMutation<ExtensionMutationResponse, Error, RemoveVariables>({
     mutationFn: ({ packageRef, clientActionId: actionId }) =>
       removeExtension(packageRef, { clientActionId: actionId }),
     onSuccess: (res, { displayName }) => {
@@ -240,7 +310,7 @@ export function useExtensions() {
   const registry = registryQuery.data?.entries || [];
   const extensionById = new Map(
     extensions
-      .map((extension) => [packageId(extension), extension])
+      .map((extension) => [packageId(extension), extension] as const)
       .filter(([id]) => Boolean(id))
   );
   const registryIds = new Set(registry.map((entry) => packageId(entry)).filter(Boolean));
@@ -277,7 +347,7 @@ export function useExtensions() {
   const channelRegistry = registry.filter((e) => hasChannelSurface(e) && !e.installed);
   const toolRegistry = registry.filter((e) => !hasChannelSurface(e) && !e.installed);
 
-  const importMutation = useMutation({
+  const importMutation = useMutation<ExtensionMutationResponse, Error, { file: Blob }>({
     mutationFn: ({ file }) => importExtension(file),
     onSuccess: (res) => {
       if (res.success) {
@@ -356,12 +426,15 @@ export function useExtensionSetup(packageRef) {
   };
 }
 
-export function useSetupSubmit(packageRef, onSuccess) {
+export function useSetupSubmit(
+  packageRef: PackageRef | undefined,
+  onSuccess?: (response: ExtensionMutationResponse) => void,
+) {
   const t = useT();
   const queryClient = useQueryClient();
-  const packageKey = packageRef?.id || packageRef;
+  const packageKey = packageRefId(packageRef);
 
-  const mutation = useMutation({
+  const mutation = useMutation<ExtensionMutationResponse, Error, SetupSubmitVariables>({
     mutationFn: ({ secrets, clientActionId: actionId }) =>
       submitExtensionSetup(packageRef, secrets, {
         clientActionId: actionId,
@@ -387,20 +460,23 @@ export function useSetupSubmit(packageRef, onSuccess) {
   };
 }
 
-export function useOauthSetup(packageRef, { onConfigured } = {}) {
+export function useOauthSetup(
+  packageRef: PackageRef | undefined,
+  { onConfigured }: { onConfigured?: () => void | Promise<void> } = {},
+) {
   const t = useT();
   const queryClient = useQueryClient();
-  const packageKey = packageRef?.id || packageRef;
-  const watcherRef = React.useRef(null);
+  const packageKey = packageRefId(packageRef);
+  const watcherRef = React.useRef<null | (() => void) | number>(null);
   const oauthGenerationRef = React.useRef(0);
   const configuredRef = React.useRef(false);
   const [isAuthorizing, setIsAuthorizing] = React.useState(false);
   // Retryable error surfaced when the callback popup reports a flow-matched
   // FAILURE (provider denial, exchange failure). Ref-guarded setter so the
   // reset at watcher start is a no-op unless an error was actually showing.
-  const [authError, setAuthErrorState] = React.useState(null);
-  const authErrorRef = React.useRef(null);
-  const setAuthError = React.useCallback((value) => {
+  const [authError, setAuthErrorState] = React.useState<string | null>(null);
+  const authErrorRef = React.useRef<string | null>(null);
+  const setAuthError = React.useCallback((value: string | null) => {
     if (Object.is(authErrorRef.current, value)) return;
     authErrorRef.current = value;
     setAuthErrorState(value);
@@ -424,8 +500,13 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   }, [packageKey, queryClient]);
 
   const setupIsConfigured = React.useCallback(() => {
-    const extensions = queryClient.getQueryData(["extensions"])?.extensions || [];
-    const extension = extensions.find((item) => item.package_ref?.id === packageKey);
+    const extensions =
+      queryClient.getQueryData<{ extensions?: Array<{ package_ref?: PackageRef }> }>([
+        "extensions",
+      ])?.extensions || [];
+    const extension = extensions.find(
+      (item) => packageRefId(item.package_ref) === packageKey,
+    );
     return extensionListItemIsConfigured(extension);
   }, [packageKey, queryClient]);
 
@@ -436,8 +517,8 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         flowId = null,
         invocationId = null,
         requireCallbackCompletion = false,
-        generation,
-      } = {},
+        generation = oauthGenerationRef.current,
+      }: OauthWatchOptions = {},
     ) => {
       if (generation !== oauthGenerationRef.current) return;
       clearWatcher();
@@ -576,7 +657,11 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
 
   React.useEffect(() => clearWatcher, [clearWatcher]);
 
-  const mutation = useMutation({
+  const mutation = useMutation<
+    { res: ExtensionMutationResponse; popup: Window; generation: number },
+    Error,
+    OauthVariables
+  >({
     mutationFn: (variables) => {
       const { secret, popup } = variables;
       const generation = oauthGenerationRef.current + 1;
@@ -640,12 +725,15 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   return { ...mutation, isAuthorizing, authError };
 }
 
-export function useHostedMcpAuthSelection(packageRef, onSuccess) {
+export function useHostedMcpAuthSelection(
+  packageRef: PackageRef | undefined,
+  onSuccess?: (response: ExtensionMutationResponse) => void,
+) {
   const t = useT();
   const queryClient = useQueryClient();
-  const packageKey = packageRef?.id || packageRef;
+  const packageKey = packageRefId(packageRef);
 
-  const mutation = useMutation({
+  const mutation = useMutation<ExtensionMutationResponse, Error, HostedMcpAuthVariables>({
     mutationFn: ({ authSelection, clientActionId: actionId }) =>
       selectHostedMcpAuth(packageRef, authSelection, {
         clientActionId: actionId,

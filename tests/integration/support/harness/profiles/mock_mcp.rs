@@ -69,7 +69,10 @@ pub(crate) async fn mock_mcp_tools(
         io: Mutex::new(io),
         result_writer_io: Mutex::new(result_writer_io),
         durable_capability_io_thread_service: Mutex::new(None),
-        durable_capability_io_requested: false,
+        // Production composes `StagedCapabilityIo`; keep this lane on that
+        // canonical durable writer so MCP result references exercise the same
+        // result_read contract as deployed calls.
+        durable_capability_io_requested: true,
         root,
         workspace_root,
         mounts,

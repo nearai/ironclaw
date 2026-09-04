@@ -12,3 +12,9 @@ Choose a `target` (e.g. `memory`, `daily_log`, `heartbeat`, or a relative
 path); set `append` to add rather than replace; or supply
 `old_string`/`new_string` to patch in place. For structured user facts
 (timezone, locale, location) prefer ironclaw.memory.profile_set instead.
+For a full-document rewrite based on an earlier read, pass that read's
+`content_hash` as `expected_content_hash`. If the result is `conflict`, the
+document changed in the meantime. Re-read it and re-apply the intended change
+instead of overwriting the newer content. Conditional writes are best-effort
+for providers that do not support document versions; the native provider
+enforces them.

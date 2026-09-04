@@ -34,6 +34,7 @@ fn projection_text_distinguishes_live_from_finalized_transcript_rows() {
             run_id: Some(run_id),
             body: "final".to_string(),
             finalized: true,
+            narration: false,
         }],
     )
     .expect("finalized text state");
@@ -42,6 +43,58 @@ fn projection_text_distinguishes_live_from_finalized_transcript_rows() {
     assert_eq!(
         serde_json::from_value::<ProductProjectionState>(value).expect("round trip finalized text"),
         finalized
+    );
+}
+
+/// Live text a run went on past is flagged `narration`; the durable
+/// finalized row never is, and the contract refuses the contradiction on
+/// construction and on the wire alike.
+#[test]
+fn projection_text_narration_is_live_only() {
+    let run_id = TurnRunId::new();
+    let narration = ProductProjectionState::new(
+        "thread-1",
+        vec![ProductProjectionItem::Text {
+            id: format!("text:{run_id}:1"),
+            run_id: Some(run_id),
+            body: "Let me look.".to_string(),
+            finalized: false,
+            narration: true,
+        }],
+    )
+    .expect("live narration state");
+    let value = serde_json::to_value(&narration).expect("serialize narration");
+    assert_eq!(value["items"][0]["text"]["narration"], true);
+    assert!(
+        value["items"][0]["text"].get("finalized").is_none(),
+        "a false flag is not serialized"
+    );
+    assert_eq!(
+        serde_json::from_value::<ProductProjectionState>(value).expect("round trip narration"),
+        narration
+    );
+
+    let contradiction = ProductProjectionState::new(
+        "thread-1",
+        vec![ProductProjectionItem::Text {
+            id: "message-1".to_string(),
+            run_id: Some(run_id),
+            body: "final".to_string(),
+            finalized: true,
+            narration: true,
+        }],
+    );
+    assert!(
+        contradiction.is_err(),
+        "a finalized row flagged as narration is refused on construction"
+    );
+    let wire = serde_json::from_value::<ProductProjectionState>(json!({
+        "thread_id": "thread-1",
+        "items": [{"text": {"id": "message-1", "run_id": run_id, "body": "final", "finalized": true, "narration": true}}]
+    }));
+    assert!(
+        wire.is_err(),
+        "a finalized row flagged as narration is refused on the wire"
     );
 }
 

@@ -65,6 +65,18 @@ mod project_create_capability;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
+
+/// Test-only access to the stable Inbox identity used by production run
+/// notification publishers and lifecycle resolvers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_notification_inbox_id_for_test(
+    run_id: ironclaw_host_api::turn::TurnRunId,
+    kind: ironclaw_notifications::NotificationKind,
+    lifecycle_ref: Option<&str>,
+) -> Result<ironclaw_notifications::NotificationId, ironclaw_notifications::NotificationInboxError>
+{
+    run_delivery::run_notification_inbox_id(run_id, kind, lifecycle_ref)
+}
 mod run_outcome_observer;
 mod scoped_fs;
 mod steering;
@@ -125,7 +137,11 @@ pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
     RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
-pub use run_outcome_observer::RunOutcomeProcessCommitObserver;
+pub use run_outcome_observer::{
+    ApprovalNotificationBackfillProcessCommitObserver,
+    AuthNotificationBackfillProcessCommitObserver, ResourceBlockBackfillProcessCommitObserver,
+    RunOutcomeProcessCommitObserver,
+};
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
 // workflow factory hands a live binding service back to a caller that sits
@@ -229,6 +245,12 @@ pub use delivery_coordinator::{
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoDeliveryRegistrations,
     NoReplyContext, NoticeDeliveryRequest,
 };
+// Reply publication rides the same coordinator: composition wires it through
+// these, and integration harnesses register their own reply targets.
+pub use delivery_coordinator::publication::{
+    ReplyPublicationError, ReplyPublicationSettings, ReplyPublicationWiring,
+    ReplyTargetRegistration,
+};
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
 // the coordinator; vendor residue enters only through the ports.
@@ -246,8 +268,9 @@ pub use run_delivery::notifications::{
     resolve_user_notification_targets,
 };
 pub use run_delivery::{
-    DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, triggered_run_delivery_settings,
+    DeliveredChannelMessage, PreSubmitFailureInboxNotifier, RunDeliveryError, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    triggered_run_delivery_settings,
 };
 // `TriggeredRunDeliveryRequest` is deliberately absent: it moved to
 // `ironclaw_outbound` with the `TriggeredRunDelivery` port it crosses

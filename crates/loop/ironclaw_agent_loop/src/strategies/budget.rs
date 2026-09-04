@@ -24,14 +24,14 @@ fn assert_budget_strategy_object_safe(_: &dyn BudgetStrategy) {}
 
 /// Default iteration ceiling: a runaway backstop, not an operational budget.
 ///
-/// Real turns must never hit this. Operational bounds are intended to come
-/// from the resource budget system (cost governor), but that system is not
-/// yet enforced (`ResourceBudgetPolicy.max_model_calls` and the wall-clock
-/// cap are defined, not applied); until it is, this backstop and the
-/// stop-condition strategy (stuck-loop detection) are the only live
-/// ceilings. Long agentic coding turns legitimately run hundreds of model
-/// calls — a small cap here fails the turn closed mid-work and discards
-/// everything the model already did.
+/// Real turns must never hit this. `ResourceBudgetPolicy.max_model_calls`,
+/// `.max_capability_invocations`, and (for the interactive tier)
+/// `.max_wall_clock_seconds` are the primary operational bounds, enforced
+/// every iteration by `BudgetStage`; `DefaultStopConditionStrategy`'s
+/// terminating non-progress check is a second, content-aware backstop
+/// alongside them. This iteration count is the last-resort ceiling behind
+/// both. Long agentic coding turns legitimately run hundreds of model calls
+/// — a small cap here fails the turn closed mid-work.
 pub const DEFAULT_ITERATION_BACKSTOP: u32 = 1_024;
 
 /// Reference baseline `BudgetStrategy`: runaway-backstop iteration cap with

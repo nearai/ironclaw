@@ -54,6 +54,75 @@ async fn strategy_filtered_capability_denial_does_not_invoke_host_and_records_po
             .iter()
             .any(|kind| *kind == LoopFailureKind::PolicyDenied)
     }));
+    assert!(
+        final_staged_state(&host).recent_call_signatures.is_empty(),
+        "a filtered capability denial never reaches the host and must not enter the call-signature ring"
+    );
+}
+
+#[tokio::test]
+async fn filtered_capability_retry_records_signature_after_host_outcome() {
+    let result_ref = LoopResultRef::new("result:filtered-retry").expect("valid");
+    let host = MockHost::new(Vec::new()).with_single_outcomes(vec![resolution::completed(
+        result_ref,
+        "retry completed".to_string(),
+        ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+        false,
+        0,
+        None,
+        None,
+    )]);
+    let family = family_with_retry_policy_denied_recovery();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+    surface.descriptors.clear();
+    surface.callable_capability_ids = None;
+    let calls = match calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected capability call fixture"),
+    };
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state: LoopExecutionState::initial_for_run(host.run_context()),
+                surface,
+                calls,
+            },
+        )
+        .await
+        .expect("filtered capability retry");
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected retry to complete the capability stage, got {exit:?}")
+        }
+    };
+
+    assert_eq!(host.single_invocations().len(), 1);
+    let expected_signature = CapabilityCallSignature::from_call(
+        capability_id(),
+        &serde_json::json!({ "input_ref": "input:demo" }),
+    )
+    .expect("signature");
+    assert_eq!(
+        final_state
+            .recent_call_signatures
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected_signature],
+        "a locally rejected call enters the ring only after its retry reaches the host and returns an outcome"
+    );
 }
 
 #[tokio::test]
@@ -235,6 +304,20 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
     assert!(matches!(exit, LoopExit::Completed(_))); // safety: test-only assertion
     assert_eq!(host.single_invocations().len(), 1); // safety: test-only assertion
     assert_eq!(final_staged_state(&host).recovery_state, Default::default()); // safety: test-only assertion
+    let expected_signature = CapabilityCallSignature::from_call(
+        capability_id(),
+        &serde_json::json!({ "input_ref": "input:demo" }),
+    )
+    .expect("signature");
+    assert_eq!(
+        final_staged_state(&host)
+            .recent_call_signatures
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![expected_signature],
+        "an initial host-returned denial followed by a retry must record its signature exactly once"
+    );
     let recovered = host
         .progress_events()
         .into_iter()
@@ -438,6 +521,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
             result_ref: observed_ref,
             byte_len: 0,
             preview: None,
+            structured_json_view: false,
             total_bytes: None,
             next_offset: None,
             item_count: None,

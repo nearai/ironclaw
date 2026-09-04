@@ -12,7 +12,6 @@ a new axis.
 - `context.rs` chooses prompt/context request shape, not prompt assembly.
 - `capability.rs` narrows an already-resolved capability surface.
 - `model.rs` chooses model preference.
-- `batch.rs` chooses batch sequencing policy.
 - `gate.rs` handles approval/auth/resource gates.
 - `recovery.rs` handles model and capability failures.
 - `reply_admission.rs` classifies assistant replies before transcript finalization.
@@ -29,6 +28,14 @@ a new axis.
 - Strategies are crate-private implementation details of built-in families.
 - Strategies receive `&LoopExecutionState` and return typed decisions or typed
   slot updates. They do not own the canonical tick.
+- Each strategy is one immutable, independent decision axis. Executor stages
+  apply its typed outcome and own checkpoint, cancellation, acknowledgement,
+  dispatch, and lifecycle transitions; do not append a second same-axis
+  predicate after the strategy decision.
+- Batch reporting and execution vocabulary belongs to
+  `ironclaw_loop_contracts` and the capability executor. Use the contract's
+  `BatchPolicyKind` directly; do not recreate it as a strategy type or an
+  identity mapper.
 - Prompt file loading, skill loading, identity file reads, model message
   materialization, tool invocation, approvals, persistence, and product routing
   belong to host ports and downstream crates.
@@ -43,6 +50,8 @@ a new axis.
 - Add new outcome variants only when the executor can handle them generically.
 - If logic needs host/runtime/product details, add a host adapter or context
   source elsewhere instead of widening a strategy.
+- Keep host/profile/origin exceptions at a documented executor-stage boundary
+  instead of widening a strategy contract for a one-off caller condition.
 
 ## Common mistakes
 

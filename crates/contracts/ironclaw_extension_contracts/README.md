@@ -21,18 +21,20 @@ packages depend on product.
 
 ## Public surface
 
-18 shipped modules (`src/lib.rs` is the source of truth; the module-by-module
+21 shipped modules (`src/lib.rs` is the source of truth; the module-by-module
 charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
 
-- `channel_adapter` — `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`
+- `channel_adapter` — `ChannelIngress` and `ChannelDelivery` (the reply half is `reply::ReplySink`)
   (a package implements only the capabilities its manifest selects) plus
   `ChannelSurfaces` and their DTO family (`NormalizedInboundMessage`/
   `InboundAttachment`, `OutboundEnvelope`/`Part`, `DeliveryReport`,
   `DirectTargetProvisionRequest`, `ChannelError`, `ProductTriggerReason`). Vendor
-  webhook ingress pairs with `ChannelIngress`; message replies pair with
-  `ChannelReply`; delivery pairs with `ChannelDelivery`. Authenticated-session
-  ingress and stream replies are host-owned, so those sections deliberately
-  bind no adapter half. `ChannelDelivery` also has one optional, typed
+  webhook ingress pairs with `ChannelIngress`; every declared
+  `[channel.reply]` (stream or message cadence) binds a `reply::ReplySink` —
+  vendor packages bind their own, the deployment's session channel receives
+  the host's projection sink through the same slot; delivery pairs with
+  `ChannelDelivery`. Only authenticated-session ingress is host-owned with
+  no adapter half. `ChannelDelivery` also has one optional, typed
   direct-target provisioning operation; it is deliberately not target search.
   `ChannelAttachmentRef` is only package-internal parse→fetch state.
 - `tool_adapter` — `ToolAdapter` + `RestrictedEgress`; `egress` — channel

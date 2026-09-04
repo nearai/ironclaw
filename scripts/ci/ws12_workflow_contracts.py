@@ -234,6 +234,78 @@ def validate_e2e_scope_filters(text: str) -> list[str]:
 CODE_STYLE_WORKFLOW = ".github/workflows/code_style.yml"
 PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
+HOOKS_PARITY_JOB = "hooks-parity-tests"
+HOOKS_PARITY_STEP = (
+    "Run hooks parity matrix + multi-host adversarial suite (all backends)"
+)
+HOOKS_PARITY_MIN_COMMAND_TIMEOUT_MINUTES = 25
+HOOKS_PARITY_MIN_JOB_TIMEOUT_MINUTES = 30
+
+
+def _shell_logical_commands(step: str) -> list[str]:
+    """Return executable shell commands with backslash continuations joined."""
+
+    commands: list[str] = []
+    fragments: list[str] = []
+    for raw_line in step.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line in {"run: |", "run: >"}:
+            continue
+        continued = line.endswith("\\")
+        fragments.append(line[:-1].rstrip() if continued else line)
+        if not continued:
+            commands.append(" ".join(fragments))
+            fragments = []
+    if fragments:
+        commands.append(" ".join(fragments))
+    return commands
+
+
+def validate_hooks_parity_timeout(text: str) -> list[str]:
+    """Keep the full cross-backend suite within an honest CI time budget."""
+
+    job = job_body(text, HOOKS_PARITY_JOB)
+    if job is None:
+        return [f"{PLATFORM_WORKFLOW}: missing {HOOKS_PARITY_JOB!r} job"]
+    step = step_body(job, HOOKS_PARITY_STEP)
+    if step is None:
+        return [f"{PLATFORM_WORKFLOW}: missing {HOOKS_PARITY_STEP!r} step"]
+
+    errors: list[str] = []
+    job_timeout = re.search(r"(?m)^    timeout-minutes:\s*(\d+)\s*$", job)
+    command_timeout = next(
+        (
+            match
+            for command in _shell_logical_commands(step)
+            if (
+                match := re.match(
+                    r"^timeout\s+--signal=INT\s+--kill-after=30s\s+"
+                    r"(\d+)m\s+cargo\s+test\b",
+                    command,
+                )
+            )
+        ),
+        None,
+    )
+    if job_timeout is None:
+        errors.append(
+            f"{PLATFORM_WORKFLOW}: {HOOKS_PARITY_JOB!r} has no numeric timeout-minutes"
+        )
+    elif int(job_timeout.group(1)) < HOOKS_PARITY_MIN_JOB_TIMEOUT_MINUTES:
+        errors.append(
+            f"{PLATFORM_WORKFLOW}: {HOOKS_PARITY_JOB!r} timeout-minutes must be at "
+            f"least {HOOKS_PARITY_MIN_JOB_TIMEOUT_MINUTES}"
+        )
+    if command_timeout is None:
+        errors.append(
+            f"{PLATFORM_WORKFLOW}: {HOOKS_PARITY_STEP!r} has no bounded timeout command"
+        )
+    elif int(command_timeout.group(1)) < HOOKS_PARITY_MIN_COMMAND_TIMEOUT_MINUTES:
+        errors.append(
+            f"{PLATFORM_WORKFLOW}: {HOOKS_PARITY_STEP!r} timeout must be at least "
+            f"{HOOKS_PARITY_MIN_COMMAND_TIMEOUT_MINUTES} minutes"
+        )
+    return errors
 
 # ---------------------------------------------------------------------------
 # Docs publication-boundary guard ordering
@@ -1775,6 +1847,9 @@ def validate_workflow_texts(
     if stress is not None:
         errors.extend(validate_libsql_scripted_memory_job(stress))
         errors.extend(validate_postgres_scripted_parity(stress))
+    platform = workflows.get(PLATFORM_WORKFLOW)
+    if platform is not None:
+        errors.extend(validate_hooks_parity_timeout(platform))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))

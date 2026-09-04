@@ -24,15 +24,15 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:DefaultGateHandlingStrategy(block),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
-    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),",
+    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,no_progress_window=32,no_progress_threshold=8,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x0a, 0x12, 0x6b, 0xfc, 0x6f, 0xe3, 0x8e, 0x46, 0x5c, 0x31, 0xc7, 0x0d, 0xeb, 0x82, 0xd3, 0xaf,
-    0x42, 0x01, 0xac, 0x29, 0xf2, 0xf9, 0x85, 0xf5, 0x30, 0xe5, 0xe0, 0xb1, 0x49, 0x34, 0x5b, 0x06,
+    0x9a, 0x67, 0xdd, 0xb9, 0x72, 0x7a, 0x5b, 0xf0, 0xda, 0x9f, 0xb8, 0x12, 0xd1, 0x0f, 0x95, 0xd1,
+    0x6c, 0xe9, 0x6e, 0x53, 0x0f, 0x4e, 0xa5, 0x8e, 0xec, 0xc7, 0xe5, 0x28, 0xf8, 0x0b, 0x8d, 0x2f,
 ]);
 
 pub fn subagent() -> LoopFamily {

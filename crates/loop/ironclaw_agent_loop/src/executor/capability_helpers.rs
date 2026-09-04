@@ -227,18 +227,6 @@ pub(super) fn apply_capability_filter(
         .retain(|descriptor| filter.permits(&descriptor.capability_id));
 }
 
-pub(super) fn push_call_signature_once(
-    state: &mut LoopExecutionState,
-    signatures: &mut HashSet<CapabilityCallSignature>,
-    call: &CapabilityCallCandidate,
-) -> Result<CapabilityCallSignature, AgentLoopExecutorError> {
-    let signature = capability_call_signature(call)?;
-    if signatures.insert(signature.clone()) {
-        state.recent_call_signatures.push(signature.clone());
-    }
-    Ok(signature)
-}
-
 pub(super) fn capability_call_signature(
     call: &CapabilityCallCandidate,
 ) -> Result<CapabilityCallSignature, AgentLoopExecutorError> {
@@ -287,6 +275,7 @@ fn model_visible_capability_success_observation(
             result_ref: result.result_ref.as_str().to_string(),
             byte_len: result.byte_len,
             preview: None,
+            structured_json_view: false,
             total_bytes: None,
             next_offset: None,
             item_count: None,
@@ -634,32 +623,6 @@ pub(super) fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) ->
         GateKind::ExternalTool => "external_tool",
     };
     format!("{gate} gate {outcome}")
-}
-
-pub(super) fn clear_matching_pending_auth_resume(
-    state: &mut LoopExecutionState,
-    call: &CapabilityCallCandidate,
-) {
-    if state
-        .pending_auth_resume
-        .as_ref()
-        .is_some_and(|resume| resume.activity_id == call.activity_id)
-    {
-        state.pending_auth_resume = None;
-    }
-}
-
-pub(super) fn clear_matching_pending_external_tool_resume(
-    state: &mut LoopExecutionState,
-    call: &CapabilityCallCandidate,
-) {
-    if state
-        .pending_external_tool_resume
-        .as_ref()
-        .is_some_and(|resume| resume.activity_id == call.activity_id)
-    {
-        state.pending_external_tool_resume = None;
-    }
 }
 
 /// Reconstruct the parked external-tool call on resume.

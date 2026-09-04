@@ -14,6 +14,14 @@ import { matchesSearch } from "../lib/settings-search";
 
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 
+type ToolsTabProps = {
+  settings?: Record<string, unknown>;
+  onSave?: (key: string, value: unknown) => void;
+  savedKeys?: Record<string, boolean>;
+  isLoading?: boolean;
+  searchQuery?: string;
+};
+
 function translatedToolDescription(t, tool) {
   const key = `tools.description.${tool.name}`;
   const translated = t(key);
@@ -160,7 +168,7 @@ export function ToolsTab({
   savedKeys = {},
   isLoading = false,
   searchQuery = "",
-}) {
+}: ToolsTabProps) {
   const t = useT();
   const {
     tools,

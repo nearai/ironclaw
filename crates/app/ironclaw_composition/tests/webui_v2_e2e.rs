@@ -1511,6 +1511,49 @@ async fn webui_v2_sse_streams_assistant_text_before_terminal_completion() {
         String::from_utf8_lossy(&sse_bytes)
     );
 
+    // The identity contract the frontend reducer's live→durable convergence
+    // rests on: the pre-terminal live text item is a NON-finalized `text:`
+    // item carrying the run id, and the finalized durable item carries the
+    // SAME run id — that pairing (never content equality) is what folds the
+    // streaming bubble into the one final answer.
+    let items: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|event| {
+            event
+                .data
+                .as_ref()
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        })
+        .flat_map(|payload| {
+            payload["state"]["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+    let live = items
+        .iter()
+        .find(|item| {
+            item["text"]["finalized"].as_bool() != Some(true) && item["text"]["body"].is_string()
+        })
+        .expect("a live (non-finalized) text item streamed before terminal");
+    let finalized = items
+        .iter()
+        .find(|item| item["text"]["finalized"].as_bool() == Some(true))
+        .expect("the durable finalized text item reached the stream");
+    let live_run = live["text"]["run_id"].as_str().expect("live item run id");
+    assert!(
+        live["text"]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("text:")),
+        "the live answer item keeps its run-scoped `text:` identity: {live}"
+    );
+    assert_eq!(
+        finalized["text"]["run_id"].as_str(),
+        Some(live_run),
+        "the finalized item names the same run as the live bubble it must converge: {finalized}"
+    );
+
     harness
         .runtime
         .shutdown()

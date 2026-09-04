@@ -51,6 +51,7 @@ pub enum ProductNotificationSeverity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProductNotificationAction {
+    None,
     OpenThread { thread_id: String },
 }
 
@@ -60,7 +61,7 @@ pub struct ProductNotification {
     pub kind: ProductNotificationKind,
     pub severity: ProductNotificationSeverity,
     pub action: ProductNotificationAction,
-    pub thread_id: String,
+    pub thread_id: Option<String>,
     pub turn_run_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -114,6 +114,21 @@ fn non_production_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::non_production_noop()
 }
 
+/// Mirrors the private `derive_prompt_cache_key` in
+/// `ironclaw_loop_host::model_gateway`: a domain-separated SHA-256 of the
+/// thread id, hex-encoded and truncated to 32 characters. Duplicated here
+/// (rather than exposed from production) because this is an external
+/// integration-test crate; the domain separator string must stay in sync
+/// with the production constant of the same name.
+fn expected_prompt_cache_key(thread_id: &str) -> String {
+    const PROMPT_CACHE_KEY_DOMAIN_SEPARATOR: &str = "ironclaw.prompt-cache-key.v1:";
+    let digest = ironclaw_host_api::approval::sha256_digest_token(
+        format!("{PROMPT_CACHE_KEY_DOMAIN_SEPARATOR}{thread_id}").as_bytes(),
+    );
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest.as_str());
+    hex.chars().take(32).collect()
+}
+
 #[tokio::test]
 async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
@@ -128,6 +143,12 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let request = model_request(interactive_model());
     let expected_run_id = request.run_id.to_string();
     let expected_turn_id = request.turn_id.to_string();
+    let raw_thread_id = request
+        .thread_id
+        .as_ref()
+        .expect("test fixture always sets thread_id")
+        .to_string();
+    let expected_prompt_cache_key = expected_prompt_cache_key(&raw_thread_id);
 
     let response = gateway.stream_model(request).await.unwrap();
 
@@ -160,9 +181,54 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         requests[0].metadata.get("turn_id").map(String::as_str),
         Some(expected_turn_id.as_str())
     );
+    let prompt_cache_key = requests[0]
+        .metadata
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .map(String::as_str);
+    assert_eq!(
+        prompt_cache_key,
+        Some(expected_prompt_cache_key.as_str()),
+        "gateway must carry a derived prompt-cache key through as request \
+         metadata so OpenAI Responses-API providers can set a stable \
+         prompt_cache_key"
+    );
+    assert_ne!(
+        prompt_cache_key,
+        Some(raw_thread_id.as_str()),
+        "the raw thread id must never be sent to the provider"
+    );
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+/// A `HostManagedModelRequest` with no thread id (legacy replay wire shapes
+/// recorded before the field existed) must not carry any prompt-cache key
+/// metadata at all — no fallback to `run_id`, no stale entry left behind.
+#[tokio::test]
+async fn gateway_omits_thread_cache_key_when_thread_id_is_none() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let policy = LlmModelProfilePolicy::new()
+        .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    let mut request = model_request(interactive_model());
+    request.thread_id = None;
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0]
+            .metadata
+            .contains_key(ironclaw_llm::PROMPT_CACHE_KEY_METADATA),
+        "no thread id means no prompt-cache key metadata at all"
+    );
 }
 
 #[tokio::test]
@@ -582,13 +648,146 @@ async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitize
         streaming_requests[0].model.as_deref(),
         Some("host-selected-model")
     );
-    assert_eq!(
-        sink.updates(),
-        vec!["Done.".to_string(), "Done. [redacted]".to_string()]
-    );
+    // Both raw provider deltas land well inside a single coalescing window
+    // (64 deltas / 2 KiB / 100 ms — see `ProviderStreamSink`), so under
+    // normal scheduling the sink observes only the final flush. But the
+    // 100 ms interval threshold is evaluated on wall-clock elapsed time, not
+    // a mocked clock: a descheduled CI runner can cross it between sink
+    // construction and the first delta, emitting the first delta
+    // immediately and leaving the flush to emit again — a second, harmless
+    // update. Assert only the deterministic property: whatever number of
+    // updates arrived, the final one is the fully accumulated, sanitized
+    // text.
+    assert_eq!(sink.updates().last(), Some(&"Done. [redacted]".to_string()));
     assert_eq!(
         response.safe_text_deltas,
         vec!["Done. [redacted]".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_progress_coalesces_many_provider_deltas() {
+    // Integration-tier regression coverage for the ProviderStreamSink
+    // coalescing fix, driven through the real gateway/production wiring
+    // (LlmProviderModelGateway -> complete_model_request ->
+    // ProviderStreamSink), not just the sink in isolation. Before the fix
+    // this many raw deltas produced one `safe_text_update` call each; the
+    // fix must bound the call count while still delivering the exact final
+    // accumulated text once the provider's streaming call returns.
+    const DELTA_COUNT: usize = 500;
+    let deltas: Vec<String> = (0..DELTA_COUNT)
+        .map(|index| format!("{index:015} "))
+        .collect();
+    let full_text: String = deltas.concat();
+    let provider = Arc::new(StreamingRecordingLlmProvider::new(deltas, &full_text));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await
+        .unwrap();
+
+    let updates = sink.updates();
+    // The 100 ms coalescing interval is wall-clock, not a mocked clock: a
+    // descheduled CI runner can cross it between individual deltas and
+    // force extra threshold-driven emits, so no fixed upper bound derived
+    // from the count/byte thresholds alone can be proven to "never break"
+    // under that scheduling — only a genuinely pathological, sustained
+    // stall between many separate deltas could approach one emit per
+    // delta. Rather than add a clock-injection seam for this, assert only
+    // what coalescing guarantees regardless of timing: strictly fewer
+    // update calls than raw deltas, and the final call carries the exact
+    // fully accumulated text.
+    assert!(
+        updates.len() < DELTA_COUNT,
+        "expected coalescing to reduce call count below the pre-fix {DELTA_COUNT}, got {}",
+        updates.len()
+    );
+    assert_eq!(updates.last(), Some(&full_text));
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_progress_flushes_buffered_text_when_provider_streaming_errors() {
+    // Regression coverage for the unconditional `ProviderStreamSink::flush()`
+    // after the text-only streaming call site returns `Err` in
+    // `complete_model_request`: the provider emits deltas that stay well
+    // below the coalescing thresholds (so no threshold-driven emit would
+    // deliver them) and then the streaming call itself fails. The buffered
+    // text must still reach the host sink via the flush-on-error path.
+    let provider = Arc::new(StreamingRecordingLlmProvider::new_failing(
+        vec!["Partial ".to_string(), "answer".to_string()],
+        "stream dropped mid-response",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let result = gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await;
+
+    assert!(
+        result.is_err(),
+        "the provider streaming error must propagate as a gateway error"
+    );
+    assert_eq!(
+        sink.updates().last(),
+        Some(&"Partial answer".to_string()),
+        "flush-on-error must still deliver the buffered text to the host sink"
+    );
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_capabilities_and_progress_flushes_buffered_text_when_provider_streaming_errors()
+ {
+    // Same regression as above, for the independent tool-capable streaming
+    // call site (`complete_with_tools_streaming` / the second `flush()` in
+    // `complete_model_request`), which is a distinct code path from the
+    // text-only one above.
+    let provider = Arc::new(StreamingRecordingLlmProvider::new_failing(
+        vec!["Partial ".to_string(), "tool answer".to_string()],
+        "stream dropped mid-response",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let result = gateway
+        .stream_model_with_capabilities_and_progress(
+            model_request(interactive_model()),
+            capabilities,
+            sink.clone(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "the provider streaming error must propagate as a gateway error"
+    );
+    assert_eq!(
+        provider.streaming_tool_requests.lock().unwrap().len(),
+        1,
+        "the tool-capable streaming call site must have been used"
+    );
+    assert_eq!(
+        sink.updates().last(),
+        Some(&"Partial tool answer".to_string()),
+        "flush-on-error must still deliver the buffered text to the host sink on the tool-capable route"
     );
 }
 
@@ -2272,6 +2471,7 @@ async fn gateway_falls_back_to_safe_summary_for_invalid_model_observation() {
     let tool_result = &requests[0].messages[1];
     assert_eq!(tool_result.role, Role::Tool);
     assert_eq!(tool_result.content, "tool failed");
+    assert!(!tool_result.tool_result_structured_json_view);
     assert!(!tool_result.content.contains("ignore previous"));
 }
 
@@ -2522,6 +2722,81 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
     assert_eq!(second_tool_result.role, Role::Tool);
     assert_eq!(second_tool_result.tool_call_id.as_deref(), Some("call_2"));
     assert_eq!(second_tool_result.content, "second tool completed");
+}
+
+#[tokio::test]
+async fn gateway_deduplicates_identical_tool_result_replay_but_keeps_distinct_calls() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let shared_envelope = ToolResultReferenceEnvelope::new(
+        "result:shared-tool",
+        ToolResultSafeSummary::new("shared tool result").unwrap(),
+    )
+    .unwrap();
+    let first_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"shared"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: Some("provider reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let mut second_provider_call = first_provider_call.clone();
+    second_provider_call.provider_call_id = "call_2".to_string();
+    second_provider_call.signature = Some("sig-2".to_string());
+    let message = |content_ref, provider_call| HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::to_string(&shared_envelope).unwrap(),
+        content_ref: LoopMessageRef::new(content_ref).unwrap(),
+        tool_result_provider_call: Some(provider_call),
+        tool_result_content: tool_result_reference_content(&shared_envelope),
+        image_parts: Vec::new(),
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![
+        message(
+            "msg:11111111-1111-1111-1111-111111111111",
+            first_provider_call.clone(),
+        ),
+        message(
+            "msg:22222222-2222-2222-2222-222222222222",
+            first_provider_call,
+        ),
+        message(
+            "msg:33333333-3333-3333-3333-333333333333",
+            second_provider_call,
+        ),
+    ];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 3);
+    let assistant = &requests[0].messages[0];
+    let tool_calls = assistant.tool_calls.as_ref().expect("assistant tool calls");
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].id, "call_1");
+    assert_eq!(tool_calls[1].id, "call_2");
+    assert_eq!(
+        requests[0].messages[1].tool_call_id.as_deref(),
+        Some("call_1")
+    );
+    assert_eq!(
+        requests[0].messages[2].tool_call_id.as_deref(),
+        Some("call_2")
+    );
+    assert_eq!(requests[0].messages[1].content, "shared tool result");
+    assert_eq!(requests[0].messages[2].content, "shared tool result");
 }
 
 #[tokio::test]
@@ -3087,6 +3362,21 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
+    let prompt_cache_key = requests[0]
+        .metadata
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .map(String::as_str);
+    assert_eq!(
+        prompt_cache_key,
+        Some(expected_prompt_cache_key(fixture.run_context.thread_id.as_str()).as_str()),
+        "the real ThreadBackedLoopModelPort::stream_model construction site \
+         must carry a derived prompt-cache key through as request metadata"
+    );
+    assert_ne!(
+        prompt_cache_key,
+        Some(fixture.run_context.thread_id.as_str()),
+        "the raw thread id must never be sent to the provider"
+    );
     assert!(requests[0].messages.iter().any(|message| {
         message
             .content
@@ -4751,6 +5041,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        thread_id: Some(ThreadId::new("thread-gateway-test").unwrap()),
         tool_choice: None,
         response_format: None,
     }
@@ -4875,8 +5166,13 @@ struct StreamingRecordingLlmProvider {
     model_name: String,
     complete_requests: Mutex<Vec<CompletionRequest>>,
     streaming_requests: Mutex<Vec<CompletionRequest>>,
+    streaming_tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     streaming_deltas: Vec<String>,
     response_content: String,
+    /// When set, both streaming call sites emit `streaming_deltas` via the
+    /// sink and then return `Err` with this reason instead of `Ok`,
+    /// mirroring a provider connection drop mid-stream.
+    fail_after_deltas: Option<String>,
 }
 
 impl StreamingRecordingLlmProvider {
@@ -4885,8 +5181,29 @@ impl StreamingRecordingLlmProvider {
             model_name: "streaming-recording-model".to_string(),
             complete_requests: Mutex::new(Vec::new()),
             streaming_requests: Mutex::new(Vec::new()),
+            streaming_tool_requests: Mutex::new(Vec::new()),
             streaming_deltas,
             response_content: response_content.to_string(),
+            fail_after_deltas: None,
+        }
+    }
+
+    /// Regression coverage for the unconditional `ProviderStreamSink::flush()`
+    /// after a failed streaming call (both the text-only and tool-capable
+    /// call sites in `complete_model_request` flush on `Err` as well as
+    /// `Ok`): the returned provider double emits `streaming_deltas` — kept
+    /// below the coalescing thresholds — via the sink and then fails, so the
+    /// only way the buffered text reaches the host sink is the flush-on-error
+    /// path.
+    fn new_failing(streaming_deltas: Vec<String>, error_reason: &str) -> Self {
+        Self {
+            model_name: "streaming-recording-model".to_string(),
+            complete_requests: Mutex::new(Vec::new()),
+            streaming_requests: Mutex::new(Vec::new()),
+            streaming_tool_requests: Mutex::new(Vec::new()),
+            streaming_deltas,
+            response_content: String::new(),
+            fail_after_deltas: Some(error_reason.to_string()),
         }
     }
 }
@@ -4918,6 +5235,12 @@ impl LlmProvider for StreamingRecordingLlmProvider {
         for delta in &self.streaming_deltas {
             sink.text_delta(delta.clone()).await;
         }
+        if let Some(reason) = &self.fail_after_deltas {
+            return Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: reason.clone(),
+            });
+        }
         Ok(CompletionResponse {
             content: self.response_content.clone(),
             input_tokens: 1,
@@ -4936,6 +5259,34 @@ impl LlmProvider for StreamingRecordingLlmProvider {
         Err(LlmError::RequestFailed {
             provider: self.model_name.clone(),
             reason: "tool completion is not expected".to_string(),
+        })
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.streaming_tool_requests.lock().unwrap().push(request);
+        for delta in &self.streaming_deltas {
+            sink.text_delta(delta.clone()).await;
+        }
+        if let Some(reason) = &self.fail_after_deltas {
+            return Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: reason.clone(),
+            });
+        }
+        Ok(ToolCompletionResponse {
+            content: Some(self.response_content.clone()),
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
         })
     }
 }

@@ -305,34 +305,32 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
 }
 
 #[tokio::test]
-async fn model_context_overflow_exhaustion_gives_model_one_observation_assisted_attempt() {
+async fn model_context_overflow_never_receives_an_observation_retry() {
     let overflow = || {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )
     };
-    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
-        overflow(),
-        overflow(),
-        overflow(),
-    ]);
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![overflow(), overflow()]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = executor
         .execute_family(&crate::families::default(), &host, state)
         .await
-        .expect("context-overflow observation should let the model recover");
+        .expect("second context overflow returns a terminal exit");
 
-    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(matches!(exit, LoopExit::Failed(_)));
     let requests = host.model_requests();
-    assert_eq!(requests.len(), 4);
-    assert!(requests[3].inline_messages.iter().any(|message| {
-        message
-            .safe_body
-            .as_str()
-            .contains("context overflowed; use the available context and continue")
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request.inline_messages.iter().all(|message| {
+            !message
+                .safe_body
+                .as_str()
+                .contains("context overflowed; use the available context and continue")
+        })
     }));
 }
 

@@ -4,49 +4,15 @@
 #   - reborn-coverage-merge-lcov.sh     (per-lane lcov merge + crate filter)
 #   - reborn-coverage-summary.sh        (report + --zero-crates modes)
 #   - reborn-coverage-comment.sh        (sticky PR comment upsert via `gh api`)
-#   - reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
 #   - reborn-coverage-ratchet.sh        (coverage-floor ratchet gate)
 #
-# Mirrors test-classify-test-scope.sh: self-contained, locates the
-# scripts-under-test relative to this file's own directory, builds its own
-# fixtures in a mktemp dir, and reports PASS/FAIL per case. Unlike that
-# precedent (which exits on the first failure), this suite runs every case
-# and prints a final summary, exiting non-zero only if something failed —
-# with five scripts and 50 cases (M/A/B/C/D/R sections), seeing the full
-# picture in one run beats stopping at the first mismatch.
-#
-# reborn-coverage-summary.sh and reborn-coverage-ratchet.sh share one lcov-
-# parsing + exemption-filtering + by-crate-aggregation implementation
-# (scripts/ci/lib/reborn_coverage_lcov.py) — the M/A/B/C sections below are
-# this module's regression proof (exercised transitively through both
-# consuming scripts), not a separate lib-level test file.
-#
-# The R section (reborn-coverage-ratchet.sh cases) lives in the sibling
-# test-reborn-coverage-ratchet-cases.sh, `source`d near the end of this file —
-# split out to keep this file under 1000 lines once a fifth script's cases
-# joined the suite. That file is not standalone; it shares this script's
-# helpers, fixtures, and PASS_COUNT/FAIL_COUNT counters.
-#
-# reborn-coverage-summary.sh and reborn-coverage-comment.sh consume a merged,
-# crate-filtered lcov tracefile (scripts/ci/reborn-coverage-merge-lcov.sh) plus
-# the exemptions manifest (tests/integration/coverage-exemptions.toml schema),
-# not a cargo-llvm-cov JSON export — the coverage-report job in
-# .github/workflows/reborn-tests.yml downloads 5 per-lane lcov artifacts,
-# merges+filters them, then renders. Fixtures below build lcov tracefiles and
-# exemptions TOML by hand rather than shelling out to cargo-llvm-cov.
-#
-# reborn-coverage-comment.sh shells out to `gh api`. It is exercised here
-# against a fake `gh` (a fixture script placed first on PATH) that emulates
-# `gh api --paginate <path> --jq '<filter>'` by running the given jq filter
-# over a canned comments JSON array, and records the verb/path/body of any
-# mutating call (-X POST / -X PATCH) to a log file this suite inspects.
-#
-# reborn-coverage-int-tier-tests.sh derives its repo root from its own path
-# (`$(dirname BASH_SOURCE)/../..`) and `cd`s there, so it cannot simply be
-# pointed at a fixture tree via an argument. Each case copies the real
-# script into a temp tree's scripts/ci/ and builds a tests/integration/
-# subtree next to it, so the copy's own repo-root resolution lands on the
-# temp tree.
+# The suite is self-contained: it builds temporary fixture repositories, runs
+# every case, and reports all failures at the end. M/A/B/C exercise the shared
+# lcov implementation through its real shell callers. The integration
+# inventory has its own Python contract suite below. R lives in
+# the sourced `test-reborn-coverage-ratchet-cases.sh` sibling and shares this
+# file's fixtures and counters. Coverage comments use a fake `gh`; coverage
+# inputs are hand-built LCOV/TOML fixtures rather than compiler output.
 
 set -euo pipefail
 
@@ -54,8 +20,9 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 merge_sh="${script_dir}/reborn-coverage-merge-lcov.sh"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
 comment_sh="${script_dir}/reborn-coverage-comment.sh"
-int_tier_sh="${script_dir}/reborn-coverage-int-tier-tests.sh"
 ratchet_sh="${script_dir}/reborn-coverage-ratchet.sh"
+
+python3 "${script_dir}/test_integration_test_inventory.py"
 
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -1163,140 +1130,6 @@ if [ -f "${c12_log}" ]; then
 else
   report_fail "C12: fake gh did not record a mutation (comment must still render/upsert)"
 fi
-
-# ---------------------------------------------------------------------------
-# D. reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
-# ---------------------------------------------------------------------------
-#
-# The script derives its repo root from its own path and `cd`s there, so
-# each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/integration/ subtree alongside it, then invokes the copy. Discovery
-# is registration-driven (see that script's header comment): every `[[test]]`
-# entry in Cargo.toml whose `path` sits under tests/integration/ is selected,
-# so each case seeds a fake Cargo.toml with one `[[test]]` block per fixture
-# suite it constructs — mirrors the real repo root always having a `[[test]]`
-# entry per suite. The on-disk fixture files are kept for tree realism; an
-# unregistered file must never be selected (D6).
-
-setup_int_tier_case() {
-  local case_dir="$1"
-  shift
-  mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests/integration"
-  cp "${int_tier_sh}" "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-  chmod +x "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-  : > "${case_dir}/Cargo.toml"
-  local candidate
-  for candidate in "$@"; do
-    cat >>"${case_dir}/Cargo.toml" <<EOF
-[[test]]
-name = "${candidate}"
-path = "tests/integration/${candidate}.rs"
-
-EOF
-  done
-}
-
-# D1: empty tests/integration/ -> non-zero exit + discovery error.
-d1="${tmp_root}/d1"
-setup_int_tier_case "${d1}"
-capture "${d1}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D1: empty tests/integration/ exits non-zero" 1 "${CAP_RC}"
-assert_contains "D1: empty tests/integration/ prints the discovery error" "${CAP_ERR}" \
-  "No Reborn integration-tier test binaries discovered"
-
-# D2: one tests/integration/foo.rs -> --test / reborn_integration_foo.
-d2="${tmp_root}/d2"
-setup_int_tier_case "${d2}" reborn_integration_foo
-: > "${d2}/tests/integration/foo.rs"
-capture "${d2}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D2: single flat integration file exits 0" 0 "${CAP_RC}"
-assert_eq "D2: single flat integration file emits its --test pair" \
-  "$(printf -- '--test\nreborn_integration_foo')" "${CAP_OUT}"
-
-# D3: one tests/integration/group_bar/main.rs -> --test / reborn_group_bar.
-d3="${tmp_root}/d3"
-setup_int_tier_case "${d3}" reborn_group_bar
-mkdir -p "${d3}/tests/integration/group_bar"
-: > "${d3}/tests/integration/group_bar/main.rs"
-capture "${d3}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D3: single group dir exits 0" 0 "${CAP_RC}"
-assert_eq "D3: single group dir emits its --test pair, dir->name rewrite applied" \
-  "$(printf -- '--test\nreborn_group_bar')" "${CAP_OUT}"
-
-# D3b: a half-scaffolded group dir (no main.rs yet) is skipped, not errored.
-d3b="${tmp_root}/d3b"
-setup_int_tier_case "${d3b}" reborn_group_bar
-mkdir -p "${d3b}/tests/integration/group_bar" "${d3b}/tests/integration/group_incomplete"
-: > "${d3b}/tests/integration/group_bar/main.rs"
-capture "${d3b}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D3b: half-scaffolded group dir does not error the whole discovery" 0 "${CAP_RC}"
-assert_eq "D3b: half-scaffolded group dir (no main.rs) is skipped" \
-  "$(printf -- '--test\nreborn_group_bar')" "${CAP_OUT}"
-
-# D4: multiple files + dirs, created out of alphabetical order -> sorted,
-# deduped output. Group dirs ('g') sort before integration files ('i').
-d4="${tmp_root}/d4"
-setup_int_tier_case "${d4}" reborn_group_beta reborn_group_omega reborn_integration_alpha reborn_integration_zeta
-: > "${d4}/tests/integration/zeta.rs"
-: > "${d4}/tests/integration/alpha.rs"
-mkdir -p "${d4}/tests/integration/group_omega" "${d4}/tests/integration/group_beta"
-: > "${d4}/tests/integration/group_omega/main.rs"
-: > "${d4}/tests/integration/group_beta/main.rs"
-capture "${d4}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D4: multiple suites exits 0" 0 "${CAP_RC}"
-assert_eq "D4: multiple suites sorted+deduped in expected order" \
-  "$(printf -- '--test\nreborn_group_beta\n--test\nreborn_group_omega\n--test\nreborn_integration_alpha\n--test\nreborn_integration_zeta')" \
-  "${CAP_OUT}"
-
-# D5: a `support/` subdirectory alongside the flat files must not be
-# mistaken for a suite (no main.rs, and doesn't match the `group_*` name
-# pattern either) — mirrors the real tests/integration/support/ harness tree.
-d5="${tmp_root}/d5"
-setup_int_tier_case "${d5}" reborn_integration_only
-: > "${d5}/tests/integration/only.rs"
-mkdir -p "${d5}/tests/integration/support"
-: > "${d5}/tests/integration/support/mod.rs"
-capture "${d5}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D5: support/ dir alongside flat suites exits 0" 0 "${CAP_RC}"
-assert_eq "D5: support/ dir is not discovered as a suite" \
-  "$(printf -- '--test\nreborn_integration_only')" "${CAP_OUT}"
-
-# D6: domain-folder bins (tests/integration/auth/oauth_connect.rs) are
-# selected via their [[test]] registration, while a #[path]-mounted sibling
-# with no [[test]] entry (auth/common.rs) is not. Pins the #6520-audit blind
-# spot: the retired `find -maxdepth 1` walk could not see domain-folder bins,
-# so the six tests/integration/auth/ suites ran in no PR coverage lane.
-# The third stanza writes `path` BEFORE `name` and the fourth uses compact
-# `key="value"` spacing with a trailing comment: Cargo accepts all of these,
-# so the selector must too — a line-regex parser keyed to one formatting
-# style would silently skip such stanzas and recreate the blind spot this
-# case pins.
-d6="${tmp_root}/d6"
-setup_int_tier_case "${d6}" reborn_integration_flat
-: > "${d6}/tests/integration/flat.rs"
-mkdir -p "${d6}/tests/integration/auth"
-: > "${d6}/tests/integration/auth/oauth_connect.rs"
-: > "${d6}/tests/integration/auth/common.rs"
-: > "${d6}/tests/integration/auth/pathfirst_probe.rs"
-: > "${d6}/tests/integration/auth/compact_probe.rs"
-cat >>"${d6}/Cargo.toml" <<'EOF'
-[[test]]
-name = "reborn_integration_oauth_connect"
-path = "tests/integration/auth/oauth_connect.rs"
-
-[[test]]
-path = "tests/integration/auth/pathfirst_probe.rs"
-name = "reborn_integration_pathfirst_probe"
-
-[[test]]
-name="reborn_integration_compact_probe" # compact TOML: no spaces, trailing comment
-path="tests/integration/auth/compact_probe.rs"
-EOF
-capture "${d6}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D6: domain-folder bin exits 0" 0 "${CAP_RC}"
-assert_eq "D6: registered domain-folder bins (any key order or spacing) are selected; unregistered sibling is not" \
-  "$(printf -- '--test\nreborn_integration_compact_probe\n--test\nreborn_integration_flat\n--test\nreborn_integration_oauth_connect\n--test\nreborn_integration_pathfirst_probe')" \
-  "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)

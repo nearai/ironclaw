@@ -1023,10 +1023,10 @@ mod declared_limits_tests {
             .expect("baseline profile");
         let ceiling_calls = baseline.resource_budget_policy.max_model_calls;
         let ceiling_invocations = baseline.resource_budget_policy.max_capability_invocations;
-        assert_eq!(
-            baseline.resource_budget_policy.max_wall_clock_seconds, None,
-            "the interactive profile declares no wall-clock ceiling"
-        );
+        let ceiling_wall_clock_seconds = baseline
+            .resource_budget_policy
+            .max_wall_clock_seconds
+            .expect("the interactive profile declares a default wall-clock ceiling");
 
         // Narrowing: every declared limit below the ceiling binds; a
         // wall-clock declaration binds even with no profile ceiling.
@@ -1072,6 +1072,48 @@ mod declared_limits_tests {
             twice_narrowed.resource_budget_policy.max_wall_clock_seconds,
             Some(60),
             "a larger declared wall clock must not extend the narrowed ceiling"
+        );
+
+        // A profile ceiling (new: interactive() now declares a default) is
+        // narrowed, never widened, by a declared limit above it.
+        let resolver = DeclaredLimitsNarrowingResolver {
+            inner: &inner,
+            limits: TurnLimits {
+                max_model_calls: None,
+                max_capability_invocations: None,
+                max_wall_clock_seconds: Some(ceiling_wall_clock_seconds + 1_000),
+            },
+        };
+        let narrowed_above_ceiling = resolver
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("narrowed profile");
+        assert_eq!(
+            narrowed_above_ceiling
+                .resource_budget_policy
+                .max_wall_clock_seconds,
+            Some(ceiling_wall_clock_seconds),
+            "a declared wall clock above the profile's own default ceiling must not widen it"
+        );
+        // memory_scheduled_ops's real declared limit (90s) must still narrow
+        // the new 1,800s default exactly as it narrowed None.
+        let resolver = DeclaredLimitsNarrowingResolver {
+            inner: &inner,
+            limits: TurnLimits {
+                max_model_calls: None,
+                max_capability_invocations: None,
+                max_wall_clock_seconds: Some(90),
+            },
+        };
+        let narrowed_scheduled_pass = resolver
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("narrowed profile");
+        assert_eq!(
+            narrowed_scheduled_pass
+                .resource_budget_policy
+                .max_wall_clock_seconds,
+            Some(90)
         );
     }
 }

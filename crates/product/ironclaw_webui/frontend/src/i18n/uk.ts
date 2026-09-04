@@ -205,7 +205,6 @@ registerPack("uk", {
   "activity.separator": ", ",
   "tool.tabDetails": "Деталі",
   "tool.tabParameters": "Параметри",
-  "tool.tabResult": "Результат",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Відхилено",
   "tool.noDetail": "Без додаткових деталей.",
@@ -382,6 +381,9 @@ registerPack("uk", {
   "llm.idTaken": "Ідентифікатор постачальника \"{id}\" уже використовується.",
   "llm.invalidId": "Використовуйте малі літери, цифри, дефіси або підкреслення.",
   "llm.model": "Модель",
+  "llm.capabilityText": "Текст",
+  "llm.capabilityImageInput": "Вхідні зображення",
+  "llm.capabilityImageOutput": "Вихідні зображення",
   "llm.modelPreference": "Вибір моделі",
   "llm.modelPreferenceDesc": "Використовується для майбутніх повідомлень у всіх розмовах.",
   "llm.catalogLoadFailed": "Не вдалося завантажити доступні моделі.",
@@ -1191,6 +1193,7 @@ registerPack("uk", {
   "common.deleteChat": "Видалити чат",
   "chat.deleteFailed": "Не вдалося видалити цю розмову.",
   "chat.cancelFailed": "Не вдалося зупинити цей запуск. Можливо, він усе ще виконується. Спробуйте ще раз.",
+  "chat.runStopped": "Зупинено",
   "chat.deleteBusy": "Неможливо видалити розмову, поки вона виконується. Спочатку зупиніть її, а потім спробуйте ще раз.",
   "command.placeholder": "Введіть команду або пошук...",
   "routine.searchPlaceholder": "Назва процедури пошуку, тригер або дія",
@@ -1400,7 +1403,6 @@ registerPack("uk", {
   "common.file": "файл",
   "chat.previewAttachment": "Переглянути {name}",
   "chat.downloadAttachment": "Завантажити {name}",
-  "tool.resultAlt": "Результат інструмента"
 });
 
 registerPack("uk", {

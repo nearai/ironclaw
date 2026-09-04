@@ -235,6 +235,9 @@ fn mcp_error_from_client_error(error: McpClientError, auth_context: McpAuthConte
     match error {
         McpClientError::Client { reason } => McpError::Client { reason },
         McpClientError::InvalidToolCatalog { reason } => McpError::InvalidToolCatalog { reason },
+        McpClientError::InvalidToolResult { .. } => McpError::Client {
+            reason: request_denied(McpRequestDeniedCause::AccountingInvariant),
+        },
         McpClientError::AuthRequired { .. } | McpClientError::AuthChallenge { .. } => {
             McpError::AuthRequired {
                 required_secrets: auth_context.required_secrets,
@@ -251,7 +254,8 @@ fn mcp_client_attempt_usage(error: &McpClientError) -> Option<&ResourceUsage> {
     match error {
         McpClientError::AuthRequired { usage }
         | McpClientError::AuthChallenge { usage, .. }
-        | McpClientError::ProviderRejected { usage, .. } => Some(usage),
+        | McpClientError::ProviderRejected { usage, .. }
+        | McpClientError::InvalidToolResult { usage, .. } => Some(usage),
         McpClientError::Client { .. } | McpClientError::InvalidToolCatalog { .. } => None,
     }
 }
@@ -272,6 +276,13 @@ fn mcp_error_from_accounted_client_error(
         McpClientError::ProviderRejected { diagnostic, .. } => {
             McpError::ProviderRejected(Box::new(crate::contract::McpProviderRejection {
                 diagnostic: *diagnostic,
+                receipt,
+                usage,
+            }))
+        }
+        McpClientError::InvalidToolResult { reason, .. } => {
+            McpError::InvalidToolResult(Box::new(crate::contract::McpInvalidToolResult {
+                reason,
                 receipt,
                 usage,
             }))

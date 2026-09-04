@@ -98,6 +98,17 @@ impl MockMcpServer {
         *self.state.force_tool_call_error.lock().unwrap() = Some((code, message.into()));
     }
 
+    /// Override one tool's successful `tools/call.result` with an exact MCP
+    /// protocol value. Most tests use the convenience JSON-to-text wrapper;
+    /// content-block contract tests need to exercise the real mixed result.
+    pub fn set_tool_call_result(&self, tool_name: impl Into<String>, result: serde_json::Value) {
+        self.state
+            .tool_result_overrides
+            .lock()
+            .unwrap()
+            .insert(tool_name.into(), result);
+    }
+
     /// Switch every id-bearing JSON-RPC response to SSE framing:
     /// `Content-Type: text/event-stream` with the JSON-RPC body wrapped in a
     /// `data:` event, preceded by an empty `ping` keepalive event. This is a
@@ -150,6 +161,8 @@ struct MockState {
     tool_responses: HashMap<String, Vec<serde_json::Value>>,
     /// Counter for tool_responses consumption (per tool name).
     tool_response_idx: std::sync::Mutex<HashMap<String, usize>>,
+    /// Exact MCP `tools/call.result` values for protocol-shape tests.
+    tool_result_overrides: std::sync::Mutex<HashMap<String, serde_json::Value>>,
     /// Recorded MCP requests for auth/assertion tests.
     recorded_requests: std::sync::Mutex<Vec<RecordedMcpRequest>>,
     /// Monotonic counter for initialize responses; stamps a distinct
@@ -225,6 +238,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         tools,
         tool_responses: response_map,
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
+        tool_result_overrides: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
         session_counter: std::sync::Mutex::new(0),
         force_status: std::sync::Mutex::new(None),
@@ -306,6 +320,7 @@ pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockM
         tools,
         tool_responses: response_map,
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
+        tool_result_overrides: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
         session_counter: std::sync::Mutex::new(0),
         force_status: std::sync::Mutex::new(None),
@@ -530,27 +545,36 @@ async fn handle_mcp(
                 .and_then(|n| n.as_str())
                 .unwrap_or("unknown");
 
-            let content = {
-                let mut idx_map = state.tool_response_idx.lock().unwrap();
-                let idx = idx_map.entry(tool_name.to_string()).or_insert(0);
-                let responses = state.tool_responses.get(tool_name);
-                let result = responses
-                    .and_then(|r| r.get(*idx))
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"error": "no mock response configured"}));
-                *idx += 1;
-                result
-            };
-
-            let success_result = serde_json::json!({
-                "content": [
-                    {
-                        "type": "text",
-                        "text": serde_json::to_string(&content)
-                            .expect("serializing serde_json::Value for mock MCP content should not fail")
-                    }
-                ]
-            });
+            let success_result = state
+                .tool_result_overrides
+                .lock()
+                .unwrap()
+                .get(tool_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let content = {
+                        let mut idx_map = state.tool_response_idx.lock().unwrap();
+                        let idx = idx_map.entry(tool_name.to_string()).or_insert(0);
+                        let responses = state.tool_responses.get(tool_name);
+                        let result = responses
+                            .and_then(|r| r.get(*idx))
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                serde_json::json!({"error": "no mock response configured"})
+                            });
+                        *idx += 1;
+                        result
+                    };
+                    serde_json::json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": serde_json::to_string(&content)
+                                    .expect("serializing serde_json::Value for mock MCP content should not fail")
+                            }
+                        ]
+                    })
+                });
             // Sticky tool-call error override: emit a top-level JSON-RPC `error`
             // object AND a valid `result`. A conformant client returns on the
             // `error` field; the `result` is present so that removing that guard

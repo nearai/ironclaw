@@ -1,25 +1,29 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { beforeEach, test, vi } from "vitest";
+import type { DynamicTestOptions } from "../test-support/dynamic-test-types";
 
 vi.mock("./api", () => ({
-  apiFetch: vi.fn(async () => ({})),
+  apiFetch: vi.fn(async () => ({ flow_id: "flow-1", status: "pending" })),
 }));
 
 import { apiFetch } from "./api";
 import {
   cancelDeviceLink,
+  deviceLinkStatusPath,
   pollDeviceLink,
   startDeviceLink,
   submitDeviceLinkInput,
 } from "./device-link-api";
 
+const apiFetchMock = vi.mocked(apiFetch);
+
 beforeEach(() => {
-  apiFetch.mockClear();
+  apiFetchMock.mockClear();
 });
 
 function sentBody() {
-  return JSON.parse(apiFetch.mock.calls.at(-1)[1].body);
+  const options: DynamicTestOptions = apiFetchMock.mock.calls.at(-1)[1];
+  return JSON.parse(options.body);
 }
 
 // The regression: the chat auth-gate card renders from a gate model that has
@@ -108,4 +112,17 @@ test("submitDeviceLinkInput preserves a zero revision", () => {
   });
 
   assert.equal(sentBody().revision, 0);
+});
+
+test("device-link flow routes reject malformed successful responses", async () => {
+  apiFetchMock.mockResolvedValueOnce({ flow_id: "flow-1", status: "surprise" });
+
+  await assert.rejects(
+    startDeviceLink({ provider: "telegram", extensionName: "telegram" }),
+    /invalid device-link flow response/,
+  );
+});
+
+test("device-link status path rejects a missing flow id", () => {
+  assert.throws(() => deviceLinkStatusPath(""), /flowId is required/);
 });

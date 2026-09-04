@@ -21,7 +21,7 @@ use ironclaw_host_api::{
 use serde::Deserialize;
 use url::Url;
 
-use crate::payload::SLACK_API_HOST;
+use crate::api::SlackWebApiMethod;
 use crate::{
     channel::{part_outcome_for_egress_error, part_outcome_for_kind},
     delivery::{SlackDeliveryFailureKind, slack_error_kind},
@@ -255,7 +255,7 @@ pub(super) async fn send_files(
             };
         let ticket_response = match egress.send(ticket_request).await {
             Ok(response) => response,
-            Err(error) => return vec![part_outcome_for_egress_error(&error)],
+            Err(error) => return vec![part_outcome_for_private_step_egress_error(&error)],
         };
         if !(200..300).contains(&ticket_response.status) {
             return vec![part_outcome_for_kind(
@@ -300,7 +300,7 @@ pub(super) async fn send_files(
             };
         let upload_response = match egress.send(upload_request).await {
             Ok(response) => response,
-            Err(error) => return vec![part_outcome_for_egress_error(&error)],
+            Err(error) => return vec![part_outcome_for_private_step_egress_error(&error)],
         };
         if !(200..300).contains(&upload_response.status) {
             return vec![part_outcome_for_kind(
@@ -363,6 +363,20 @@ pub(super) async fn send_files(
         outcomes.push(read_back_staged_upload(egress, channel, thread_ts, &upload).await);
     }
     outcomes
+}
+
+/// Egress failures on the steps that share nothing into the conversation —
+/// the upload ticket and the private byte upload. A lost answer there is a
+/// plain retry from a fresh ticket: only `files.completeUploadExternal`
+/// makes a file visible, so only its ambiguity is kept as `Ambiguous` (the
+/// sink's fail-closed attachment latch).
+fn part_outcome_for_private_step_egress_error(
+    error: &RestrictedEgressError,
+) -> PartDeliveryOutcome {
+    match part_outcome_for_egress_error(error) {
+        PartDeliveryOutcome::Ambiguous { reason } => PartDeliveryOutcome::Retryable { reason },
+        outcome => outcome,
+    }
 }
 
 pub(crate) const SLACK_FILE_READBACK_MAX_ATTEMPTS: u8 = 8;
@@ -501,10 +515,8 @@ fn upload_ticket_request(
     length: usize,
     credential: &SecretHandle,
 ) -> Result<RestrictedEgressRequest, String> {
-    let mut url = Url::parse(&format!(
-        "https://{SLACK_API_HOST}/api/files.getUploadURLExternal"
-    ))
-    .map_err(|_| "slack upload ticket URL is invalid".to_string())?;
+    let mut url = Url::parse(&SlackWebApiMethod::FilesGetUploadUrlExternal.url())
+        .map_err(|error| format!("slack upload ticket URL is invalid: {error}"))?;
     url.query_pairs_mut()
         .append_pair("filename", filename)
         .append_pair("length", &length.to_string());
@@ -555,7 +567,7 @@ fn complete_upload_request(
         .map_err(|_| "slack upload completion body did not serialize".to_string())?;
     Ok(RestrictedEgressRequest {
         method: NetworkMethod::Post,
-        url: format!("https://{SLACK_API_HOST}/api/files.completeUploadExternal"),
+        url: SlackWebApiMethod::FilesCompleteUploadExternal.url(),
         headers: vec![(
             "content-type".to_string(),
             "application/json; charset=utf-8".to_string(),
@@ -567,7 +579,7 @@ fn complete_upload_request(
 }
 
 fn files_info_request(file_id: &str) -> Result<RestrictedEgressRequest, ChannelError> {
-    let mut url = Url::parse(&format!("https://{SLACK_API_HOST}/api/files.info"))
+    let mut url = Url::parse(&SlackWebApiMethod::FilesInfo.url())
         .map_err(|_| transfer_error("slack file lookup URL is invalid", false))?;
     url.query_pairs_mut().append_pair("file", file_id);
     Ok(RestrictedEgressRequest {

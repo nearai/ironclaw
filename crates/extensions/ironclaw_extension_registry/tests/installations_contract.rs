@@ -1191,17 +1191,32 @@ async fn assert_normalized_backend_contract(
     )
     .await
     .unwrap();
-    let expected = normalized_installation("sha256:abc");
+    let current_shape = normalized_installation("sha256:abc");
+    let legacy_installation =
+        ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+            installation_id: current_shape.installation_id().clone(),
+            extension_id: current_shape.extension_id().clone(),
+            manifest_ref: current_shape.manifest_ref().clone(),
+            incarnation_id: None,
+            credential_bindings: current_shape.credential_bindings().to_vec(),
+            updated_at: current_shape.updated_at(),
+            owner: current_shape.owner().clone(),
+        })
+        .unwrap();
     let alice = UserId::new("alice").unwrap();
     let bob = UserId::new("bob").unwrap();
     store
-        .upsert_manifest_and_installation(manifest("sha256:abc"), expected.clone())
+        .upsert_manifest_and_installation(manifest("sha256:abc"), legacy_installation)
         .await
         .unwrap();
-    store
-        .activate_membership(expected.installation_id(), &bob)
+    let expected = store
+        .activate_membership(current_shape.installation_id(), &bob)
         .await
         .unwrap();
+    assert!(
+        expected.incarnation_id().is_some(),
+        "a lifecycle write must upgrade a pre-incarnation installation"
+    );
     store
         .deactivate_membership(expected.installation_id(), &alice)
         .await

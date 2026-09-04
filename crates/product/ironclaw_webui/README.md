@@ -22,7 +22,10 @@ alone constructs authenticated-caller evidence.
 ## Public surface
 
 - `serve_webui_v2(RebornWebuiServeOptions)` — listener bind + `axum::serve` +
-  graceful shutdown (the one sanctioned socket bind in the product/API tier).
+  graceful shutdown (the one sanctioned socket bind in the product/API tier),
+  composed from `bind_webui_v2(addr) -> BoundWebuiListener` and
+  `serve_bound_webui_v2(bound, router, shutdown)` so a host can bind — and
+  announce the bound address — before its router exists.
 - `webui_v2_app(product_surface, config)` — the composed `axum::Router` with
   the fixed middleware order: ws-origin → body limit → bearer/session/OIDC
   auth → rate limit → handler.

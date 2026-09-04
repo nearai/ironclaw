@@ -2475,6 +2475,7 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
             "thread_invalid_request"
         }
         SessionThreadError::StructuredFinalizationConflict { .. } => "thread_conflict",
+        SessionThreadError::ToolResultRecordRead(_) => "thread_tool_result_record_read",
         SessionThreadError::Backend(_) => "thread_backend",
     };
     OperationFailure::new(bucket, stage, error)

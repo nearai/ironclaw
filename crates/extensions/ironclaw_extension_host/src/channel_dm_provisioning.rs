@@ -310,6 +310,8 @@ mod tests {
                 reply_transport: Some(
                     ironclaw_extension_contracts::channel::ReplyTransport::Message,
                 ),
+                // Deployment-bound test resolver: one immutable generation.
+                generation: 0,
                 requires_enrollment: false,
                 declared_egress_hosts: Vec::new(),
             })
@@ -333,6 +335,8 @@ mod tests {
                 delivery: None,
                 egress: Arc::new(NoopEgress),
                 reply_transport: None,
+                // Deployment-bound test resolver: one immutable generation.
+                generation: 0,
                 requires_enrollment: false,
                 declared_egress_hosts: Vec::new(),
             })
@@ -354,6 +358,8 @@ mod tests {
                 reply_transport: Some(
                     ironclaw_extension_contracts::channel::ReplyTransport::Message,
                 ),
+                // Deployment-bound test resolver: one immutable generation.
+                generation: 0,
                 requires_enrollment: false,
                 declared_egress_hosts: Vec::new(),
             })

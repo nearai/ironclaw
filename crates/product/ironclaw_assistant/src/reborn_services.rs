@@ -3060,13 +3060,14 @@ where
                     kind: product_notification_kind(record.kind),
                     severity: product_notification_severity(record.severity),
                     action: match record.action {
+                        NotificationAction::None => ProductNotificationAction::None,
                         NotificationAction::OpenThread { thread_id } => {
                             ProductNotificationAction::OpenThread {
                                 thread_id: thread_id.to_string(),
                             }
                         }
                     },
-                    thread_id: record.source.thread_id.to_string(),
+                    thread_id: record.source.thread_id.map(|id| id.to_string()),
                     turn_run_id: record.source.turn_run_id.map(|id| id.to_string()),
                     created_at: record.created_at,
                     updated_at: record.updated_at,
@@ -6033,9 +6034,10 @@ where
                             kind: NotificationKind::ApprovalRequired,
                             severity: NotificationSeverity::Warning,
                             source: NotificationSource {
-                                thread_id: approval.scope.thread_id.clone(),
+                                thread_id: Some(approval.scope.thread_id.clone()),
                                 turn_run_id: Some(approval.run_id),
                                 lifecycle_ref: Some(lifecycle_ref),
+                                credential_providers: Vec::new(),
                             },
                             action: NotificationAction::OpenThread {
                                 thread_id: approval.scope.thread_id,
@@ -7544,6 +7546,7 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::ToolResultRecordRead(_)
         | SessionThreadError::InvalidStructuredFinalization { .. }
         | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => ProductSurfaceError::service_unavailable(true),

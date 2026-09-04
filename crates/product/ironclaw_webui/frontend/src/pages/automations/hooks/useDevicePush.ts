@@ -1,7 +1,6 @@
-// @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
-import { getNotificationSetupStatus } from "../../../lib/api";
+import { getNotificationSetupStatus } from "../../../lib/notification-setup-api";
 import {
   enrollThisBrowser,
   getDevicePushState,
@@ -81,7 +80,9 @@ export function vapidPublicKeyFromDetail(detail) {
  * digests are incomplete yields `null` (correlation unavailable), never a
  * false "other account".
  */
-export function useDevicePush({ extensionId } = {}) {
+export function useDevicePush(
+  { extensionId }: { extensionId?: string } = {},
+) {
   const queryClient = useQueryClient();
   const statusQuery = useQuery({
     queryKey: setupStatusQueryKey(extensionId),

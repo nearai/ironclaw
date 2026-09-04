@@ -297,6 +297,7 @@ struct CapturedCall {
     messages: Vec<ChatMessage>,
     tools: Option<Vec<ToolDefinition>>,
     response_format: Option<CompletionResponseFormat>,
+    metadata: std::collections::HashMap<String, String>,
 }
 
 /// One request whose cached prompt prefix churned with no surface change.
@@ -614,6 +615,17 @@ impl TraceLlm {
             .collect()
     }
 
+    /// Clone the metadata attached to each provider request. Index `i`
+    /// matches `captured_requests()` and the other captured-call accessors.
+    pub fn captured_request_metadata(&self) -> Vec<std::collections::HashMap<String, String>> {
+        self.captured_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.metadata.clone())
+            .collect()
+    }
+
     /// Enqueue one more step at the back of the FIFO. For scenarios where a
     /// later scripted call needs a server-minted value (e.g. a durable
     /// `result_ref`) only discoverable after an earlier turn completes —
@@ -636,6 +648,7 @@ impl TraceLlm {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
         response_format: Option<CompletionResponseFormat>,
+        metadata: &std::collections::HashMap<String, String>,
     ) -> Result<TraceStep, LlmError> {
         // Capture the complete provider call atomically so concurrent calls
         // cannot associate one request's format with another request.
@@ -643,6 +656,7 @@ impl TraceLlm {
             messages: messages.to_vec(),
             tools: tools.map(|t| t.to_vec()),
             response_format,
+            metadata: metadata.clone(),
         });
 
         let last_user_content: Option<String> = messages
@@ -755,6 +769,7 @@ impl TraceLlm {
                 Some(ObservedToolResult {
                     tool_call_id,
                     content: parsed,
+                    structured_json_view: message.tool_result_structured_json_view,
                 })
             })
             .collect()
@@ -904,7 +919,12 @@ impl LlmProvider for TraceLlm {
         // return the next Text step, since in real usage the LLM would
         // produce text when no tools are offered.
         loop {
-            let step = self.next_step(&request.messages, None, request.response_format.clone())?;
+            let step = self.next_step(
+                &request.messages,
+                None,
+                request.response_format.clone(),
+                &request.metadata,
+            )?;
             match step.response {
                 TraceResponse::Text {
                     content,
@@ -955,6 +975,7 @@ impl LlmProvider for TraceLlm {
             &request.messages,
             Some(&request.tools),
             request.response_format.clone(),
+            &request.metadata,
         )?;
         match step.response {
             TraceResponse::Text {
@@ -1086,8 +1107,13 @@ mod prompt_cache_tests {
                         ChatMessage::user(tag.clone()),
                     ];
                     let tools = vec![tool(&tag, serde_json::json!({"type": "object"}))];
-                    llm.next_step(&messages, Some(&tools), None)
-                        .expect("concurrent trace step is available");
+                    llm.next_step(
+                        &messages,
+                        Some(&tools),
+                        None,
+                        &std::collections::HashMap::new(),
+                    )
+                    .expect("concurrent trace step is available");
                 })
             })
             .collect::<Vec<_>>();
@@ -1116,6 +1142,7 @@ mod prompt_cache_tests {
                 ],
                 Some(&stable_tools),
                 None,
+                &std::collections::HashMap::new(),
             )
             .expect("first trace step is available");
         sequential
@@ -1126,6 +1153,7 @@ mod prompt_cache_tests {
                 ],
                 Some(&stable_tools),
                 None,
+                &std::collections::HashMap::new(),
             )
             .expect("second trace step is available");
         assert_eq!(sequential.prompt_cache_prefix_churn().len(), 1);

@@ -34,11 +34,12 @@ use uuid::Uuid;
 
 use ironclaw_assistant::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
+    ApprovalNotificationBackfillProcessCommitObserver, ApprovalResolverPort,
+    ApprovalTurnRunLocator, AuthInteractionService, AuthNotificationBackfillProcessCommitObserver,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    RunOutcomeProcessCommitObserver, RunStateApprovalInteractionReadModel,
-    SuggestionsProcessCommitObserver,
+    ResourceBlockBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver,
+    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -652,6 +653,9 @@ pub struct RebornRuntime {
     pub(crate) session_channel_directory:
         Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
     pub(crate) session_channel_extension_id: Option<String>,
+    /// Boot-time reply-publication recovery sweep, owned so shutdown stops
+    /// it before releasing publication leases.
+    pub(crate) reply_publication_recovery: Option<tokio::task::JoinHandle<()>>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -664,7 +668,10 @@ pub struct RebornRuntime {
     pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
-    #[cfg(any(test, feature = "test-support"))]
+    /// The delivery coordinator (present exactly when channel egress is
+    /// configured). It owns reply publication; shutdown hands held
+    /// publication leases back so another publisher can resume open replies
+    /// at once.
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_assistant::DeliveryCoordinator>>,
     pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
@@ -1168,6 +1175,10 @@ impl RebornRuntime {
             .unwrap_or_default()
     }
 
+    /// The runtime's delivery coordinator. Tests only: an integration harness
+    /// that wires its own run-delivery observer shares it so one publication
+    /// owns each run's answer; production wiring receives the coordinator
+    /// through the factory, never through this accessor.
     #[cfg(any(test, feature = "test-support"))]
     pub fn delivery_coordinator(&self) -> Option<Arc<ironclaw_assistant::DeliveryCoordinator>> {
         self.delivery_coordinator.clone()
@@ -1183,6 +1194,7 @@ impl RebornRuntime {
             turn_coordinator,
             identity,
             run_delivery_settings,
+            reply_projection,
         } = wiring;
         let attachment_filesystem = self.read_write_workspace_filesystem()?;
         let inbound_attachments: Arc<dyn ironclaw_attachments::InboundAttachmentLander> =
@@ -1238,6 +1250,12 @@ impl RebornRuntime {
                     auth_flow_cancel: None,
                     run_delivery_settings,
                     admin_users,
+                    reply_projection,
+                    session_reply_channel: self
+                        .session_channel_extension_id
+                        .clone()
+                        .map(ironclaw_host_api::ids::ExtensionId::from_trusted),
+                    start_reply_publication: true,
                 },
             )
             .assembly,
@@ -1318,8 +1336,11 @@ impl RebornRuntime {
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
-            let continuation =
-                crate::factory::auth_continuation_dispatcher(turn_coordinator, Some(turn_state));
+            let continuation = crate::factory::auth_continuation_dispatcher(
+                turn_coordinator,
+                Some(turn_state),
+                Some(Arc::clone(&self.notification_inbox)),
+            );
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
                 .await
@@ -2515,6 +2536,17 @@ impl RebornRuntime {
             skill_learning_extraction_tasks.shutdown().await;
         }
         self.turn_scheduler.shutdown().await;
+        // Stop the boot-recovery sweep before its leases are released below.
+        if let Some(recovery) = self.reply_publication_recovery {
+            recovery.abort();
+            let _ = recovery.await; // silent-ok: an aborted join is Cancelled.
+        }
+        // Hand open reply publications back: their leases are released so
+        // a publisher on the next process (or another node) resumes them
+        // immediately instead of waiting for the lease to lapse.
+        if let Some(coordinator) = &self.delivery_coordinator {
+            coordinator.shutdown_reply_publication().await;
+        }
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
@@ -3269,12 +3301,44 @@ pub(crate) async fn build_runtime_with_resource_governor(
             reason: format!("suggestion generation observer wiring failed: {error}"),
         })?;
     processes
-        .subscribe_process_observer(Arc::new(RunOutcomeProcessCommitObserver::new(
-            Arc::clone(&services.notification_inbox),
-            Arc::clone(&thread_service),
-        )))
+        .subscribe_process_observer(Arc::new(
+            RunOutcomeProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&thread_service),
+            )
+            .with_process_journal_source(Arc::clone(&process_journal_source)),
+        ))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("run outcome notification observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(
+            AuthNotificationBackfillProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&process_journal_source),
+            ),
+        ))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("auth notification backfill observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(
+            ApprovalNotificationBackfillProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&thread_service),
+            ),
+        ))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("approval notification backfill observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&services.notification_inbox),
+            Arc::clone(&thread_service),
+            Arc::clone(&process_journal_source),
+        )))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("resource-block notification backfill wiring failed: {error}"),
         })?;
     let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
     let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (
@@ -3477,6 +3541,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(Arc::clone(&runtime_event_sink), milestone_scope),
     );
+    // One safe reply projection per runtime: the milestone sink composes
+    // every run's document into it, reply publication reads from it.
+    let reply_projection = Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new());
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
@@ -3493,6 +3560,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
+    // The authenticated-session channel's reply sink publishes reconciled
+    // reply revisions through the same live source the SSE/WebSocket
+    // transports tail. Bound here because the binary assembled the binding
+    // before this projection graph existed.
+    if let Some(sink) = services.projection_reply_sink.as_ref() {
+        _ = sink.bind_publisher(Arc::clone(&live_projection_publisher)); // first bind wins
+    }
     if let Some(skill_activation_source) = &skill_activation_source {
         skill_activation_source
             .set_activation_observer(
@@ -3520,12 +3594,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
             }
             _ => None,
         };
-    // Clone the live projection publisher for the skill-learning sink before
-    // the milestone-sink builder consumes the original by value.
-    let skill_learning_publisher = Arc::clone(&live_projection_publisher);
-    let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
-        durable_milestone_sink,
-        live_projection_publisher,
+    let skill_learning_publisher = live_projection_publisher;
+    // Live progress reaches the browser through reply publication: the
+    // milestone sink composes the safe reply document, and the
+    // authenticated-session channel's projection reply sink renders each
+    // revision as live projection items — the same path every channel uses.
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+        ironclaw_assistant::projection::reply::ReplyProjectionMilestoneSink::new(
+            durable_milestone_sink,
+            Arc::clone(&reply_projection),
+        ),
     );
     let diagnostic_store_impl =
         Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
@@ -3563,6 +3641,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Some(tool_diagnostic_sink),
             trigger_poller.enabled,
         )?;
+        _ = reply_projection.bind_display_previews(Arc::clone(&capability_host.display_previews));
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,
@@ -4213,6 +4292,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             services.product_auth.as_ref(),
             Arc::clone(&local_runtime.process_gate_query_source),
             Arc::clone(&planned_turn_coordinator),
+            Arc::clone(&services.notification_inbox),
         )
     } else {
         Arc::new(auth_interaction::UnavailableAuthInteractionService)
@@ -4241,15 +4321,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
     } else {
         projection_services
     };
-    if let Some(coordinator) = services.delivery_coordinator.as_ref() {
-        let bound = coordinator.bind_projection_stream(projection_services.product_event_stream());
-        if !bound {
-            tracing::debug!(
-                "delivery coordinator projection stream was already bound; keeping the first source"
-            );
-        }
-    }
-
     // Durable idempotency ledger for the authenticated-session inbound lane
     // (browser + API transports riding `submit_turn`): the session half of the
     // same durable-admission discipline the per-extension channel ledgers
@@ -4324,12 +4395,52 @@ pub(crate) async fn build_runtime_with_resource_governor(
             auth_challenges,
             outbound_delivery_targets: outbound_delivery_target_registry.as_ref(),
             local_runtime,
+            reply_projection: Arc::clone(&reply_projection),
         },
     )
     .await;
     let channel_workflow_factory = started_channel_host
         .as_ref()
         .map(|started| Arc::clone(&started.workflow_factory));
+    // A run's terminal commit resumes its publications: on this node a fast
+    // path to the durable terminal facts, on any other node the way an
+    // orphaned publication gets a worker again. The coordinator acknowledges
+    // the commit only after recovery ran, and the boot sweep below covers a
+    // crash that happened after an acknowledgement.
+    let mut reply_publication_recovery: Option<tokio::task::JoinHandle<()>> = None;
+    if let Some(coordinator) = services.delivery_coordinator.clone() {
+        processes
+            .subscribe_process_observer(Arc::clone(&coordinator)
+                as Arc<dyn ironclaw_processes::ProcessJournalCommitObserver>)
+            .map_err(|error| RebornRuntimeError::MalformedConfig {
+                reason: format!("reply publication observer wiring failed: {error}"),
+            })?;
+        let recovery_thread_id = ThreadId::new("reply-publication-recovery").map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("reply publication recovery thread id: {reason}"),
+            }
+        })?;
+        // `/outbound` is a per-user mount: the sweep must carry the deployment
+        // actor as owner; runs owned by other users resume via the journal.
+        let recovery_scope = TurnScope::new_with_owner(
+            thread_scope.tenant_id.clone(),
+            Some(thread_scope.agent_id.clone()),
+            thread_scope.project_id.clone(),
+            recovery_thread_id,
+            thread_scope.owner_user_id.clone(),
+        );
+        reply_publication_recovery = Some(tokio::spawn(async move {
+            match coordinator.resume_reply_publications(&recovery_scope).await {
+                Ok(resumed) if resumed > 0 => {
+                    tracing::debug!(resumed, "resumed open reply publications at boot")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "reply publication boot resume failed; open publications wait for the next terminal signal")
+                }
+            }
+        }));
+    }
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
     // Forward-migrate pre-removal routines that still carry a stored delivery
@@ -4350,23 +4461,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
         })?;
     }
 
-    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
-    // `trigger_conversation_pairing_value` are produced atomically inside
-    // a single `if trigger_poller.enabled` expression. Avoid a
-    // `let mut … = None` sentinel pattern flagged by code review
-    // (review f-ptr-3): the `let X;` deferred-init form is single-assign
-    // per branch and Rust's borrow checker prevents reads before init.
-    let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
-    let runtime_post_submit_hook_slot: Option<
-        Arc<
-            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
-        >,
-    >;
+    // `trigger_poller_handle` and the test-support
+    // `trigger_conversation_pairing_value` are produced from the same
+    // `trigger_poller.enabled` branch. Avoid a `let mut … = None` sentinel
+    // pattern flagged by code review (review f-ptr-3).
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
-    if trigger_poller.enabled {
+    let trigger_poller_handle: Option<TriggerPollerRuntimeHandle> = if trigger_poller.enabled {
         // Fire-time authorizer: an explicit override wins (tests/advanced),
         // otherwise build one from the deployment's `TriggerFireAccessPolicy`
         // (arch-simplification §4.4 — the former `local_trigger_access` store is
@@ -4454,8 +4557,53 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
         let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
-        runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
-        trigger_poller_handle = spawn_trigger_poller(
+        // Install the settlement hook before the poller task can observe a due
+        // fire. `tokio::spawn` may schedule on another runtime worker
+        // immediately, so late binding after `spawn_trigger_poller` creates a
+        // startup race. The observer still waits defensively for test/custom
+        // assembly seams, but production never needs an in-memory handoff.
+        // ONE background-run notifier for every channel extension, built by
+        // the SAME product-side workflow factory the channel host graphs are
+        // built by (§12.11 D-A). It decodes each stored notification target
+        // through the assembly's LIVE codec view, so a channel activated after
+        // boot still decodes its own targets. Channel egress stays optional.
+        let notifier = match (
+            channel_host_assembly.as_ref(),
+            channel_workflow_factory.as_ref(),
+        ) {
+            (Some(assembly), Some(workflow_factory)) => workflow_factory.background_run_notifier(
+                Arc::new(
+                ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
+                    Arc::clone(assembly),
+                ),
+                ),
+            ),
+            _ => None,
+        };
+        // Inbox publication must not depend on channel-host assembly. The
+        // durable store is a core runtime service, so install this publisher
+        // even in web-only/custom deployments with no channel egress.
+        let pre_submit_failure_notifier = Some(Arc::new(
+            ironclaw_assistant::PreSubmitFailureInboxNotifier::new(Arc::clone(
+                &services.notification_inbox,
+            )),
+        )
+            as Arc<dyn ironclaw_outbound::TriggeredRunDelivery>);
+        let generic_trigger_hook: Arc<
+            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
+        > = Arc::new(
+            ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+                notifier,
+                pre_submit_failure_notifier,
+                Arc::clone(&services.triggered_run_delivery),
+            ),
+        );
+        if hook_slot.set(generic_trigger_hook).is_err() {
+            tracing::debug!(
+                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
+            );
+        }
+        spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
                 repository: trigger_repository,
@@ -4468,51 +4616,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger poller could not be started: {error}"),
-        })?;
+        })?
     } else {
-        trigger_poller_handle = None;
-        runtime_post_submit_hook_slot = None;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
         }
-    }
-
-    // Generic triggered-run delivery (extension-runtime P6): one hook routes
-    // each settled trigger fire to the owning channel extension's driver via
-    // the assembly's vendor codecs.
-    if let (Some(slot), Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
-        runtime_post_submit_hook_slot.as_ref(),
-        channel_host_assembly.as_ref(),
-        channel_workflow_factory.as_ref(),
-        local_runtime,
-    ) {
-        let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-        // ONE background-run notifier for every channel extension, built by
-        // the SAME product-side workflow factory the channel host graphs are
-        // built by (§12.11 D-A). It decodes each stored notification target
-        // through the assembly's LIVE codec view, so a channel activated
-        // after boot still decodes its own targets.
-        let notifier = workflow_factory.background_run_notifier(Arc::new(
-            ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
-                Arc::clone(assembly),
-            ),
-        ));
-
-        let generic_trigger_hook: Arc<
-            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
-        > = Arc::new(
-            ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
-                notifier,
-                Arc::clone(triggered_run_delivery),
-            ),
-        );
-        if slot.set(generic_trigger_hook).is_err() {
-            tracing::debug!(
-                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
-            );
-        }
-    }
+        None
+    };
 
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
@@ -4677,6 +4788,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         session_inbound_ledger,
         session_channel_directory,
         session_channel_extension_id,
+        reply_publication_recovery,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
@@ -4690,7 +4802,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]
         delivered_gate_routes: services.delivered_gate_routes.clone(),
-        #[cfg(any(test, feature = "test-support"))]
         delivery_coordinator: services.delivery_coordinator.clone(),
         channel_facade_slot: services.channel_disconnect_slot.clone(),
         channel_config_service: services.channel_config_service.clone(),
@@ -4773,17 +4884,21 @@ pub(crate) async fn build_runtime_with_resource_governor(
 }
 
 /// Thin wrapper over
+type NotificationInbox = Arc<dyn ironclaw_notifications::NotificationInboxStorePort>;
+
 /// `build_webui_auth_interaction_service_with_turn_run_source` using
 /// `agent_turn_runtime` as the turn-run state source.
 fn build_webui_auth_interaction_service(
     product_auth: &RebornProductAuthServices,
     process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: NotificationInbox,
 ) -> Arc<dyn AuthInteractionService> {
     build_webui_auth_interaction_service_with_turn_run_source(
         product_auth,
         process_gate_query_source,
         turn_coordinator,
+        notification_inbox,
     )
 }
 
@@ -4796,6 +4911,7 @@ fn build_webui_auth_interaction_service_with_turn_run_source(
     product_auth: &RebornProductAuthServices,
     turn_run_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: NotificationInbox,
 ) -> Arc<dyn AuthInteractionService> {
     // `AuthFlowRecordSource` is optional on the product-auth bundle because
     // production may supply a durable read projection that is not the flow
@@ -4805,14 +4921,17 @@ fn build_webui_auth_interaction_service_with_turn_run_source(
     let Some(flow_records) = product_auth.flow_record_source() else {
         return Arc::new(auth_interaction::UnavailableAuthInteractionService);
     };
-    Arc::new(DefaultAuthInteractionService::new(
-        Arc::new(auth_interaction::ProcessGateAuthInteractionReadModel::new(
-            turn_run_source,
-            flow_records,
-        )),
-        product_auth.flow_manager(),
-        turn_coordinator,
-    ))
+    Arc::new(
+        DefaultAuthInteractionService::new(
+            Arc::new(auth_interaction::ProcessGateAuthInteractionReadModel::new(
+                turn_run_source,
+                flow_records,
+            )),
+            product_auth.flow_manager(),
+            turn_coordinator,
+        )
+        .with_notification_inbox(notification_inbox),
+    )
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";

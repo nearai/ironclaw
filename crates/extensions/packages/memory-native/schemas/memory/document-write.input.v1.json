@@ -16,6 +16,10 @@
       "description": "Append to existing content when true; replace when false",
       "default": true
     },
+    "expected_content_hash": {
+      "type": "string",
+      "description": "Optional content_hash from a prior read. Providers with conditional-write support return conflict instead of overwriting a document that changed; other providers treat this as best-effort."
+    },
     "metadata": {
       "type": "object",
       "description": "Optional document metadata such as skip_indexing or skip_versioning"

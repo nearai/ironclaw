@@ -1,8 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import type { VmComponentProps } from "../../../test-support/vm-module-harness";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -50,7 +50,7 @@ function collectRenderedText(root) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
@@ -59,16 +59,37 @@ function componentProps(node, component) {
   return props;
 }
 
+const MODEL_CAPABILITY_CONTEXT = {
+  ModelCapabilityBadges: "ModelCapabilityBadges",
+  modelCapabilityDescription: (entry) =>
+    entry?.input_modalities?.includes("text") ? "Text" : undefined,
+  modelCapabilities: (entry) =>
+    entry?.input_modalities?.includes("text") ? ["text"] : [],
+  modelEntryFor: (entries, model) =>
+    entries.find((entry) => entry.id === model) ?? null,
+  normalizeModelCatalog: (catalog) => ({
+    models: catalog.models || [],
+    modelEntries:
+      catalog.model_entries ||
+      (catalog.models || []).map((id) => ({
+        id,
+        input_modalities: [],
+        output_modalities: [],
+      })),
+  }),
+};
+
 test("model preference selector contains long model names inside its card", () => {
   const SelectMenu = "SelectMenu";
   const exports = runVmModuleForTest(
     "./user-model-preference-selector.tsx",
     ["UserModelPreferenceSelector"],
     {
+      ...MODEL_CAPABILITY_CONTEXT,
       Card: "Card",
       SelectMenu,
       html,
-      useT: () => (key, params = {}) =>
+      useT: () => (key, params: VmComponentProps = {}) =>
         key === "llm.followWorkspaceDefault"
           ? `Workspace default (${params.model})`
           : key,
@@ -77,6 +98,13 @@ test("model preference selector contains long model names inside its card", () =
           selection_enabled: true,
           workspace_default: "deepseek-ai/DeepSeek-V4-Flash-with-a-very-long-name",
           models: ["deepseek-ai/DeepSeek-V4-Flash-with-a-very-long-name"],
+          model_entries: [
+            {
+              id: "deepseek-ai/DeepSeek-V4-Flash-with-a-very-long-name",
+              input_modalities: ["text"],
+              output_modalities: ["text"],
+            },
+          ],
         },
         model: null,
         isLoading: false,
@@ -106,6 +134,8 @@ test("model preference selector contains long model names inside its card", () =
   assert.match(props.className, /\bmin-w-0\b/);
   assert.match(props.buttonClassName, /\boverflow-hidden\b/);
   assert.match(props.menuClassName, /\bw-full\b/);
+  assert.ok(props.options[0].adornment, "workspace default shows its capabilities");
+  assert.ok(props.options[1].adornment, "explicit model option shows its capabilities");
 });
 
 test("stale model preference can be reset when selection policy is unavailable", () => {
@@ -115,10 +145,11 @@ test("stale model preference can be reset when selection policy is unavailable",
     "./user-model-preference-selector.tsx",
     ["UserModelPreferenceSelector"],
     {
+      ...MODEL_CAPABILITY_CONTEXT,
       Card: "Card",
       SelectMenu,
       html,
-      useT: () => (key, params = {}) =>
+      useT: () => (key, params: VmComponentProps = {}) =>
         key === "llm.followWorkspaceDefault"
           ? `Workspace default (${params.model})`
           : key === "llm.unavailableModel"
@@ -170,6 +201,7 @@ test("model preference selector blocks writes when the preference read fails", (
     "./user-model-preference-selector.tsx",
     ["UserModelPreferenceSelector"],
     {
+      ...MODEL_CAPABILITY_CONTEXT,
       Card: "Card",
       SelectMenu,
       html,
@@ -230,6 +262,7 @@ for (const {
       "./user-model-preference-selector.tsx",
       ["UserModelPreferenceSelector"],
       {
+        ...MODEL_CAPABILITY_CONTEXT,
         ApiError: class ApiError extends Error {},
         Card: "Card",
         SelectMenu: "SelectMenu",

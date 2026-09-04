@@ -100,7 +100,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **62** group scenarios · **62** flat integration bins (55 in
+Totals: **62** group scenarios · **63** flat integration bins (56 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -222,21 +222,23 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (62)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (63)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
 **Chat & turn lifecycle**
 | Behavior | Evidence |
 |---|---|
-| A plain message gets a persisted reply through the whole real stack | `greeting.rs` |
+| Plain messages get persisted replies through the whole real stack while consecutive turns in one chat reuse one bounded pseudonymous provider cache key | `greeting.rs` |
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
-| Incremental compaction summaries preserve every disjoint compacted range while raw covered history remains stored | `model_recovery.rs::compaction_summary_chain_preserves_earlier_compacted_history` |
+| A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
+| Context overflow checkpoints one compact-and-resume attempt; a second overflow fails without another compaction or model observation | `model_recovery.rs::context_overflow_compacts_once_and_resumes`, `model_recovery.rs::second_context_overflow_fails_after_one_compaction` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
-| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
+| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs::{iteration_limit_warning_reaches_model_with_tools_and_recovers,repeated_call_warning_reaches_model_and_recovers,repeated_calls_after_warning_remain_advisory}` |
+| A repeated call with identical output gets one recovery warning and then terminates after a second no-progress strike; alternating signatures with identical output also terminate, while a fixed call whose output changes completes without no-progress termination | `terminal_warning.rs::{repeated_identical_call_terminates_as_no_progress_after_second_strike,alternating_signatures_with_byte_identical_outputs_terminate_as_no_progress,same_call_with_changing_output_completes_instead_of_terminating}` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
@@ -246,6 +248,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Re-driving background delivery after a scripted crash mid-append replays idempotently — exactly one transcript row and one queued attention outcome, never two | `subagent_await_edge.rs::background_delivery_replay_is_idempotent` |
 | A background result parked by the autonomous-wake streak cap (`AttentionDeferredStreakCap`) stays unclosed and immune to autonomous re-drive until a human-provenance run start sweeps, drains, and closes it | `subagent_await_edge.rs::streak_capped_result_waits_for_human` |
 | A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
+| A prepared-context run in the default unbound family receives the same two-strike identical-call/identical-output no-progress termination as an ordinary interactive run | `unbound_turns.rs::unbound_default_run_terminates_as_no_progress_after_second_strike` |
 
 **Suggestions**
 | Behavior | Evidence |
@@ -266,11 +269,14 @@ One thread, whole real turn. Grouped by what the user experiences.
 **Tools**
 | Behavior | Evidence |
 |---|---|
-| An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
+| An HTTP tool call reaches the real egress boundary, the result reaches the model, and all provider iterations retain one prompt cache key | `tool_call.rs`, `http_matcher.rs` |
+| Normalize a >100 KiB provider-heavy Gmail message into selected headers plus decoded safe Markdown before the same staged/durable result path, then round-trip it through `result_read` | `tool_call.rs::gmail_get_message_persists_semantic_markdown_without_provider_noise` |
+| Read GitHub file content as decoded UTF-8 instead of provider base64, then retrieve the saved result later through `result_read` | `tool_call.rs::github_file_content_decodes_before_the_durable_result_path` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
+| Inspect a >100 KiB nested JSON capability result through bounded first-look, node/scalar, collection, credential-redaction, invalid-selection, and exact legacy-byte views; a page budget too small to hold the selected node states the real reachable ceiling and echoes the offending budget instead of generic "go larger" text | `tool_call.rs::{result_read_large_nested_result_first_look_is_bounded_and_parseable,result_read_selects_nested_json_node_and_scalar,result_read_pages_nested_json_collection,result_read_redacts_credential_json_within_requested_budget,invalid_json_result_selections_remain_model_correctable,result_read_preserves_exact_legacy_byte_reads,result_read_undersized_json_budget_states_the_reachable_ceiling}` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
-| MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
+| MCP tools work over a real loopback HTTP server, and mixed text/structured/resource results are normalized before durable storage without retaining inline media/blob base64 | `mcp.rs` |
 | User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
@@ -280,6 +286,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
 | Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
+| Denying a parked client tool resumes through the coordinator without re-dispatching it, persists a model-visible denial, and still allows an unrelated capability to run | `external_tool_gate_denied_resume.rs` |
 | A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Uploaded DOCX files cannot be corrupted by raw text writes; structured DOCX/XLSX/PPTX edits produce new downloadable files without changing the originals; and HTML renders to a persisted PDF | `document_edit.rs` |
@@ -304,7 +311,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
-| An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
+| An outbound reply is published through the real inbound→outbound pipeline — Slack's lands on the native Agent stream (`chat.startStream`→`stopStream` with recipient/thread from the stored reply context), Telegram's as a terminal `sendMessage`; the answer never rides a coordinator send | `extension_delivery.rs` |
 | Pair a Telegram bot actor, run as that verified user, deliver anchored replies and busy notices, disconnect to revoke admission, then pair again to restore delivery (#6643/#6644) | `extension_delivery.rs::paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_revokes_admission` (production generated-code pairing, disconnect/repair, and anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | A notification inbox belongs to one recipient: knowing another user's notification id grants no read and no mutation | `notification_inbox_user_isolation.rs` |
@@ -337,13 +344,13 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 | A downloaded run artifact carries per-iteration model-call timing evidence for a completed run, and still carries durable per-message timestamps (with an explicit `run_not_resident` reason) when the process-local timing buffer was evicted or the process restarted | `run_artifact_timings.rs` |
 
-One of the 62 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 63 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |
 |---|---|
 | Ask in WebUI to be pinged on Slack and get a bot delivery with provider evidence | `webui_send_me_on_slack_delivers_via_bot_with_evidence` |
-| Ask from Slack for a Telegram delivery; ack lands in Slack, payload in Telegram | `slack_origin_delivers_to_telegram_and_acks_in_slack` |
+| Ask from Slack for a Telegram delivery; the payload lands in Telegram and the run's own reply is streamed back through Slack's native Agent surface (`chat.startStream` → `chat.stopStream`, never a plain post) — the reply-publication path every channel shares | `slack_origin_delivers_to_telegram_and_acks_in_slack` |
 | Never have the model deliver into the run's own conversation (lane 1 is automatic) | `deliver_to_origin_conversation_is_denied_and_model_replies` |
 | See per-call honest results when one of several deliveries fails | `partial_failure_reports_per_call_honestly` |
 | Get a refusal (no tool calls) for an undeliverable destination | `undeliverable_destination_is_refused_without_tool_calls` |
@@ -378,6 +385,7 @@ channel-delivery journeys (two-lane model):
 | Sub-agents spawn end-to-end | `reborn_subagent_spawn_e2e.rs` (5) |
 | The shipped Docker image has a usable runtime home and an in-worker public-key SSH shell | `dockerfile_runtime_home.rs` (21) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
+| See the answer's first text over SSE before the run completes — a live `text:` item streams ahead of the terminal event and the finalized item names the same run, and the first text update reaches the stream while the model is still producing (composed runtime, crate tier) | `crates/app/ironclaw_composition/tests/webui_v2_e2e.rs::{webui_v2_sse_streams_assistant_text_before_terminal_completion,webui_v2_sse_streams_first_assistant_text_update_before_model_completion}` |
 
 **Scope isolation parity** — one bin per boundary; each proves data from one scope is
 unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
@@ -468,6 +476,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Browse the registry, search, install, configure, remove and reinstall an extension | `test_reborn_webui_v2_legacy_extensions.py` (36), `test_extensions.py` (59), `test_wasm_lifecycle.py` (35) |
+| Configure a credential-backed extension and read setup and configured feedback in the light theme | `test_reborn_webui_v2_smoke.py::test_reborn_v2_extension_configure_uses_shared_form_and_feedback` |
 | Recover when the catalog fails, enrichment fails, install fails, or they're offline | `test_reborn_webui_v2_legacy_extensions.py` |
 | Fill in a configure modal (all field variants, https-only setup URLs, focus trapping, enter-to-submit) | `test_reborn_webui_v2_legacy_extensions.py`, `test_extensions.py` |
 | See the right button label for authed vs unauthed extensions (#2235) | `test_settings_extensions_labels.py` (5) |
@@ -505,6 +514,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
+| Fetch NEAR AI model capabilities, save only allowed model metadata, and retain exact Text/Image capability tags across Inference selectors and a page reload | `test_reborn_webui_v2_smoke.py::test_reborn_v2_model_capability_tags_persist_after_policy_reload` |
 | As an admin, publish the active provider's allowlist/default from Settings; then, as a non-admin member, choose a long-name allowed model, verify the selector stacks at narrow width and right-aligns at wide width without overflow, and have that preference reach future provider requests across chats without changing another member's workspace-default routing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_settings_model_preference_reaches_provider` |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3) |
@@ -517,7 +527,7 @@ entries.
 ### 6.8 APIs (OpenAI-compatible, filesystem, operator)
 | The user can… | Evidence |
 |---|---|
-| Use the Responses API (non-streaming, streaming SSE, continue, retrieve, context injection, auth/validation errors) | `test_reborn_responses_api.py` (14), `test_reborn_webui_v2_legacy_responses_api.py` (14), `test_responses_api.py` (9) |
+| Use the Responses API (non-streaming, streaming SSE, continue, retrieve, context injection, auth/validation errors, and successful external output round-tripping through `result_read`) | `test_reborn_responses_api.py` (15), `test_reborn_webui_v2_legacy_responses_api.py` (14), `test_responses_api.py` (9) |
 | Use chat-completions with idempotency replay and streaming | `test_reborn_responses_api.py` |
 | Mix internal and external tools in one response and get failures back to the LLM | `test_reborn_responses_api.py` |
 | List thread files and browse filesystem mounts, with path traversal rejected | `test_reborn_webui_v2_filesystem_api.py` (3) |

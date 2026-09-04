@@ -60,19 +60,23 @@ pub struct GenericTriggeredRunDeliveryHook {
     /// The single background-run notifier, built by the product-side workflow
     /// factory and supplied by composition (§12.11 D-A). `None` when the
     /// composed runtime has no delivery coordinator — accepted runs record a
-    /// `Failed` outcome and no-run failures remain visible in trigger history
-    /// while notification fails closed.
+    /// `Failed` outcome; no-run failures can still reach the independently
+    /// wired durable Inbox publisher below.
     notifier: Option<Arc<dyn TriggeredRunDelivery>>,
+    /// Durable Inbox publisher, wired independently from channel egress.
+    pre_submit_failure_notifier: Option<Arc<dyn TriggeredRunDelivery>>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
 impl GenericTriggeredRunDeliveryHook {
     pub fn new(
         notifier: Option<Arc<dyn TriggeredRunDelivery>>,
+        pre_submit_failure_notifier: Option<Arc<dyn TriggeredRunDelivery>>,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     ) -> Self {
         Self {
             notifier,
+            pre_submit_failure_notifier,
             delivery_store,
         }
     }
@@ -133,14 +137,14 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
     }
 
     async fn on_trigger_failed_before_submit(&self, event: TriggerFailedFireSettlement) {
-        let Some(notifier) = self.notifier.as_ref() else {
+        if self.notifier.is_none() && self.pre_submit_failure_notifier.is_none() {
             tracing::warn!(
                 target: "ironclaw::reborn::channel_triggered_delivery",
                 trigger_id = %event.fire.identity.trigger_id,
-                "background fire failure notification skipped: composed runtime has no delivery coordinator"
+                "background fire failure notification skipped: no notification destination is available"
             );
             return;
-        };
+        }
         let thread_id = match ThreadId::new(event.fire.identity.route_thread_id().as_str()) {
             Ok(thread_id) => thread_id,
             Err(error) => {
@@ -175,15 +179,27 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
             thread_id,
             Some(event.fire.creator_user_id.clone()),
         );
-        notifier
-            .on_trigger_failed_before_submit(TriggeredFireFailureDeliveryRequest {
-                scope,
-                creator_user_id: event.fire.creator_user_id.clone(),
-                project_scoped: event.fire.project_id.is_some(),
-                prompt: event.fire.prompt,
-                failure_ref,
-            })
-            .await;
+        let request = TriggeredFireFailureDeliveryRequest {
+            scope,
+            creator_user_id: event.fire.creator_user_id.clone(),
+            project_scoped: event.fire.project_id.is_some(),
+            prompt: event.fire.prompt,
+            failure_ref,
+        };
+        match (
+            self.pre_submit_failure_notifier.as_ref(),
+            self.notifier.as_ref(),
+        ) {
+            (Some(inbox), Some(channel)) => {
+                tokio::join!(
+                    inbox.on_trigger_failed_before_submit(request.clone()),
+                    channel.on_trigger_failed_before_submit(request),
+                );
+            }
+            (Some(inbox), None) => inbox.on_trigger_failed_before_submit(request).await,
+            (None, Some(channel)) => channel.on_trigger_failed_before_submit(request).await,
+            (None, None) => {}
+        }
     }
 }
 
@@ -209,5 +225,85 @@ impl ActivePreferenceTargetCodecs for AssemblyPreferenceTargetCodecs {
             .into_iter()
             .map(|(_, codec)| codec)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_triggers::{TriggerFireIdentity, TriggerId, TriggerPollerFailureReason};
+    use tokio::sync::Notify;
+
+    struct HangingFailureNotifier;
+
+    #[async_trait]
+    impl TriggeredRunDelivery for HangingFailureNotifier {
+        async fn on_trigger_submitted(&self, _request: TriggeredRunDeliveryRequest) {}
+
+        async fn on_trigger_failed_before_submit(
+            &self,
+            _request: TriggeredFireFailureDeliveryRequest,
+        ) {
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFailureNotifier {
+        called: Notify,
+    }
+
+    #[async_trait]
+    impl TriggeredRunDelivery for RecordingFailureNotifier {
+        async fn on_trigger_submitted(&self, _request: TriggeredRunDeliveryRequest) {}
+
+        async fn on_trigger_failed_before_submit(
+            &self,
+            _request: TriggeredFireFailureDeliveryRequest,
+        ) {
+            self.called.notify_one();
+        }
+    }
+
+    fn failed_settlement() -> TriggerFailedFireSettlement {
+        TriggerFailedFireSettlement {
+            fire: TriggerFire {
+                identity: TriggerFireIdentity::new(
+                    TenantId::new("triggered-hook-tenant").expect("tenant"),
+                    TriggerId::new(),
+                    chrono::Utc::now(),
+                ),
+                creator_user_id: UserId::new("triggered-hook-user").expect("user"),
+                agent_id: None,
+                project_id: None,
+                prompt: "scheduled report".to_string(),
+                execution_policy: None,
+            },
+            reason: TriggerPollerFailureReason::InvalidMaterialization,
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_inbox_notifier_does_not_delay_external_failure_delivery() {
+        let external = Arc::new(RecordingFailureNotifier::default());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+        let hook = GenericTriggeredRunDeliveryHook::new(
+            Some(Arc::clone(&external) as Arc<dyn TriggeredRunDelivery>),
+            Some(Arc::new(HangingFailureNotifier)),
+            store,
+        );
+
+        let task = tokio::spawn(async move {
+            hook.on_trigger_failed_before_submit(failed_settlement())
+                .await;
+        });
+        tokio::time::timeout(Duration::from_millis(100), external.called.notified())
+            .await
+            .expect("external delivery must start while Inbox publication is pending");
+        task.abort();
     }
 }

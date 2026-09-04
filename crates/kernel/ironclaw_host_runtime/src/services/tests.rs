@@ -1815,6 +1815,12 @@ fn stage_secret_error_maps_auth_and_backend_variants() {
             AuthRequired,
         ),
         (
+            SecretStoreError::SecretMaterialUnreadable {
+                reason: "wrong key".to_string(),
+            },
+            Backend,
+        ),
+        (
             SecretStoreError::BackendMisconfigured {
                 reason: "vault offline".to_string(),
             },

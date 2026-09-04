@@ -145,7 +145,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -176,16 +176,16 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: hooks-parity
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Saved from pushes to main only (merge_group saves land on a queue
+          # ref nothing else can restore; see reborn-tests.yml).
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # Full parity matrix across all three backends. Backend implementations
       # always compile; --features integration adds the multi-host adversarial
       # suite, and IRONCLAW_REQUIRE_POSTGRES=1 (set above) makes the Postgres
       # leg mandatory. The libSQL leg always runs (embedded temp-file).
       - name: Run hooks parity matrix + multi-host adversarial suite (all backends)
         run: |
-          timeout --signal=INT --kill-after=30s 15m \
+          timeout --signal=INT --kill-after=30s 25m \
             cargo test -p ironclaw_hooks \
               --features integration,test-support \
               --test parity_matrix \
@@ -280,9 +280,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Saved from pushes to main only (merge_group saves land on a queue
+          # ref nothing else can restore; see reborn-tests.yml).
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT

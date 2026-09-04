@@ -205,7 +205,6 @@ registerPack("hi", {
   "activity.separator": ", ",
   "tool.tabDetails": "विवरण",
   "tool.tabParameters": "पैरामीटर्स",
-  "tool.tabResult": "परिणाम",
   "tool.tabError": "Error",
   "tool.tabDeclined": "अस्वीकृत",
   "tool.noDetail": "कोई अतिरिक्त विवरण नहीं।",
@@ -382,6 +381,9 @@ registerPack("hi", {
   "llm.idTaken": "प्रदाता आईडी \"{id}\" पहले से ही उपयोग में है।",
   "llm.invalidId": "छोटे अक्षरों, संख्याओं, हाइफ़न या अंडरस्कोर का उपयोग करें।",
   "llm.model": "मॉडल",
+  "llm.capabilityText": "पाठ",
+  "llm.capabilityImageInput": "छवि इनपुट",
+  "llm.capabilityImageOutput": "छवि आउटपुट",
   "llm.modelPreference": "मॉडल प्राथमिकता",
   "llm.modelPreferenceDesc": "सभी वार्तालापों में भविष्य के संदेशों के लिए उपयोग किया जाता है।",
   "llm.catalogLoadFailed": "उपलब्ध मॉडल लोड नहीं किए जा सके।",
@@ -1191,6 +1193,7 @@ registerPack("hi", {
   "common.deleteChat": "चैट हटाएं",
   "chat.deleteFailed": "यह बातचीत हटाई नहीं जा सकी.",
   "chat.cancelFailed": "इस रन को रोका नहीं जा सका। यह अभी भी चल रहा हो सकता है। फिर से कोशिश करें।",
+  "chat.runStopped": "रोक दिया गया",
   "chat.deleteBusy": "चल रही बातचीत को हटाया नहीं जा सकता. पहले उसे रोकें, फिर दोबारा कोशिश करें.",
   "command.placeholder": "एक कमांड टाइप करें या खोजें...",
   "routine.searchPlaceholder": "रूटीन नाम, ट्रिगर, या क्रिया खोजें",
@@ -1400,7 +1403,6 @@ registerPack("hi", {
   "common.file": "फ़ाइल",
   "chat.previewAttachment": "{name} का प्रीव्यू",
   "chat.downloadAttachment": "{name} डाउनलोड करें",
-  "tool.resultAlt": "टूल परिणाम"
 });
 
 registerPack("hi", {

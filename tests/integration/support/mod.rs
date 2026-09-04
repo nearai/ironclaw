@@ -6,6 +6,7 @@ pub mod config;
 pub mod db_write_measurement;
 pub mod doubles;
 pub mod extension_surface;
+pub mod external_tool_factory;
 pub mod filesystem;
 pub mod github;
 pub mod golden;

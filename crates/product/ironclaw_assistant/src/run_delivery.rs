@@ -51,7 +51,6 @@ use ironclaw_product_contracts::prompt_source::{
 };
 
 use crate::ProductSurfaceFailure;
-use crate::ProjectFilesystemReader;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
@@ -63,10 +62,12 @@ mod gate_routes;
 mod inbox_gate_observer;
 pub mod notifications;
 mod observer;
+mod pre_submit_failure;
 pub(crate) mod prompts;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
+pub use pre_submit_failure::PreSubmitFailureInboxNotifier;
 pub use triggered::TriggeredRunDeliveryDriver;
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -138,15 +139,14 @@ pub struct RunDeliveryServices {
     /// Durable product-owned Inbox destination. `None` is allowed only for
     /// ingress-only/test graphs; production composition always supplies it.
     pub notification_inbox: Option<Arc<dyn NotificationInboxStorePort>>,
-    /// Canonical project-scoped reader used to materialize assistant-authored
-    /// `/workspace/...` references only after outbound policy approves the
-    /// delivery.
-    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// The owner-scoped outbound target catalog. The background-run notifier
     /// resolves the creator's stored notification-channel ids through it at
     /// fire time; a target that vanished since it was chosen simply drops out.
     pub delivery_targets: Arc<dyn OutboundDeliveryTargetProvider>,
-    /// The coordinator every send goes through (OUT-1: none bypasses).
+    /// The coordinator every send goes through (OUT-1: none bypasses). It
+    /// also owns the run's answer: the observer registers the originating
+    /// conversation as a reply publication target on it and never sends the
+    /// reply itself (design doc §6–§7).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the
     /// coordinator resolves the adapter + egress from the active snapshot by
@@ -224,8 +224,8 @@ pub enum RunDeliveryError {
     },
     #[error("run {run_id} did not finish before the delivery timeout")]
     RunWaitTimedOut { run_id: TurnRunId },
-    /// Timeout after at least one blocked-state notification (approval/auth
-    /// prompt) was already delivered. The user is not in silence, so no
+    /// Timeout after a blocked state was already surfaced through a channel
+    /// prompt or the durable WebUI Inbox. The user is not in silence, so no
     /// additional feedback message is needed.
     #[error("run {run_id} did not reach a terminal state after delivering a blocked notification")]
     RunWaitTimedOutAfterNotification { run_id: TurnRunId },
@@ -233,8 +233,8 @@ pub enum RunDeliveryError {
     InvalidProjectionRef { reason: String },
 }
 
-/// The last blocked state a watcher already notified about; a run returning
-/// to the same (status, gate) pair is not re-announced.
+/// The last blocked state a watcher already handled; a run returning to the
+/// same (status, gate) pair is not reprocessed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockedActionableMarker {
     pub(crate) status: TurnStatus,
@@ -252,6 +252,13 @@ pub(crate) fn blocked_status_notification_kind(status: TurnStatus) -> Option<Not
     }
 }
 
+pub(crate) fn blocked_status_notification(
+    state: &TurnRunState,
+) -> Option<(NotificationKind, &str)> {
+    let gate_ref = state.gate_ref.as_ref()?;
+    blocked_status_notification_kind(state.status).map(|kind| (kind, gate_ref.as_str()))
+}
+
 pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
     match state.status {
         TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
@@ -261,6 +268,16 @@ pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedA
                 .as_ref()
                 .map(|gate| gate.as_str().to_string()),
         }),
+        TurnStatus::BlockedResource => {
+            let gate_ref = state
+                .gate_ref
+                .as_ref()
+                .map(|gate| gate.as_str().to_string())?;
+            Some(BlockedActionableMarker {
+                status: state.status,
+                gate_ref: Some(gate_ref),
+            })
+        }
         _ => None,
     }
 }
@@ -284,7 +301,7 @@ pub(crate) async fn wait_for_actionable_state(
     scope: &TurnScope,
     run_id: TurnRunId,
     settings: &RunDeliverySettings,
-    delivered_blocked_marker: Option<&BlockedActionableMarker>,
+    observed_blocked_marker: Option<&BlockedActionableMarker>,
 ) -> Result<TurnRunState, RunDeliveryError> {
     let start = tokio::time::Instant::now();
     let mut poll_interval = settings.poll_interval;
@@ -299,7 +316,7 @@ pub(crate) async fn wait_for_actionable_state(
             return Ok(state);
         }
         if let Some(marker) = blocked_actionable_marker(&state)
-            && Some(&marker) != delivered_blocked_marker
+            && Some(&marker) != observed_blocked_marker
         {
             return Ok(state);
         }
@@ -413,7 +430,8 @@ pub(crate) fn turn_scope_from_thread_scope(
 
 impl RunDeliveryServices {
     /// Best-effort publication of bounded, metadata-only run state to the
-    /// authenticated WebUI Inbox. External channel delivery remains separate.
+    /// authenticated WebUI Inbox. Returns `true` only when the durable store
+    /// accepted the record. External channel delivery remains separate.
     pub(crate) async fn publish_inbox_notification(
         &self,
         user_id: &ironclaw_host_api::ids::UserId,
@@ -421,22 +439,22 @@ impl RunDeliveryServices {
         run_id: TurnRunId,
         kind: NotificationKind,
         lifecycle_ref: Option<&str>,
-    ) {
+    ) -> bool {
         let Some(inbox) = self.notification_inbox.as_ref() else {
-            return;
+            return false;
         };
         let notification_id = match run_notification_inbox_id(run_id, kind, lifecycle_ref) {
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(%error, %run_id, "invalid durable Inbox notification id");
-                return;
+                return false;
             }
         };
         let lifecycle_ref = match lifecycle_ref.map(LifecycleRef::new).transpose() {
             Ok(value) => value,
             Err(error) => {
                 tracing::warn!(%error, %run_id, "invalid durable Inbox lifecycle reference");
-                return;
+                return false;
             }
         };
         let severity = match kind {
@@ -456,7 +474,7 @@ impl RunDeliveryServices {
             | NotificationKind::AuthenticationRequired
             | NotificationKind::RunBlocked => NotificationInitialState::Open,
         };
-        if let Err(error) = inbox
+        match inbox
             .publish(PublishNotificationRequest {
                 id: notification_id,
                 recipient: NotificationRecipient {
@@ -466,9 +484,10 @@ impl RunDeliveryServices {
                 kind,
                 severity,
                 source: NotificationSource {
-                    thread_id: scope.thread_id.clone(),
+                    thread_id: Some(scope.thread_id.clone()),
                     turn_run_id: Some(run_id),
                     lifecycle_ref,
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread {
                     thread_id: scope.thread_id.clone(),
@@ -478,7 +497,11 @@ impl RunDeliveryServices {
             })
             .await
         {
-            tracing::warn!(%error, %run_id, "failed to publish durable Inbox notification");
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%error, %run_id, "failed to publish durable Inbox notification");
+                false
+            }
         }
     }
 

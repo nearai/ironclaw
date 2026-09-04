@@ -1,7 +1,8 @@
-// @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
+import { Input } from "../../../design-system/input";
 import { SkeletonList } from "../../../design-system/skeleton";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -25,20 +26,21 @@ import type { FocusTarget } from "../lib/focus-target";
 import { DeviceLinkPanel } from "../../../components/device-link-panel";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
-/**
- * @param {{
- *   extension: {
- *     displayName?: string;
- *     packageRef?: string | { id?: string };
- *     surfaces?: unknown[];
- *     channel?: unknown;
- *     installation_state?: string;
- *   };
- *   onClose: () => void;
- *   onSaved?: (result?: unknown) => void;
- *   returnFocusTo?: FocusTarget | null;
- * }} props
- */
+type ExtensionPackageRef = string | { id?: string };
+type ConfigureModalProps = {
+  extension: {
+    displayName?: string;
+    packageRef?: ExtensionPackageRef;
+    surfaces?: unknown[];
+    channel?: unknown;
+    installation_state?: string;
+  };
+  onClose: () => void;
+  onSaved?: (result?: unknown) => void;
+  returnFocusTo?: FocusTarget | null;
+  initialConnection?: "workspace_bot" | "personal_account" | null;
+};
+
 export function ConfigureModal({
   extension,
   onClose,
@@ -48,9 +50,14 @@ export function ConfigureModal({
   // the ceremony it named instead of the choice screen. `null` keeps the
   // choice screen, which is what the Configure button has always shown.
   initialConnection = null,
-}) {
+}: ConfigureModalProps) {
   const t = useT();
-  const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
+  const extensionName =
+    extension?.displayName ||
+    (typeof extension?.packageRef === "string"
+      ? extension.packageRef
+      : extension?.packageRef?.id) ||
+    t("extensions.defaultName");
   const {
     phase,
     blockers = [],
@@ -62,9 +69,13 @@ export function ConfigureModal({
     error,
   } =
     useExtensionSetup(extension?.packageRef);
-  const [values, setValues] = React.useState({});
-  const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
-  const [connectionChoice, setConnectionChoice] = React.useState(null);
+  const [values, setValues] = React.useState<Record<string, string>>({});
+  const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState<
+    "bearer" | "oauth" | "no_auth" | null
+  >(null);
+  const [connectionChoice, setConnectionChoice] = React.useState<
+    "workspace_bot" | "personal_account" | null
+  >(null);
   const [activeConnection, setActiveConnection] = React.useState(initialConnection);
   const queryClient = useQueryClient();
   const packageId =
@@ -120,7 +131,7 @@ export function ConfigureModal({
   );
 
   const handleSubmit = React.useCallback(() => {
-    const secretPayload = {};
+    const secretPayload: Record<string, string> = {};
     for (const [key, val] of Object.entries(values)) {
       const trimmed = (val || "").trim();
       if (trimmed) secretPayload[key] = trimmed;
@@ -338,15 +349,15 @@ export function ConfigureModal({
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <p className="text-sm text-red-200">
+        <InlineNotice tone="danger" role="alert">
           {t("extensions.loadFailed")} {error.message}
-        </p>
+        </InlineNotice>
       </ModalShell>
     );
   }
 
   if (hostedMcpAuthSelectionRequired) {
-    const authChoices = ["bearer", "oauth", "no_auth"];
+    const authChoices = ["bearer", "oauth", "no_auth"] as const;
     return (
       <ModalShell
         onClose={onClose}
@@ -375,9 +386,9 @@ export function ConfigureModal({
           ))}
         </fieldset>
         {hostedMcpAuthMutation.error && (
-          <div className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          <InlineNotice className="mt-4" tone="danger" role="alert">
             {hostedMcpAuthMutation.error.message}
-          </div>
+          </InlineNotice>
         )}
         <div className="mt-6 flex items-center justify-end gap-3">
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
@@ -402,9 +413,9 @@ export function ConfigureModal({
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <SetupReadiness phase={phase} blockers={readinessBlockers} />
-        <p className="text-sm text-iron-300">
+        <InlineNotice tone="info" role="status">
           {t("extensions.noConfigRequired")}
-        </p>
+        </InlineNotice>
       </ModalShell>
     );
   }
@@ -481,9 +492,10 @@ export function ConfigureModal({
                   )
                 : (
               <>
-              <input
+              <Input
                 id={`extension-secret-${secret.name}`}
                 type="password"
+                size="sm"
                 placeholder={secret.provided
                   ? t("extensions.keepSecretPlaceholder")
                   : ""}
@@ -496,7 +508,6 @@ export function ConfigureModal({
                   }));
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
               />
               {secret.auto_generate &&
               !secret.provided &&
@@ -520,46 +531,36 @@ export function ConfigureModal({
       )}
       {isActive &&
       (
-        <div
-          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
-        >
+        <InlineNotice className="mt-4" tone="success" role="status">
           {t("extensions.activeConfigured")}
-        </div>
+        </InlineNotice>
       )}
       {submitMutation.error &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {submitMutation.error.message}
-        </div>
+        </InlineNotice>
       )}
       {oauthMutation.error &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {oauthMutation.error.message}
-        </div>
+        </InlineNotice>
       )}
       {!oauthMutation.error &&
       oauthMutation.authError &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {oauthMutation.authError}
-        </div>
+        </InlineNotice>
       )}
       {!oauthMutation.error &&
       !oauthMutation.authError &&
       popupBlockedError &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {popupBlockedError}
-        </div>
+        </InlineNotice>
       )}
 
       <div className="mt-6 flex items-center justify-end gap-3">
@@ -585,24 +586,26 @@ function SetupReadiness({ phase, blockers = [] }) {
   return (
     <div className="mb-4 space-y-2">
       {phase && (
-        <p className="text-xs text-iron-400">
+        <InlineNotice
+          tone={phase === "active" ? "success" : "info"}
+          role="status"
+        >
           {t("extensions.setupPhaseLabel")} {t(setupPhaseKey(phase))}
-        </p>
+        </InlineNotice>
       )}
       {blockers.length > 0 && (
-        <div
-          role="status"
-          className="rounded-md border border-amber-300/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100"
-        >
-          <p className="font-medium">{t("extensions.configurationRequired")}</p>
-          <ul className="mt-1 list-disc space-y-1 pl-4">
-            {blockers.map((blocker, index) => (
-              <li key={`${blocker?.kind || "unknown"}-${index}`}>
-                {t(setupBlockerKey(blocker?.kind))}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <InlineNotice tone="warning" role="status">
+          <>
+            <p className="font-medium">{t("extensions.configurationRequired")}</p>
+            <ul className="mt-1 list-disc space-y-1 pl-4">
+              {blockers.map((blocker, index) => (
+                <li key={`${blocker?.kind || "unknown"}-${index}`}>
+                  {t(setupBlockerKey(blocker?.kind))}
+                </li>
+              ))}
+            </ul>
+          </>
+        </InlineNotice>
       )}
     </div>
   );
@@ -612,12 +615,9 @@ function AdminSetupFieldsNotice({ required }) {
   const t = useT();
   if (!required) return null;
   return (
-    <div
-      role="status"
-      className="mb-4 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs text-iron-300"
-    >
+    <InlineNotice className="mb-4" tone="info" role="status">
       {t("extensions.setupFieldsAdminRequired")}
-    </div>
+    </InlineNotice>
   );
 }
 
@@ -667,7 +667,7 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex^='-'])",
 ].join(",");
 
-function isVisible(element) {
+function isVisible(element: HTMLElement) {
   if (typeof element.checkVisibility === "function") {
     return element.checkVisibility({
       checkOpacity: true,
@@ -684,9 +684,9 @@ function isVisible(element) {
   );
 }
 
-function focusableElements(container) {
+function focusableElements(container: HTMLElement | null) {
   if (!container) return [];
-  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (element) =>
       element.tabIndex >= 0 &&
       !element.hidden &&
@@ -706,7 +706,7 @@ function focusableElements(container) {
 function ModalShell({ onClose, returnFocusTo, title, children }) {
   const t = useT();
   const titleId = React.useId();
-  const dialogRef = React.useRef(null);
+  const dialogRef = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => {
     const returnTarget = returnFocusTo || document.activeElement;
     const dialog = dialogRef.current;

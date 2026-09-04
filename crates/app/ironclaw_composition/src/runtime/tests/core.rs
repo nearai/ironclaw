@@ -1034,6 +1034,7 @@ async fn standalone_cli_send_uses_saved_user_model_preference() {
                     "workspace-default".to_string(),
                     "preferred-model".to_string(),
                 ],
+                model_entries: Some(Vec::new()),
             },
         )
         .await
@@ -2024,6 +2025,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        thread_id: None,
         tool_choice: None,
         response_format: None,
     }
@@ -2267,6 +2269,7 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,
@@ -2334,6 +2337,7 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,
@@ -2445,6 +2449,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,
@@ -2596,6 +2601,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,
@@ -2729,6 +2735,7 @@ async fn wrap_swappable_gateway_applies_provider_factory() {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,
@@ -2836,6 +2843,7 @@ fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,
@@ -6066,12 +6074,13 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
                 kind: ironclaw_notifications::NotificationKind::ApprovalRequired,
                 severity: ironclaw_notifications::NotificationSeverity::Warning,
                 source: ironclaw_notifications::NotificationSource {
-                    thread_id: thread_id.clone(),
+                    thread_id: Some(thread_id.clone()),
                     turn_run_id: Some(turn_run_id),
                     lifecycle_ref: Some(
                         ironclaw_notifications::LifecycleRef::new("runtime-notification-gate")
                             .expect("lifecycle ref"),
                     ),
+                    credential_providers: Vec::new(),
                 },
                 action: ironclaw_notifications::NotificationAction::OpenThread { thread_id },
                 initial_state: ironclaw_notifications::NotificationInitialState::Open,
@@ -6257,8 +6266,8 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
             .notification_inbox
             .list(ironclaw_notifications::ListNotificationsRequest {
                 recipient: ironclaw_notifications::NotificationRecipient {
-                    tenant_id: caller.tenant_id,
-                    user_id: caller.user_id,
+                    tenant_id: caller.tenant_id.clone(),
+                    user_id: caller.user_id.clone(),
                 },
                 limit: 10,
                 cursor: None,
@@ -6271,10 +6280,276 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
     assert_eq!(persisted.notifications.len(), 1);
     assert!(persisted.notifications[0].read_at.is_some());
     assert!(persisted.notifications[0].archived_at.is_some());
+
+    let fire_identity = ironclaw_triggers::TriggerFireIdentity::new(
+        caller.tenant_id.clone(),
+        ironclaw_triggers::TriggerId::new(),
+        Utc::now(),
+    );
+    let route_thread_id = fire_identity.route_thread_id().as_str().to_string();
+    let settlement = ironclaw_triggers::TriggerFailedFireSettlement {
+        fire: ironclaw_triggers::TriggerFire {
+            identity: fire_identity,
+            creator_user_id: caller.user_id.clone(),
+            agent_id: caller.agent_id.clone(),
+            project_id: None,
+            prompt: "scheduled report".to_string(),
+            execution_policy: None,
+        },
+        reason: ironclaw_triggers::TriggerPollerFailureReason::InvalidMaterialization,
+    };
+    let hook =
+        ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+            None,
+            Some(Arc::new(
+                ironclaw_assistant::PreSubmitFailureInboxNotifier::new(Arc::clone(
+                    &reopened.notification_inbox,
+                )),
+            )),
+            reopened
+                .triggered_run_delivery_store_for_test()
+                .expect("triggered delivery store"),
+        );
+    ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook::on_trigger_failed_before_submit(
+        &hook,
+        settlement,
+    )
+    .await;
+
+    let reopened_bundle = reopened.product_surface(None).expect("product surface");
+    let failure_page = query_product_surface_page(
+        reopened_bundle.as_ref(),
+        caller,
+        RebornViewQuery {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            params: serde_json::json!({ "limit": 10 }),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("list settled pre-submit failure");
+    let failure = failure_page
+        .payload
+        .get("notifications")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|notifications| notifications.first())
+        .expect("pre-submit failure notification");
+    assert_eq!(failure["action"]["kind"], "none");
+    assert!(
+        failure["thread_id"].is_null(),
+        "a fire that failed before submission has no canonical thread"
+    );
+    assert!(
+        !failure.to_string().contains(&route_thread_id),
+        "the trigger route key must not escape as a canonical thread identity"
+    );
+    drop(reopened_bundle);
     tokio::time::timeout(RUNTIME_SEND_TIMEOUT, reopened.shutdown())
         .await
         .expect("reopened runtime shutdown does not time out")
         .expect("reopened runtime shuts down");
+}
+
+#[tokio::test]
+async fn runtime_replay_resolves_historical_terminal_approval_notification() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+    let gateway: Arc<dyn HostManagedModelGateway> = Arc::new(RecordingGateway {
+        reply: "historical approval replay".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let runtime_input = || {
+        RebornRuntimeInput::from_build_input(
+            crate::deployment::local_filesystem_build_input(
+                "runtime-approval-replay-owner",
+                storage_root.clone(),
+            )
+            .with_runtime_policy(standalone_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-approval-replay-tenant".to_string(),
+            agent_id: "runtime-approval-replay-agent".to_string(),
+            source_binding_id: "runtime-approval-replay-source".to_string(),
+            reply_target_binding_id: "runtime-approval-replay-reply".to_string(),
+        })
+        .with_model_gateway_override(Arc::clone(&gateway))
+    };
+    let seed_runtime = tokio::time::timeout(
+        PRODUCTION_SHAPED_BUILD_TIMEOUT,
+        build_reborn_runtime(runtime_input()),
+    )
+    .await
+    .expect("seed runtime build does not time out")
+    .expect("seed runtime builds");
+    let filesystem = Arc::clone(&seed_runtime.extension_filesystem);
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, seed_runtime.shutdown())
+        .await
+        .expect("seed runtime shutdown does not time out")
+        .expect("seed runtime shuts down");
+
+    let tenant_id = TenantId::new("runtime-approval-replay-tenant").expect("tenant");
+    let user_id = UserId::new("runtime-approval-replay-owner").expect("user");
+    let agent_id = AgentId::new("runtime-approval-replay-agent").expect("agent");
+    let thread_id = ThreadId::new("runtime-approval-replay-thread").expect("thread");
+    let run_id = TurnRunId::new();
+    let recipient = ironclaw_notifications::NotificationRecipient {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+    };
+    let seeded_inbox =
+        crate::notification_store_assembly::build_notification_inbox(Arc::clone(&filesystem));
+    seeded_inbox
+        .publish(ironclaw_notifications::PublishNotificationRequest {
+            id: ironclaw_notifications::NotificationId::new("runtime-approval-replay-notification")
+                .expect("notification id"),
+            recipient: recipient.clone(),
+            kind: ironclaw_notifications::NotificationKind::ApprovalRequired,
+            severity: ironclaw_notifications::NotificationSeverity::Warning,
+            source: ironclaw_notifications::NotificationSource {
+                thread_id: Some(thread_id.clone()),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(
+                    ironclaw_notifications::LifecycleRef::new("gate:runtime-approval-replay")
+                        .expect("approval lifecycle ref"),
+                ),
+                credential_providers: Vec::new(),
+            },
+            action: ironclaw_notifications::NotificationAction::OpenThread {
+                thread_id: thread_id.clone(),
+            },
+            initial_state: ironclaw_notifications::NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed unresolved approval notification");
+
+    let process_store = ironclaw_processes::ProcessJournalStore::new(
+        crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
+    );
+    let process_id = ironclaw_host_api::ids::ProcessId::from_uuid(run_id.as_uuid());
+    let process_scope = ResourceScope {
+        tenant_id,
+        user_id: user_id.clone(),
+        agent_id: Some(agent_id),
+        project_id: None,
+        mission_id: None,
+        thread_id: Some(thread_id),
+        invocation_id: InvocationId::new(),
+    };
+    ironclaw_processes::ProcessSubmissionPort::submit_process(
+        &process_store,
+        ironclaw_processes::SubmitProcessRequest {
+            process_id,
+            process_kind: ironclaw_processes::ProcessKind::AgentTurn,
+            scope: process_scope.clone(),
+            exclusive_within_scope: true,
+            operation_id: None,
+            owner_user_id: Some(user_id),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::json!({
+                "agent_turn": {
+                    "product_context": {
+                        "origin": "scheduled_trigger"
+                    }
+                }
+            }),
+        },
+    )
+    .await
+    .expect("seed historical process submission");
+    let claimed = ironclaw_processes::ProcessTransitionPort::claim_next_processes(
+        &process_store,
+        ironclaw_processes::ClaimProcessesRequest {
+            worker_id: ironclaw_processes::ProcessWorkerId::from_trusted(
+                "runtime-approval-replay-worker",
+            ),
+            scope_filter: Some(process_scope),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ironclaw_processes::ProcessKind::AgentTurn),
+            max_processes: 1,
+        },
+    )
+    .await
+    .expect("claim historical process")
+    .pop()
+    .expect("historical process is claimable");
+    ironclaw_processes::ProcessTransitionPort::fail_process(
+        &process_store,
+        ironclaw_processes::FailProcessRequest {
+            process_id,
+            worker_id: claimed.worker_id,
+            lease_token: claimed.lease_token,
+            failure: ironclaw_host_api::turn::SanitizedFailure::from_trusted_static(
+                "historical_runtime_failure",
+            ),
+            recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
+            checkpoint_ref: None,
+            metadata: None,
+        },
+    )
+    .await
+    .expect("seed historical terminal process commit");
+    let unresolved = seeded_inbox
+        .list(ironclaw_notifications::ListNotificationsRequest {
+            recipient: recipient.clone(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list seeded approval notification");
+    assert_eq!(unresolved.notifications.len(), 1);
+    assert!(unresolved.notifications[0].resolved_at.is_none());
+    drop(process_store);
+    drop(seeded_inbox);
+    drop(filesystem);
+
+    let replay_runtime = tokio::time::timeout(
+        PRODUCTION_SHAPED_BUILD_TIMEOUT,
+        build_reborn_runtime(runtime_input()),
+    )
+    .await
+    .expect("replay runtime build does not time out")
+    .expect("replay runtime builds");
+    tokio::time::timeout(RUNTIME_POLL_TIMEOUT, async {
+        loop {
+            let page = replay_runtime
+                .notification_inbox
+                .list(ironclaw_notifications::ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: 10,
+                    cursor: None,
+                    include_archived: true,
+                })
+                .await
+                .expect("list replayed approval notification");
+            if page
+                .notifications
+                .iter()
+                .find(|notification| {
+                    notification.kind == ironclaw_notifications::NotificationKind::ApprovalRequired
+                        && notification.source.turn_run_id == Some(run_id)
+                })
+                .is_some_and(|notification| notification.resolved_at.is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("composition replay resolves the historical approval notification");
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, replay_runtime.shutdown())
+        .await
+        .expect("replay runtime shutdown does not time out")
+        .expect("replay runtime shuts down");
 }
 
 async fn stream_product_events(

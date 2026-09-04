@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 function registryTabSourceForTest() {
   const source = readFileSync(new URL("./registry-tab.tsx", import.meta.url), "utf8");
@@ -22,9 +23,9 @@ function registryTabSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { RegistryTab };`;
 }
 
-function renderRegistryTab(props, filter = "") {
+function renderRegistryTab(props, filter = ""): DynamicTestOptions {
   const filterUpdates = [];
-  const context = {
+  const context: vm.Context = {
     ExtensionCard() {},
     Panel() {},
     RegistryCard() {},

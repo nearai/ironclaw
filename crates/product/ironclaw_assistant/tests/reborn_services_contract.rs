@@ -9360,7 +9360,7 @@ async fn thread_artifact_projects_messages_from_the_bounded_snapshot() {
         bounded_requests[0].max_messages,
         THREAD_ARTIFACT_MAX_MESSAGES
     );
-    assert_eq!(bounded_requests[0].max_bytes, 16 * 1024 * 1024);
+    assert_eq!(bounded_requests[0].max_bytes, 64 * 1024 * 1024);
 }
 
 #[tokio::test]
@@ -9411,6 +9411,57 @@ async fn thread_artifact_accepts_more_than_one_thousand_small_messages() {
         serde_json::from_value(page.payload).expect("artifact payload");
 
     assert_eq!(artifact.messages.len(), 1_001);
+}
+
+#[tokio::test]
+async fn thread_artifact_accepts_tool_heavy_trajectory_over_old_byte_limits() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact-tool-heavy").expect("thread id");
+    let run_id = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let tool_payload = "x".repeat(44 * 1024);
+    for sequence in 0..573 {
+        seed_submitted_message(
+            &thread_service,
+            &thread_scope,
+            &thread_id,
+            &run_id,
+            &format!("tool result {sequence}: {tool_payload}"),
+        )
+        .await;
+    }
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("a tool-heavy trajectory within the raised byte limits must export");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.messages.len(), 573);
 }
 
 #[tokio::test]
@@ -11256,6 +11307,7 @@ impl Default for SetupRecordingLlmConfigService {
                 selection_enabled: true,
                 workspace_default: Some("model-a".to_string()),
                 models: vec!["model-a".to_string(), "model-b".to_string()],
+                model_entries: Vec::new(),
             }),
             user_model_preferences: Mutex::new(HashMap::new()),
             user_model_preference_updates: Mutex::new(Vec::new()),
@@ -11463,6 +11515,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         Ok(LlmModelsResult {
             ok: true,
             models: vec!["model-a".to_string()],
+            model_entries: Vec::new(),
             message: String::new(),
         })
     }
@@ -14669,9 +14722,10 @@ async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
             kind: NotificationKind::ApprovalRequired,
             severity: NotificationSeverity::Warning,
             source: NotificationSource {
-                thread_id: thread_id.clone(),
+                thread_id: Some(thread_id.clone()),
                 turn_run_id: None,
                 lifecycle_ref: None,
+                credential_providers: Vec::new(),
             },
             action: NotificationAction::OpenThread { thread_id },
             initial_state: NotificationInitialState::Open,
@@ -15125,7 +15179,7 @@ async fn notifications_backfill_open_legacy_automation_approval_once() {
         "the migration must use the producer's stable id so normal gate resolution settles it",
     );
     assert_eq!(notification.kind, ProductNotificationKind::ApprovalRequired);
-    assert_eq!(notification.thread_id, thread_id.to_string());
+    assert_eq!(notification.thread_id, Some(thread_id.to_string()));
     assert_eq!(notification.turn_run_id, Some(run_id.to_string()));
     assert!(notification.read_at.is_none());
     assert!(notification.resolved_at.is_none());
@@ -15227,9 +15281,10 @@ async fn notification_list_survives_a_failed_legacy_approval_backfill_once() {
             kind: NotificationKind::RunCompleted,
             severity: NotificationSeverity::Success,
             source: NotificationSource {
-                thread_id: thread_id.clone(),
+                thread_id: Some(thread_id.clone()),
                 turn_run_id: None,
                 lifecycle_ref: None,
+                credential_providers: Vec::new(),
             },
             action: NotificationAction::OpenThread { thread_id },
             initial_state: NotificationInitialState::Resolved,
@@ -17882,6 +17937,7 @@ async fn member_model_status_marks_a_stale_preference_unavailable() {
         selection_enabled: true,
         workspace_default: Some("model-a".to_string()),
         models: vec!["model-a".to_string()],
+        model_entries: Vec::new(),
     });
 
     let view =

@@ -45,6 +45,7 @@ use crate::latency::{
 };
 
 mod calendar_list_events;
+mod gmail_message;
 
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
@@ -491,9 +492,10 @@ impl GsuiteExecutor {
             }
         };
         let shape_output_started_at = gsuite_latency_started_at();
-        let output = match response_output(&response) {
+        let output = match response_output(capability.operation, &response).await {
             Ok(output) => output,
             Err(error) => {
+                let error = add_network_usage(error, network_egress_bytes);
                 trace_gsuite_latency_error(
                     "shape_output",
                     latency_fields.as_ref(),
@@ -810,10 +812,21 @@ async fn execute_runtime_http(
         .map_err(map_egress_error)
 }
 
-fn response_output(
+async fn response_output(
+    operation: GsuiteCapabilityOperation,
     response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
 ) -> Result<Value, GsuiteDispatchError> {
-    let body = response_body_json(response)?;
+    let mut body = response_body_json(response)?;
+    if (200..300).contains(&response.status)
+        && operation == GsuiteCapabilityOperation::GmailGetMessage
+    {
+        body = tokio::task::spawn_blocking(move || gmail_message::normalize(body))
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Gmail response normalization task failed");
+                GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            })??;
+    }
     Ok(json!({
         "status": response.status,
         "body": body,

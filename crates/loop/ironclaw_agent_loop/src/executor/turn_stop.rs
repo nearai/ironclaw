@@ -1,13 +1,16 @@
 use async_trait::async_trait;
-use ironclaw_loop_contracts::LoopExit;
+use ironclaw_loop_contracts::{AgentLoopDriverHost, LoopExit};
 use tracing::debug;
 
 use crate::{
     state::{BoundedRing, LoopExecutionState, TerminalWarningObservation},
-    strategies::{StopKind, StopOutcome, TurnSummary},
+    strategies::{RepeatedOutputProgressStrategy, StopKind, StopOutcome, TurnSummary},
 };
 
-use super::{AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext};
+use super::{
+    AgentLoopExecutorError, COMPLETION_NUDGE_LIMIT, CancelCheck, CheckpointStage, ExecutorStage,
+    StageContext, scheduled_trigger_run,
+};
 
 /// Stop-stage helper for callers that can observe and decide back-to-back.
 ///
@@ -81,6 +84,44 @@ impl ExecutorStage<StopInput> for StopStage {
 }
 
 impl StopStage {
+    /// Apply the fresh prepared-turn completion transition after the stop
+    /// strategy has decided. Resume and `SkipModel` callers intentionally do
+    /// not use this entry point.
+    pub(super) fn apply_fresh_completion_nudge(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        step: StopStep,
+    ) -> StopStep {
+        let StopStep::Stop {
+            state: mut stop_state,
+            kind,
+        } = step
+        else {
+            return step;
+        };
+        if !completion_nudge_should_fire(host, &stop_state, &kind) {
+            return StopStep::Stop {
+                state: stop_state,
+                kind,
+            };
+        }
+
+        // Re-enter the loop with the full tool surface and a completion
+        // directive, mirroring a drained-follow-up continuation.
+        stop_state.completion_nudges_used += 1;
+        stop_state.completion_nudge_pending = true;
+        stop_state.last_reply_trailed_off = false;
+        stop_state.last_reply_empty = false;
+        stop_state.last_reply_ended_with_question = false;
+        debug!(
+            iteration = stop_state.iteration,
+            ?kind,
+            completion_nudges_used = stop_state.completion_nudges_used,
+            "agent loop issuing tools-capable completion nudge instead of stopping"
+        );
+        StopStep::Continue { state: stop_state }
+    }
+
     pub(super) async fn observe(
         &self,
         ctx: StageContext<'_>,
@@ -143,16 +184,52 @@ impl StopStage {
     }
 }
 
-/// Convert an explicit strategy's first no-progress terminal into one normal
-/// loop iteration with typed model-visible recovery context. The default stop
-/// strategy does not emit this terminal; its repeated-call signal is advisory.
+/// Decide whether a fresh-turn stop should become one more tools-capable
+/// completion iteration. Driver nudges are opt-in and capped; graceful stops
+/// are nudged only for an unfinished reply (or an unattended scheduled-run
+/// question), while no-progress failures and aborts remain terminal.
+fn completion_nudge_should_fire(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &LoopExecutionState,
+    kind: &StopKind,
+) -> bool {
+    if !host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+        || state.completion_nudges_used >= COMPLETION_NUDGE_LIMIT
+    {
+        return false;
+    }
+    match kind {
+        StopKind::NoProgressDetected => false,
+        StopKind::GracefulStop => {
+            state.last_reply_trailed_off
+                || (scheduled_trigger_run(host) && state.last_reply_ended_with_question)
+        }
+        StopKind::Aborted(_) => false,
+    }
+}
+
+/// Convert a strategy's first no-progress terminal into one normal loop
+/// iteration with typed model-visible recovery context — for an explicit
+/// non-default strategy AND for the default strategy's own windowed
+/// output-repetition check (strategies/stop.rs's
+/// `DefaultStopConditionStrategy::should_stop_after_observed_turn`). The
+/// default strategy's separate CONSECUTIVE-call advisory renders through a
+/// different path and never emits this `StopKind` on its own.
 fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind) -> bool {
     if !matches!(kind, StopKind::NoProgressDetected) {
         return false;
     }
-    let repeated_call_count = state
-        .recent_call_signatures
-        .most_common_count_in(8)
+    // Same window the stop strategy used to trigger this path
+    // (`RepeatedOutputProgressStrategy`, strategies/progress.rs) — the digest
+    // ring, not the bare call-signature ring, since the terminating check
+    // dominates on (signature, output_digest) pairs and can trip on an
+    // alternating call-signature sequence.
+    let repeated_call_count = RepeatedOutputProgressStrategy::default()
+        .dominant_repeated_output_count(&state.seen_capability_output_digests)
         .min(u32::MAX as usize) as u32;
     let repeated_call_count = (repeated_call_count > 1).then_some(repeated_call_count);
     let last_failure = state.recent_failure_kinds.iter().next_back().copied();
@@ -167,6 +244,7 @@ fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind)
     }
 
     state.recent_call_signatures = BoundedRing::new();
+    state.seen_capability_output_digests = BoundedRing::new();
     state.recent_output_token_counts = BoundedRing::new();
     state.stop_state.trailing_no_progress_results = 0;
     state.stop_state.repeated_call_warning = None;

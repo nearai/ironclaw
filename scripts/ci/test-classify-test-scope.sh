@@ -207,14 +207,6 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "reborn group test runner script" \
-  "scripts/ci/run-reborn-group-tests.sh" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
-
-assert_scope \
   "reborn root tests and support" \
   "tests/reborn_qa_smoke_scenarios_e2e.rs
 tests/integration/support/harness/mod.rs
@@ -479,6 +471,15 @@ assert_scope \
   "WS12 contract modules split into scripts/ci/lib stay reborn-scoped" \
   "scripts/ci/lib/rust_toolchain_contracts.py
 scripts/ci/lib/workflow_text.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "integration inventory authority is integration-test scoped" \
+  "scripts/ci/lib/integration_test_inventory.py
+scripts/ci/test_integration_test_inventory.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

@@ -1,4 +1,4 @@
-import { apiFetch, clientActionId } from "../../../lib/api";
+import { apiFetch, type ApiRecord } from "../../../lib/api";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
@@ -12,6 +12,57 @@ const TOOL_PERMISSION_UPDATE_STATES = new Set([
   "ask_each_time",
   "disabled",
 ]);
+
+function recordField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): ApiRecord {
+  const value = response[field];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value as ApiRecord;
+}
+
+function recordArrayField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): ApiRecord[] {
+  const value = response[field];
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry),
+    )
+  ) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value as ApiRecord[];
+}
+
+function unknownArrayField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): unknown[] {
+  const value = response[field];
+  if (!Array.isArray(value)) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value;
+}
+
+function optionalUnknownArrayField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): unknown[] {
+  return response[field] === undefined
+    ? []
+    : unknownArrayField(response, field, responseName);
+}
 
 function normalizeToolState(state) {
   if (state === "ask") return "ask_each_time";
@@ -84,8 +135,8 @@ export async function fetchSettingsExport() {
   const data = await apiFetch(SETTINGS_TOOLS_BASE);
   return {
     settings: settingsFromOperatorConfig(data),
-    diagnostics: data.diagnostics || [],
-    precedence: data.precedence || [],
+    diagnostics: optionalUnknownArrayField(data, "diagnostics", "tool settings"),
+    precedence: optionalUnknownArrayField(data, "precedence", "tool settings"),
   };
 }
 export async function fetchSetting(key) {
@@ -95,21 +146,83 @@ export async function fetchSetting(key) {
     return data.settings[AUTO_APPROVE_KEY] ?? true;
   }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`);
-  return data.entry?.value ?? null;
+  return recordField(data, "entry", "operator config").value ?? null;
 }
-export async function updateSetting(key, value) {
+
+type SettingEntry = {
+  key: string;
+  value: unknown;
+  mutable?: boolean;
+  source?: string;
+};
+
+export type SettingUpdateSuccess = {
+  success: true;
+  entry: SettingEntry;
+  value: unknown;
+};
+
+export type SettingUpdateFailure = {
+  success: false;
+  message?: string;
+};
+
+export type SettingUpdateResult = SettingUpdateSuccess | SettingUpdateFailure;
+
+function settingUpdateResult(data: unknown, expectedKey: string): SettingUpdateResult {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("Save response is not an object");
+  }
+  const success = Reflect.get(data, "success");
+  if (success === false) {
+    const message = Reflect.get(data, "message");
+    return {
+      success: false,
+      ...(typeof message === "string" ? { message } : {}),
+    };
+  }
+  if (success !== undefined && success !== true) {
+    throw new Error("Save response has an invalid success flag");
+  }
+
+  const entry = Reflect.get(data, "entry");
+  if (
+    typeof entry !== "object" ||
+    entry === null ||
+    Array.isArray(entry) ||
+    Reflect.get(entry, "key") !== expectedKey ||
+    !Object.prototype.hasOwnProperty.call(entry, "value")
+  ) {
+    throw new Error("Save response is missing the confirmed setting entry");
+  }
+
+  const mutable = Reflect.get(entry, "mutable");
+  const source = Reflect.get(entry, "source");
+  const confirmedEntry: SettingEntry = {
+    key: expectedKey,
+    value: Reflect.get(entry, "value"),
+    ...(typeof mutable === "boolean" ? { mutable } : {}),
+    ...(typeof source === "string" ? { source } : {}),
+  };
+  return { success: true, entry: confirmedEntry, value: confirmedEntry.value };
+}
+
+export async function updateSetting(
+  key: string,
+  value: unknown,
+): Promise<SettingUpdateResult> {
   if (key === AUTO_APPROVE_KEY) {
     const data = await apiFetch(SETTINGS_TOOLS_BASE, {
       method: "POST",
       body: JSON.stringify({ enabled: Boolean(value) }),
     });
-    return { success: true, entry: data.entry, value: data.entry?.value };
+    return settingUpdateResult(data, key);
   }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`, {
     method: "POST",
     body: JSON.stringify({ value }),
   });
-  return { success: true, entry: data.entry, value: data.entry?.value };
+  return settingUpdateResult(data, key);
 }
 
 type SettingsImportUpdateResult = Awaited<ReturnType<typeof updateSetting>>;
@@ -144,7 +257,19 @@ export async function importSettings(
   const settings = payload?.settings || {};
   const imported: SettingsImportUpdateResult[] = [];
   if (Object.prototype.hasOwnProperty.call(settings, AUTO_APPROVE_KEY)) {
-    imported.push(await updateSetting(AUTO_APPROVE_KEY, Boolean(settings[AUTO_APPROVE_KEY])));
+    const result = await updateSetting(
+      AUTO_APPROVE_KEY,
+      Boolean(settings[AUTO_APPROVE_KEY]),
+    );
+    imported.push(result);
+    if (result.success === false) {
+      return {
+        success: false,
+        imported: 0,
+        results: imported,
+        message: result.message || "The setting could not be saved",
+      };
+    }
   }
   if (imported.length === 0) {
     return {
@@ -156,97 +281,13 @@ export async function importSettings(
   }
   return { success: true, imported: imported.length, results: imported };
 }
-// LLM provider configuration — v2 native endpoints. The snapshot is the single
-// source of truth: a unified provider list (built-in + operator-defined) plus
-// the active selection. API-key values are write-only; the snapshot only ever
-// reports `api_key_set`.
-export function fetchLlmProviders() {
-  return apiFetch("/api/webchat/v2/llm/providers");
-}
-export function fetchUserModelCatalog() {
-  return apiFetch("/api/webchat/v2/llm/models");
-}
-export function fetchUserModelPreference() {
-  return apiFetch("/api/webchat/v2/llm/model-preference");
-}
-export function setUserModelPolicy(payload) {
-  return apiFetch("/api/webchat/v2/llm/model-policy", {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
-}
-export function setUserModelPreference(model) {
-  return apiFetch("/api/webchat/v2/llm/model-preference", {
-    method: "PUT",
-    body: JSON.stringify({ model }),
-  });
-}
-export function upsertLlmProvider(payload) {
-  const { clientActionId: callerClientActionId, ...request } = payload;
-  return apiFetch("/api/webchat/v2/llm/providers", {
-    method: "POST",
-    body: JSON.stringify({
-      ...request,
-      client_action_id:
-        request.client_action_id || callerClientActionId || clientActionId(),
-    }),
-  });
-}
-export function deleteLlmProvider(providerId) {
-  return apiFetch(`/api/webchat/v2/llm/providers/${encodeURIComponent(providerId)}/delete`, {
-    method: "POST",
-  });
-}
-export function setActiveLlm(payload) {
-  return apiFetch("/api/webchat/v2/llm/active", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-export function testLlmProviderConnection(payload) {
-  return apiFetch("/api/webchat/v2/llm/test-connection", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-export function listLlmProviderModels(payload) {
-  return apiFetch("/api/webchat/v2/llm/list-models", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-// Begin NEAR AI browser login. Returns { auth_url } to open; a background task
-// stores the session token and makes NEAR AI active once the user authorizes.
-export function startNearaiLogin(payload) {
-  return apiFetch("/api/webchat/v2/llm/nearai/login", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-// Complete a NEAR AI wallet (NEP-413) login. `payload` carries the browser
-// wallet's signed message; the backend relays it to NEAR AI, stores the session
-// token, and makes NEAR AI active. Returns { active }.
-export function completeNearaiWalletLogin(payload) {
-  return apiFetch("/api/webchat/v2/llm/nearai/wallet", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-// Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
-// { user_code, verification_uri } to display; a background task polls for
-// authorization, stores the tokens, and makes Codex active once authorized.
-export function startCodexLogin() {
-  return apiFetch("/api/webchat/v2/llm/codex/login", {
-    method: "POST",
-  });
-}
 export async function fetchTools() {
   const data = await apiFetch(SETTINGS_TOOLS_BASE);
   return {
-    tools: (data.entries || []).map(toolFromConfigEntry).filter(Boolean),
-    diagnostics: data.diagnostics || [],
+    tools: recordArrayField(data, "entries", "tool settings")
+      .map(toolFromConfigEntry)
+      .filter(Boolean),
+    diagnostics: optionalUnknownArrayField(data, "diagnostics", "tool settings"),
   };
 }
 export async function updateToolPermission(name, state) {
@@ -259,20 +300,29 @@ export async function updateToolPermission(name, state) {
       body: JSON.stringify({ state: normalized }),
       signal: controller.signal,
     });
-    const tool = persistedToolFromConfigEntry(data?.entry, name, normalized);
-    return { success: true, tool, entry: data.entry };
+    const tool = persistedToolFromConfigEntry(data.entry, name, normalized);
+    const entry = recordField(data, "entry", "tool permission update");
+    return { success: true, tool, entry };
   } finally {
     clearTimeout(timeoutId);
   }
 }
-export function fetchExtensions() {
-  return apiFetch("/api/webchat/v2/extensions");
+export async function fetchExtensions() {
+  const response = await apiFetch("/api/webchat/v2/extensions");
+  return {
+    ...response,
+    extensions: recordArrayField(response, "extensions", "extensions"),
+  };
 }
-export function fetchExtensionRegistry() {
-  return apiFetch("/api/webchat/v2/extensions/registry");
+export async function fetchExtensionRegistry() {
+  const response = await apiFetch("/api/webchat/v2/extensions/registry");
+  return {
+    ...response,
+    entries: recordArrayField(response, "entries", "extension registry"),
+  };
 }
-export function fetchSkills() {
-  return apiFetch("/api/webchat/v2/skills");
+export function fetchSkills(): Promise<ApiRecord & { skills: ApiRecord[] }> {
+  return apiFetch<ApiRecord & { skills: ApiRecord[] }>("/api/webchat/v2/skills");
 }
 export function fetchSkillContent(name) {
   return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}`);
@@ -312,32 +362,6 @@ export function setAutoActivateLearned(enabled) {
     headers: { "X-Confirm-Action": "true" },
     body: JSON.stringify({ enabled }),
   });
-}
-// Trace Commons credits — read-only, scoped server-side to the
-// authenticated caller. The response is the contributor-local view as
-// of the last credit sync; the authoritative ledger is server-side.
-export function fetchTraceCredits() {
-  return apiFetch("/api/webchat/v2/traces/credit");
-}
-// Submitted Trace Commons traces for the authenticated caller (read-only,
-// server-scoped). Mirrors fetchTraceCredits.
-export function fetchAccountTraces() {
-  return apiFetch("/api/webchat/v2/traces/account");
-}
-// Mint a one-time Trace Commons browser login link for the authenticated
-// caller. The returned URL is a single-use account credential delivered only
-// over this authenticated response — open it immediately, never log or store
-// it. Unenrolled callers get { minted: false, enrolled: false }.
-export function mintAccountLoginLink() {
-  return apiFetch("/api/webchat/v2/traces/account-login-link", { method: "POST" });
-}
-// Authorize a held (manual-review) trace for submission. No request body —
-// the submission id is in the path. Returns { authorized: bool }.
-export function authorizeTraceHold(submissionId) {
-  return apiFetch(
-    `/api/webchat/v2/traces/holds/${encodeURIComponent(submissionId)}/authorize`,
-    { method: "POST" }
-  );
 }
 export function fetchUsers() {
   return Promise.resolve({ users: [], todo: true });

@@ -126,6 +126,20 @@ observation is model-visible untrusted tool output, not a replacement for
 `LoopSafeSummary`, and must be validated/redacted before it can be replayed to
 the model.
 
+Every successfully completed turn/loop-dispatched model capability writes its
+serialized output through the canonical durable result writer, regardless of
+whether execution is first-party, WASM, MCP, shell, or an externally submitted
+tool completion. The result reference addresses those unchanged bytes within
+the owning thread. Direct `ProductSurface` gestures are not model tool calls:
+they have no owning thread and retain their separate idempotent product-result
+contract rather than minting synthetic conversation state.
+`builtin.result_read` is the single continuation surface: legacy reads return
+UTF-8-safe byte chunks, while a request carrying `json_pointer` returns a
+shallow, bounded JSON page with exact omitted-node pointers and continuation
+arguments. JSON selection is a read-time/model-facing projection, not an
+alternative writer or stored representation. A `limit` applies only to object
+or array selections; there is no recursive value shrinking.
+
 Equivalent pseudocode:
 
 ```rust

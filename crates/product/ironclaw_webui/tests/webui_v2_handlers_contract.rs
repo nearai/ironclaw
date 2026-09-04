@@ -1006,6 +1006,7 @@ impl StubServices {
                     selection_enabled: true,
                     workspace_default: Some("model-a".to_string()),
                     models: vec!["model-a".to_string(), "model-b".to_string()],
+                    model_entries: Vec::new(),
                 })
                 .expect("user model catalog payload"),
                 next_cursor: None,
@@ -1511,7 +1512,7 @@ impl StubServices {
                         action: ProductNotificationAction::OpenThread {
                             thread_id: "thread-alpha".to_string(),
                         },
-                        thread_id: "thread-alpha".to_string(),
+                        thread_id: Some("thread-alpha".to_string()),
                         turn_run_id: Some("run-alpha".to_string()),
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
@@ -1696,6 +1697,7 @@ impl StubServices {
         Ok(LlmModelsResult {
             ok: true,
             models: vec!["model-a".to_string()],
+            model_entries: Vec::new(),
             message: String::new(),
         })
     }
@@ -7085,7 +7087,8 @@ async fn user_model_routes_expose_only_the_safe_catalog_and_replace_policy() {
         serde_json::json!({
             "selection_enabled": true,
             "workspace_default": "model-a",
-            "models": ["model-a", "model-b"]
+            "models": ["model-a", "model-b"],
+            "model_entries": []
         })
     );
 
@@ -7997,6 +8000,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                     run_id: None,
                     body: "projection body".to_string(),
                     finalized: false,
+                    narration: false,
                 }],
             )
             .expect("projection state"),

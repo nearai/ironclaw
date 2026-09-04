@@ -87,6 +87,15 @@ if [[ " $* " != *" --cargo-test-arg --lib --cargo-test-arg authorize_contract "*
   echo "scoped cargo test args were not forwarded" >&2
   exit 8
 fi
+if [ -n "${STUB_ARGV_FILE:-}" ]; then
+  printf '%s\n' "$*" >"${STUB_ARGV_FILE}"
+fi
+# cargo-mutants 27.1's real argument contract: `--in-place` and `--jobs` are
+# mutually exclusive (verified with the binary; the merge queue failed on it).
+if [[ " $* " == *" --in-place "* && " $* " == *" --jobs "* ]]; then
+  echo "error: the argument '--in-place' cannot be used with '--jobs <JOBS>'" >&2
+  exit 1
+fi
 out=""
 pattern=""
 while [ "$#" -gt 0 ]; do
@@ -120,6 +129,14 @@ case "${STUB_MODE:-caught}" in
       >"${out}/mutants.out/caught.txt"
     exit 0
     ;;
+  extra)
+    # cargo-mutants 27.1 examines struct-field-deletion mutants regardless of
+    # `--re`: the named mutant is caught, an unnamed one rides along missed.
+    echo "${mutant}" >"${out}/mutants.out/caught.txt"
+    echo 'crates/ironclaw_demo/src/lib.rs:2:1: delete field flag from struct Demo expression in Demo::authorize_helper' \
+      >"${out}/mutants.out/missed.txt"
+    exit 2
+    ;;
   zero) exit 0 ;;
 esac
 STUB
@@ -129,16 +146,37 @@ passes=0
 failures=0
 capture_at() {
   local root="$1" mode="$2" manifest="$3" changed="$4"
+  shift 4
   set +e
-  CAP_OUT="$(PATH="${work}/bin:${PATH}" STUB_MODE="${mode}" python3 "${gate}" \
+  CAP_OUT="$(PATH="${work}/bin:${PATH}" STUB_MODE="${mode}" \
+    STUB_ARGV_FILE="${work}/argv.txt" python3 "${gate}" \
     --manifest "${manifest}" \
     --repo-root "${root}" \
-    --changed-files "${changed}" 2>&1)"
+    --changed-files "${changed}" "$@" 2>&1)"
   CAP_RC=$?
   set -e
 }
 capture() {
-  capture_at "${case_root}" "${1}" "${work}/manifest.toml" "${work}/changed.txt"
+  local mode="$1"
+  shift
+  capture_at "${case_root}" "${mode}" "${work}/manifest.toml" "${work}/changed.txt" "$@"
+}
+check_argv() {
+  local label="$1" needle="$2" expect="$3"
+  local argv=""
+  if [ -f "${work}/argv.txt" ]; then
+    argv=" $(cat "${work}/argv.txt") "
+  fi
+  if [ "${expect}" = present ] && [[ "${argv}" == *" ${needle} "* ]]; then
+    echo "  ok   ${label}"
+    passes=$((passes + 1))
+  elif [ "${expect}" = absent ] && [[ "${argv}" != *" ${needle} "* ]]; then
+    echo "  ok   ${label}"
+    passes=$((passes + 1))
+  else
+    echo "  FAIL ${label}: cargo-mutants argv was: ${argv}" >&2
+    failures=$((failures + 1))
+  fi
 }
 check_rc() {
   local label="$1" expected="$2"
@@ -167,6 +205,22 @@ echo "▶ named critical gate happy path"
 capture caught
 check_rc "all named mutants caught passes" 0
 check_text "pass summary refuses a score" "0 survived; 0 timed out"
+check_argv "copy mode keeps three parallel tree copies" "--jobs 3" present
+check_argv "copy mode does not mutate the checkout" "--in-place" absent
+
+echo "▶ in-place mode reuses the checkout's warm target directory"
+rm -f "${work}/argv.txt"
+capture caught --in-place
+check_rc "in-place run passes" 0
+check_argv "in-place is forwarded to cargo-mutants" "--in-place" present
+check_argv "in-place passes no --jobs (cargo-mutants rejects the pair)" "--jobs" absent
+capture caught --in-place --jobs 3
+check_rc "in-place with parallel jobs is refused" 1
+check_text "the refusal explains the tree-copy constraint" "one cargo-mutants job at a time"
+rm -f "${work}/argv.txt"
+capture caught --in-place --jobs 1
+check_rc "in-place with an explicit single job passes" 0
+check_argv "an explicit single job is still not forwarded in place" "--jobs" absent
 
 echo "▶ survivor and timeout sabotage"
 capture missed
@@ -191,8 +245,12 @@ check_rc "a similarly named sibling does not satisfy discovery" 1
 check_text "substring discovery failure names the exact function" \
   "named critical function produced zero mutants: ${source_path}::authorize"
 capture unexpected
-check_rc "a result outside the named-mutant allowlist fails" 1
-check_text "unexpected result reports an allowlist mismatch" "exact named-mutant allowlist"
+check_rc "a missing named mutant fails even when another result appears" 1
+check_text "a missing named mutant reports an allowlist mismatch" "exact named-mutant allowlist"
+capture extra
+check_rc "an unnamed mutant the tool examined anyway carries no verdict" 0
+check_text "the unnamed mutant is reported as ignored" "outside the named functions"
+check_text "the named verdict still passes" "0 survived; 0 timed out"
 capture zero
 check_rc "an empty result is not a pass" 1
 check_text "empty result explains zero mutants" "produced zero mutants"

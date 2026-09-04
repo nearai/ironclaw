@@ -301,7 +301,17 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         | OutboundError::DeliveryNotFound
         | OutboundError::ReplyAttachmentIntentsSealed
         | OutboundError::ReplyAttachmentIntentConflict
-        | OutboundError::ReplyAttachmentIntentLimitExceeded => false,
+        | OutboundError::ReplyAttachmentIntentLimitExceeded
+        // Reply publication guard failures (stale fence, settled, revision
+        // regression, missing/mismatched publication, lease missing) are
+        // caller bugs on the publication path; a validator never emits them.
+        | OutboundError::StaleReplyPublisher { .. }
+        | OutboundError::ReplyPublicationSettled
+        | OutboundError::ReplyPublicationRevisionRegressed { .. }
+        | OutboundError::ReplyPublicationNotFound
+        | OutboundError::ReplyPublicationTargetMismatch
+        | OutboundError::ReplyPublicationNotTerminal
+        | OutboundError::ReplyPublicationLeaseRequired => false,
     }
 }
 

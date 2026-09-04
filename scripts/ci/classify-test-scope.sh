@@ -340,7 +340,7 @@ is_shared_test_path() {
 is_reborn_test_path() {
   local path="$1"
   case "$path" in
-    docs/internal/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
+    docs/internal/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
     crates/ironclaw_architecture_tests/*)
@@ -372,7 +372,7 @@ is_reborn_test_path() {
     crates/ironclaw_conversations/*|crates/ironclaw_extension_host/*|crates/ironclaw_extension_manager/*|crates/ironclaw_outbound/*|crates/ironclaw_assistant/*|crates/ironclaw_triggers/*)
       return 0
       ;;
-    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/reborn_changed_coverage.py|scripts/ci/test_reborn_changed_coverage.py|scripts/ci/critical_mutation_gate.py|scripts/ci/test-critical-mutation-gate.sh|scripts/ci/check-reborn-branch-coverage-flags.py|scripts/ci/test-check-reborn-branch-coverage-flags.sh|scripts/ci/check-reborn-qa-fixtures.sh|scripts/ci/test-check-reborn-qa-fixtures.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/ws12-suite-shards.toml|scripts/ci/ws12_suite_shards.py|scripts/ci/test_ws12_suite_shards.py|scripts/ci/ws12_workflow_contracts.py|scripts/ci/test_ws12_workflow_contracts.py|scripts/ci/lib/rust_toolchain_contracts.py|scripts/ci/lib/workflow_text.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/reborn_changed_coverage.py|scripts/ci/test_reborn_changed_coverage.py|scripts/ci/critical_mutation_gate.py|scripts/ci/test-critical-mutation-gate.sh|scripts/ci/check-reborn-branch-coverage-flags.py|scripts/ci/test-check-reborn-branch-coverage-flags.sh|scripts/ci/check-reborn-qa-fixtures.sh|scripts/ci/test-check-reborn-qa-fixtures.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/ws12-suite-shards.toml|scripts/ci/ws12_suite_shards.py|scripts/ci/test_ws12_suite_shards.py|scripts/ci/ws12_workflow_contracts.py|scripts/ci/test_ws12_workflow_contracts.py|scripts/ci/lib/rust_toolchain_contracts.py|scripts/ci/lib/workflow_text.py|scripts/ci/lib/integration_test_inventory.py|scripts/ci/test_integration_test_inventory.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
       return 0
       ;;
     *)

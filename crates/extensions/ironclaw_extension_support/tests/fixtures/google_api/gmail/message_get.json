@@ -11,6 +11,8 @@
     "headers": [
       { "name": "From", "value": "Ada Lovelace <ada@example.com>" },
       { "name": "To", "value": "Bob Hawk <bob@example.com>" },
+      { "name": "Cc", "value": "Grace Hopper <grace@example.com>" },
+      { "name": "Reply-To", "value": "launch@example.com" },
       { "name": "Subject", "value": "Q2 summary" },
       { "name": "Date", "value": "Wed, 20 May 2026 14:00:00 -0400" },
       { "name": "Message-ID", "value": "<orig-001@mail.example.com>" },
@@ -18,9 +20,31 @@
     ],
     "parts": [
       {
-        "mimeType": "text/plain",
+        "mimeType": "multipart/alternative",
         "filename": "",
-        "body": { "size": 31, "data": "UXVhcnRlcmx5IG51bWJlcnMgYXJlIGluLg" }
+        "parts": [
+          {
+            "mimeType": "text/html",
+            "filename": "",
+            "body": { "size": 38, "data": "PHA-SWdub3JlIHRoaXMgSFRNTCBhbHRlcm5hdGl2ZS48L3A-" }
+          },
+          {
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              { "name": "Content-Transfer-Encoding", "value": "quoted-printable" }
+            ],
+            "body": {
+              "size": 38,
+              "data": "UXVhcnRlcmx5IG51bWJlcnMgYXJlIGluLgpTZWNvbmQgbGluZS4"
+            }
+          }
+        ]
+      },
+      {
+        "mimeType": "application/pdf",
+        "filename": "summary.pdf",
+        "body": { "attachmentId": "attachment-001", "size": 4096 }
       }
     ]
   }

@@ -3056,6 +3056,139 @@ fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
 /// for why an unmounted `/login` is a 200 SPA-shell fallthrough rather than a
 /// 404 under root-path serving, not this route's own redirect) while
 /// `/auth/providers` stays up.
+/// The banner's `listener` line is the readiness signal an operator and this
+/// harness wait on, so it prints only once the listener is bound — and with
+/// `--port 0` it reports the port the OS chose. One connect attempt, with no
+/// retry, must therefore reach the port the banner names.
+#[test]
+fn serve_banner_reports_the_bound_port_and_prints_only_once_it_accepts_connections() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = wait_for_serve_banner_with_capture(&mut child, "ephemeral-port serve");
+
+    // The `listen` line follows the banner header.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let listen_line = loop {
+        let text = stderr
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(line) = text
+            .lines()
+            .find(|line| line.trim_start().starts_with("listen"))
+        {
+            break line.to_string();
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the banner never printed its listen line; stderr: {text}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let port: u16 = listen_line
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.trim().parse().ok())
+        .unwrap_or(0);
+    let connect = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_secs(2),
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_ne!(
+        port, 0,
+        "the banner reports the port the OS chose, not the requested :0 — {listen_line}"
+    );
+    connect.expect("a single connect right after the banner must reach the listener");
+}
+
+/// A server must not depend on whoever reads its stderr. The harness once
+/// closed the pipe after the banner's first line, and `serve` died on the
+/// next line ("failed printing to stderr"): close it the same way and the
+/// listener must still answer.
+#[test]
+fn serve_keeps_serving_after_its_stderr_consumer_goes_away() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+
+    // Read only the banner's first line, then drop the pipe's read end.
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let mut reader = std::io::BufReader::new(stderr);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).expect("read serve stderr");
+        if line.contains("ironclaw: WebChat v2 listener") {
+            break;
+        }
+        if read == 0 || std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach its listener banner");
+        }
+    }
+    drop(reader);
+
+    let response = http_response(
+        port,
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "probe after stderr closed",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let exited = child.try_wait().expect("serve child status");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        exited.is_none(),
+        "serve must not exit because its stderr consumer went away, got {exited:?}"
+    );
+    response.expect("the listener answers although stderr is closed");
+}
+
 #[test]
 fn serve_with_sso_does_not_double_mount_session_exchange() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3154,44 +3287,20 @@ fn strip_ansi(text: &str) -> String {
 /// Blocks until `child`'s stderr carries the ready banner. Returns
 /// everything captured up to and including the banner line, so callers can
 /// also assert on pre-banner diagnostics without their own drain thread.
+/// Wait for the serve banner while draining `child`'s stderr for the rest of
+/// its life. The drain must outlive this call: closing the pipe's read end
+/// after the banner's first line made the child's next `eprintln!` — the rest
+/// of the banner — fail with a broken pipe, which is a panic, and killed the
+/// server the test was about to probe. That was the "connection refused"
+/// flake in every serve smoke test.
 fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
-    stderr_text
+    let stderr_all = wait_for_serve_banner_with_capture(child, "serve");
+    let banner = stderr_all
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    drop(stderr_all);
+    banner
 }
 
 /// Like [`wait_for_serve_banner`], but keeps capturing `child`'s stderr for

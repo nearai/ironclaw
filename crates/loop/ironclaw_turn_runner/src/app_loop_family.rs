@@ -28,7 +28,7 @@ pub fn build_loop_family_registry_with_overrides(
         Arc::new(default_family),
         Arc::new(families::subagent()),
         Arc::new(families::unbound_default()),
-        Arc::new(families::unbound_structured()),
+        Arc::new(families::unbound_structured()?),
     ])
 }
 

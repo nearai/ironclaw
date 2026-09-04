@@ -21,12 +21,14 @@ channels and DMs.
 <Step title="Create a Slack app">
 
 Create an app at [api.slack.com/apps](https://api.slack.com/apps). The fastest route is
-**From an app manifest** — paste the [manifest below](#app-manifest), which sets the
-scopes, events, the `/ironclaw` slash command, and redirect URL in one step. Replace
-`example.com` with your own host first.
+**From an app manifest** — paste the [manifest below](#app-manifest), which enables the
+**Agents** feature and sets the scopes, events, the `/ironclaw` slash command, and
+redirect URL in one step. Replace `example.com` with your own host first.
 
-If you build the app from scratch instead, configure **OAuth & Permissions**, **Event
-Subscriptions**, **Slash Commands**, and the redirect URL to match that manifest.
+If you build the app from scratch instead, enable **Agents** in the app's sidebar (this is
+what the manifest's `features.agent_view` block does — see [Native Agent](#native-agent)),
+then configure **OAuth & Permissions**, **Event Subscriptions**, **Slash Commands**, and
+the redirect URL to match that manifest.
 
 Once created, install the app to your workspace and copy the bot token from **OAuth &
 Permissions**, and the signing secret from **Basic Information**. IronClaw uses the signing
@@ -45,9 +47,22 @@ ironclaw serve
 <Step title="Enter the deployment configuration (operator, once per instance)">
 
 In the [web interface](/using/webui), open **Admin → Configuration** and fill in the
-**Slack deployment configuration** card — the bot token, signing secret, workspace
-(team) ID, app ID, and the other fields the card lists. They are written to the
-encrypted secret store.
+**Slack deployment configuration** card. Every field is required; the secrets are
+written to the encrypted secret store and never shown again.
+
+| Field | Where it comes from |
+| --- | --- |
+| Bot token | **OAuth & Permissions** → Bot User OAuth Token (`xoxb-…`) |
+| Signing secret | **Basic Information** → App Credentials |
+| Workspace (team) ID | Your workspace id (`T…`) — also the `team_id` in every Events API payload |
+| App ID | **Basic Information** → App ID (`A…`) |
+| Installation ID | A stable label you choose for this app/workspace installation, e.g. `slack-acme` |
+| Bot user ID | The bot's member id (`U…`), shown under **App Home** or returned by `auth.test` |
+| OAuth client ID | **Basic Information** → App Credentials |
+| OAuth client secret | **Basic Information** → App Credentials |
+
+The OAuth client id and secret drive the per-user ("personal") authorization described
+below; the rest configure the workspace bot.
 
 <Note>
 The agent can't do this operator step for you — registering the app credentials stays in
@@ -79,11 +94,55 @@ scope, which also needs a reinstall.
 
 <Step title="Talk to it">
 
-Invite the bot to a channel and mention it, or send it a direct message.
+Pick IronClaw from Slack's **Agents** picker (or open its Messages tab) and start a chat,
+invite the bot to a channel and mention it, or send it a direct message. In a channel the
+bot only responds to messages that mention it; in a DM it responds to everything. The
+answer streams into the thread as the run produces it, each tool call shows up as a task
+card, and Slack's **Stop** button cancels the run.
 
 </Step>
 
 </Steps>
+
+---
+
+## Native Agent
+
+IronClaw replies on Slack's native Agent surface rather than by posting a finished
+message. Each run is one agent session in the conversation's thread: the session shows
+*processing* while the run works and *suspended* while it waits on you (an approval, a
+sign-in), the answer text streams in as it is produced, tool calls appear as task cards,
+and the session returns to *active* when the run ends. This is what the manifest's
+`features.agent_view` block, the `assistant:write` bot scope, and the Agent event
+subscriptions are for.
+
+<Warning>
+Switching an app to `agent_view` is a one-way door. Slack's migration guide is explicit:
+"Once you change your app's manifest from `assistant_view` to `agent_view`, you can't
+revert to the Assistant messaging experience." Create the app from the manifest above,
+or switch an existing app knowingly.
+</Warning>
+
+- **Agents picker.** With the Agents feature enabled, IronClaw is listed in Slack's Agents
+  picker and its Messages tab behaves like a chat with sessions; each new chat there is
+  a thread. `agent_description` (300 characters at most) and `suggested_prompts` are what
+  people see before their first message — edit them in the manifest to taste.
+- **Stop button.** It appears while a session is processing because the app subscribes to
+  `agent_session_stopped`. Pressing it is normalized into the channel's `stop` command,
+  the run is cancelled, and IronClaw transitions the session out of *processing* itself
+  (Slack does not do that automatically).
+- **If the Agent feature is missing.** There is no conventional-message fallback. A
+  workspace whose app was installed without the Agents feature answers `feature_disabled`
+  to `agents.sessions.setStatus`, and the reply fails clearly — the run's delivery is
+  recorded as failed with a reason naming `features.agent_view` — until an operator
+  enables **Agents** in the app settings and reinstalls the app. The same applies to a
+  bot token that lacks `chat:write` (`missing_scope`): the session and streaming methods
+  (`agents.sessions.setStatus`, `chat.startStream`,
+  `chat.appendStream`, `chat.stopStream`) all require it, and `assistant:write` is added
+  automatically when the feature is enabled.
+- **Channels.** Streaming into a channel needs the person's user and team ids
+  (`recipient_user_id`/`recipient_team_id`), which IronClaw records with every inbound
+  message; a DM does not.
 
 ---
 
@@ -124,8 +183,12 @@ loopback, so events only work once the instance is reachable from the internet.
 ## App Manifest
 
 Create the app with **From an app manifest** and paste this, replacing `example.com` with
-your host. It sets the scopes, bot events, the `/ironclaw` slash command, and redirect URL
-that the steps above describe.
+your host. It enables the Agents feature (`features.agent_view`), and sets the scopes, bot
+events, the `/ironclaw` slash command, and redirect URL that the steps above describe.
+
+The canonical copy of this manifest ships with the Slack package as
+`crates/extensions/packages/slack/app_manifest.json`; the block below is
+test-pinned to be identical to that file, so either can be imported.
 
 ```json
 {
@@ -133,6 +196,23 @@ that the steps above describe.
     "name": "IronClaw"
   },
   "features": {
+    "agent_view": {
+      "agent_description": "IronClaw is your autonomous assistant: ask it to research, draft, run tools, and act across your connected apps. Replies stream into the thread as they are produced, with each step shown as it happens.",
+      "suggested_prompts": [
+        {
+          "title": "Summarize a thread",
+          "message": "Summarize the discussion in the thread I share next and list the open questions."
+        },
+        {
+          "title": "Draft a reply",
+          "message": "Draft a concise reply to the last message I received, in my voice."
+        },
+        {
+          "title": "Check my integrations",
+          "message": "Which integrations are connected for me right now, and what can you do with them?"
+        }
+      ]
+    },
     "app_home": {
       "home_tab_enabled": false,
       "messages_tab_enabled": true,
@@ -147,7 +227,7 @@ that the steps above describe.
         "command": "/ironclaw",
         "url": "https://example.com/webhooks/extensions/slack/events",
         "description": "Run IronClaw commands",
-        "usage_hint": "status | model <name> | help",
+        "usage_hint": "status | model use <name> | new | stop",
         "should_escape": false
       }
     ]
@@ -168,9 +248,13 @@ that the steps above describe.
         "im:read",
         "mpim:read",
         "users:read",
-        "chat:write"
+        "chat:write",
+        "reactions:read",
+        "reactions:write",
+        "im:write"
       ],
       "bot": [
+        "assistant:write",
         "channels:history",
         "app_mentions:read",
         "chat:write",
@@ -194,7 +278,11 @@ that the steps above describe.
         "message.channels",
         "message.groups",
         "message.im",
-        "message.mpim"
+        "message.mpim",
+        "app_home_opened",
+        "app_context_changed",
+        "agent_session_stopped",
+        "agent_session_title_changed"
       ]
     },
     "org_deploy_enabled": false,
@@ -209,13 +297,29 @@ that the steps above describe.
 This is a starting point, not a minimum. The `user` scopes exist for per-user
 authorization — searching and posting as the person rather than as the bot. If you only
 want the bot to participate in channels, you can drop the `user` block and the redirect
-URL with it.
+URL with it. The `agent_view` block, `assistant:write`, `chat:write`, and the Agent
+events (`app_home_opened`, `app_context_changed`, `agent_session_stopped`,
+`agent_session_title_changed`) are not optional: they are how replies reach Slack.
+(The legacy `assistant_thread_*` events are deliberately absent — Slack's Agent
+View validator rejects manifests that subscribe to them.)
 </Note>
 
-`files:read` lets the bot resolve and download inbound file shares.
+`assistant:write` is added by Slack when the Agents feature is enabled and is declared
+here so a manifest import carries it. `chat:write` covers every session and streaming
+method. `files:read` lets the bot resolve and download inbound file shares.
 `files:write` lets it return explicitly attached workspace files through
 Slack's external upload flow. IronClaw never uses the retired `files.upload`
-method.
+method. `reactions:write` lets the bot react to a message it delivers a notice
+about on the message lane; live progress on the Agent surface shows in the
+session itself. `channels:history` and its private/group/DM siblings also let
+the bot read a streaming message back after a network fault mid-reply.
+
+The `user` scopes are the union of what the sixteen personal Slack tools need.
+`reactions:read`, `reactions:write`, and `im:write` joined that union when the
+reaction and open-DM tools landed — an account connected before then holds a
+narrower grant, and the first call to one of those tools answers with a
+reconnect prompt. Reconnecting requests the wider set and updates the same
+account in place; the earlier read-only tools keep working in the meantime.
 
 Slack validates the request URL when you save the manifest, so start IronClaw before
 creating the app.
@@ -224,9 +328,19 @@ creating the app.
 
 ## Configuration
 
-Slack has no settings in the configuration file. The app id, the bot token, the signing
-secret, and channel routing are all configured in the web interface, on the Slack card
-under **Extensions** — the tokens go straight into the encrypted secret store.
+Slack has no settings in the configuration file. The instance-wide values — bot token,
+signing secret, workspace and app ids, and the OAuth client credentials — are entered
+once under **Admin → Configuration** on the **Slack deployment configuration** card, and
+the secrets go straight into the encrypted secret store. Each person then connects their
+own Slack account from the **Extensions** page (or by asking the agent to "connect
+Slack").
+
+There is no channel allowlist or routing table. Inviting the bot into a channel is what
+enables it: Slack only delivers a channel's events to the app because the bot is a
+member, and each message runs as the person who mentioned the bot. In channels — shared
+or not — the bot answers only when explicitly mentioned: a plain thread reply without a
+mention is dropped without starting a run, though approve/deny replies and `/ironclaw`
+commands still work; in DMs it answers every message.
 
 There is no key that turns Slack on. The webhook route is always mounted, and it starts
 accepting events once the Slack extension is installed and its signing secret is
@@ -267,6 +381,21 @@ event. A bot only sees conversations it belongs to.
 <Accordion title="Requests are rejected">
 A wrong or missing signing secret makes IronClaw reject every incoming request. Re-enter
 it through the setup flow, then restart the server.
+</Accordion>
+
+<Accordion title="Replies fail with feature_disabled, not_agent_app, or missing_scope">
+The app is installed without Slack's Agents feature, or its bot token predates it. Enable
+**Agents** in the app settings (the manifest's `features.agent_view` block), confirm the
+bot scopes include `assistant:write` and `chat:write`, reinstall the app, and update the
+bot token under **Admin → Configuration** if Slack issued a new one. IronClaw does not
+fall back to plain messages when the Agent surface is unavailable; the failed delivery
+names the missing capability.
+</Accordion>
+
+<Accordion title="The Stop button does not appear">
+Slack shows it only while a session is processing and only when the app subscribes to
+`agent_session_stopped`. Add the event subscription (it is in the manifest above) and
+reinstall the app.
 </Accordion>
 
 <Accordion title="I can't find where to configure Slack">

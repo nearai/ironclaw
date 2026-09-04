@@ -580,7 +580,7 @@ impl RebornIntegrationHarnessBuilder {
     ///
     /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_live_shell(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsDurableIo;
         self.shell_mode = ShellMode::Live;
         self
     }
@@ -1182,6 +1182,7 @@ impl RebornIntegrationHarness {
         start_sequence: u64,
         end_sequence: u64,
         content: &str,
+        context_mode: Option<ironclaw_threads::SummaryContextMode>,
     ) -> HarnessResult<ironclaw_threads::SummaryArtifact> {
         let scope = thread_scope_from_binding(&self.binding)?;
         Ok(self
@@ -1196,6 +1197,7 @@ impl RebornIntegrationHarness {
                 model_context_policy: Some(
                     ironclaw_threads::SummaryModelContextPolicy::ReplaceRangeWhenSelected,
                 ),
+                context_mode,
             })
             .await?)
     }
@@ -1203,6 +1205,49 @@ impl RebornIntegrationHarness {
     /// The group-shared turn coordinator every thread's runs execute on.
     pub(crate) fn turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
         Arc::clone(&self.coordinator)
+    }
+
+    /// The reply projection the group's planned runtime composes every run's
+    /// document into (see `GroupSharedStorage::reply_projection`).
+    pub(crate) fn reply_projection_for_test(
+        &self,
+    ) -> Arc<ironclaw_assistant::projection::reply::ReplyProjection> {
+        Arc::clone(&self._shared.reply_projection)
+    }
+
+    /// Start the composed coordinator's reply publication over the group's
+    /// REAL kernel handles (the turn coordinator and thread service the
+    /// caller's runs actually live in). A test that wires its own
+    /// `RunDeliveryObserver` without starting the production channel-host
+    /// assembly calls this so the one publication owner reads the group's
+    /// runs; when the assembly already started publication (with the same
+    /// group handles), this is a no-op.
+    pub(crate) fn start_reply_publication_for_test(
+        &self,
+        services: &ironclaw_composition::RebornRuntime,
+    ) {
+        use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
+        let coordinator = services
+            .delivery_coordinator()
+            .expect("composition built the delivery coordinator");
+        let thread_service = self
+            .thread_service_for_test()
+            .expect("group thread service");
+        let started = coordinator.start_reply_publication(ReplyPublicationWiring {
+            projection: self.reply_projection_for_test(),
+            turn_coordinator: self.turn_coordinator_for_test(),
+            thread_service,
+            approval_context: None,
+            blocked_auth_prompts: None,
+            project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+            session_channel: None,
+            settings: ReplyPublicationSettings::default(),
+        });
+        if !started {
+            tracing::debug!(
+                "reply publication was already started on the composed coordinator; keeping it"
+            );
+        }
     }
 
     /// The group-shared turn-state store paired with
@@ -2073,6 +2118,26 @@ impl RebornIntegrationHarness {
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
             ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
+    /// Deny a blocked client-tool gate without submitting an output. The
+    /// typed precondition drives the same coordinator resume path as the
+    /// product external-tool surface and prevents parked-call redispatch.
+    pub async fn deny_external_tool_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:external_tool-") {
+            return Err(format!("expected an external-tool gate ref, got {gate_ref:?}").into());
+        }
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedExternalToolGate,
         )
         .await
     }

@@ -58,9 +58,8 @@ if [[ "${sabotage}" != "env" ]]; then
       CI|GITHUB_ACTIONS|TERM|COLORTERM|NO_COLOR|FORCE_COLOR|\
       CARGO_INCREMENTAL|CARGO_PROFILE_DEV_DEBUG|CARGO_PROFILE_TEST_DEBUG|CARGO_TEST_ARGS|\
       RUSTFLAGS|RUST_MIN_STACK|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|\
-      PROPTEST_CASES|REBORN_COV_COLLECT|REBORN_COV_LANE_INDEX|REBORN_COV_LANE_MODE|\
-      REBORN_COV_LANE_PARTITIONS|REBORN_COV_LANE_TEST_TIMEOUT|\
-      REBORN_GROUP_TEST_TIMEOUT|REBORN_ROOT_TEST_PARTITION|\
+      PROPTEST_CASES|REBORN_COV_COLLECT|REBORN_COV_LANES_JSON|\
+      REBORN_COV_LANE_TEST_TIMEOUT|REBORN_ROOT_TEST_PARTITION|\
       REBORN_ROOT_TEST_PARTITIONS|REBORN_ROOT_TEST_TIMEOUT|\
       IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER|IRONCLAW_EMULATE_CLI|\
       IRONCLAW_GENERATED_SEQUENCE_DEPTH|IRONCLAW_JOURNEY_ORDER|\
@@ -75,12 +74,56 @@ fi
 
 original_home="${HOME:-}"
 original_cargo_home="${CARGO_HOME:-${original_home:+${original_home}/.cargo}}"
-sanitized_cargo_home="${hermetic_root}/cargo-home"
+# The sanitized Cargo home is one stable path per host, deliberately outside
+# the per-invocation hermetic root. Cargo hashes the absolute source path of
+# every registry crate into that crate's fingerprint, so a Cargo home whose
+# path changed on every invocation marked the whole dependency closure
+# `PathToSourceChanged` on the next one: the crate buckets compiled their
+# closure twice per job (nextest show-config, then nextest run), and a
+# restored CI cache could never be fresh inside the boundary. The directory
+# still links only the offline `registry` and `git` caches — never host Cargo
+# configuration or credentials — and `scripts/ci/test-hermetic-test-process.sh`
+# pins both halves. Override with IRONCLAW_HERMETIC_CARGO_HOME for a
+# differently placed (never the host's own) Cargo home.
+sanitized_cargo_home="${IRONCLAW_HERMETIC_CARGO_HOME:-${temp_parent%/}/ironclaw-hermetic-cargo-home}"
 mkdir -p "${sanitized_cargo_home}"
-for cargo_cache in registry git; do
-  if [[ -n "${original_cargo_home}" && -d "${original_cargo_home}/${cargo_cache}" ]]; then
-    ln -s "${original_cargo_home}/${cargo_cache}" "${sanitized_cargo_home}/${cargo_cache}"
+# Compare canonical paths: a symlink or a `..` spelling of the host Cargo home
+# must be rejected just like the literal path, or the guarded command would
+# read host Cargo configuration and credentials through it. The sanitized
+# home may not be an ancestor of the host home either (the scrub below would
+# then delete host files).
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
+sanitized_cargo_home_real="$(canonical_dir "${sanitized_cargo_home}")"
+if [[ -n "${original_cargo_home}" ]]; then
+  original_cargo_home_real="$(canonical_dir "${original_cargo_home}")"
+  if [[ "${sanitized_cargo_home_real}" == "${original_cargo_home_real}" \
+    || "${original_cargo_home_real}" == "${sanitized_cargo_home_real}"/* ]]; then
+    echo "IRONCLAW_HERMETIC_CARGO_HOME must not be (or contain) the host Cargo home: ${sanitized_cargo_home} resolves to ${sanitized_cargo_home_real}" >&2
+    exit 2
   fi
+fi
+# The stable home is shared by consecutive invocations, so anything a guarded
+# command could leave behind that Cargo would read next time is removed up
+# front: configuration and credential files never exist here. Only the two
+# cache links below and Cargo's own lock/cache-tracker files may persist.
+for host_cargo_state in config config.toml credentials credentials.toml; do
+  rm -f "${sanitized_cargo_home_real}/${host_cargo_state}"
+done
+for cargo_cache in registry git; do
+  source_cache="${original_cargo_home:+${original_cargo_home}/${cargo_cache}}"
+  cache_link="${sanitized_cargo_home}/${cargo_cache}"
+  if [[ -z "${source_cache}" || ! -d "${source_cache}" ]]; then
+    continue
+  fi
+  if [[ -L "${cache_link}" && "$(readlink "${cache_link}")" == "${source_cache}" ]]; then
+    continue
+  fi
+  # Concurrent invocations race to create the same link; whichever wins, the
+  # link must point at the host cache afterwards.
+  ln -sfn "${source_cache}" "${cache_link}" 2>/dev/null \
+    || [[ -L "${cache_link}" && "$(readlink "${cache_link}")" == "${source_cache}" ]]
 done
 
 tool_path="${PATH:-/usr/bin:/bin}"

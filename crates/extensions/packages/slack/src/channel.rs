@@ -1,7 +1,8 @@
-//! The Slack channel halves (generic ingress cutover P4; delivery
-//! coordinator cutover P5).
+//! The Slack ingress and delivery halves (generic ingress cutover P4;
+//! delivery coordinator cutover P5). The reply half — the run's answer on
+//! Slack's native Agent surface — is `crate::reply_sink`.
 // arch-exempt: large_file, Slack protocol conformance stays co-located pending adapter split, plan #7477
-//! `inbound` parses one HOST-VERIFIED Slack Events API request into a
+//! `receive` parses one HOST-VERIFIED Slack Events API request into a
 //! normalized outcome (signature verification lives in the host's generic
 //! recipe verifier; this adapter never sees signing secrets). `deliver`
 //! renders one coordinator envelope to Slack mrkdwn, splits oversized text,
@@ -13,10 +14,10 @@
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport,
-    DirectTargetProvisionRequest, ImmediateResponse, InboundOutcome, NormalizedInboundMessage,
-    OutboundEnvelope, OutboundPart, OutboundVisibility, PartDeliveryOutcome, ProductTriggerReason,
-    ReactionAction, RunReaction, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, DeliveryReport, DirectTargetProvisionRequest,
+    ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
+    OutboundVisibility, PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction,
+    VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -26,16 +27,16 @@ use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_host_api::{action::NetworkMethod, ids::SecretHandle};
 use serde::Deserialize;
 
+use crate::api::SlackWebApiMethod;
 use crate::delivery::{SlackDeliveryFailureKind, slack_error_kind};
 use crate::mrkdwn::{render_slack_mrkdwn, slack_text_chunks};
 use crate::payload::{
-    ParsedSlackInboundMessage, SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError,
-    normalize_slack_inbound,
+    ParsedSlackInboundMessage, SlackInboundEvent, SlackPayloadParseError, normalize_slack_inbound,
 };
 
 /// The administrator-configuration handle carrying the bot token (manifest data; the
 /// host injects the secret at egress time).
-const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
+pub(crate) const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 
 /// Stateless Slack channel adapter: pure protocol parsing for the generic
 /// ingress router.
@@ -55,8 +56,13 @@ impl ChannelIngress for SlackChannelAdapter {
                     reason: format!("invalid installation id: {error}"),
                 }
             })?;
-        match normalize_slack_inbound(request.body, request.headers, &installation_id)
-            .map_err(parse_error)?
+        match normalize_slack_inbound(
+            request.body,
+            request.headers,
+            &installation_id,
+            crate::payload::slack_bot_user_id(request.config),
+        )
+        .map_err(parse_error)?
         {
             SlackInboundEvent::UrlVerification { challenge } => {
                 Ok(InboundOutcome::Respond(ImmediateResponse {
@@ -70,7 +76,15 @@ impl ChannelIngress for SlackChannelAdapter {
                 content_type: None,
                 body: Vec::new(),
             })),
-            SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
+            // One line per drop. The router answers an ignored event with a
+            // bare 200 to satisfy Slack's retry machinery, so without this a
+            // human message discarded by mistake leaves no trace anywhere —
+            // which is exactly how `thread_broadcast` stayed invisible until
+            // someone compared response latencies.
+            SlackInboundEvent::Ignore { reason } => {
+                tracing::debug!(?reason, "slack inbound event produced no message");
+                Ok(InboundOutcome::Ignore)
+            }
             SlackInboundEvent::Message(parsed) => {
                 let ParsedSlackInboundMessage {
                     mut message,
@@ -111,12 +125,11 @@ impl ChannelIngress for SlackChannelAdapter {
     }
 }
 
-/// For a conversational vendor the two output axes happen to share one
-/// mechanism — a message in the channel — which is exactly why the
-/// reply/delivery distinction stayed invisible until a streaming channel
-/// existed. They are still two halves: the coordinator decides the axis and
-/// calls one of them, and the sharing is an implementation fact recorded here
-/// rather than a collapse of the contract.
+/// The message-shaped rendering every out-of-band delivery uses: text parts
+/// to mrkdwn posts, files through the external upload flow, auth prompts,
+/// retractions, and reactions. The reply half (`crate::reply_sink`) shares
+/// the text post and the file upload for its terminal materialization — one
+/// rendering, two callers — and owns everything stream-shaped itself.
 impl SlackChannelAdapter {
     async fn send(
         &self,
@@ -262,23 +275,6 @@ impl SlackChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelReply for SlackChannelAdapter {
-    async fn send_reply(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        self.send(envelope, egress).await
-    }
-
-    /// Slack routes an `EphemeralTo` text reply to `chat.postEphemeral`, which
-    /// the workspace shows to that one user only (#7681).
-    fn supports_private_delivery(&self) -> bool {
-        true
-    }
-}
-
-#[async_trait]
 impl ChannelDelivery for SlackChannelAdapter {
     async fn deliver(
         &self,
@@ -286,6 +282,12 @@ impl ChannelDelivery for SlackChannelAdapter {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         self.send(envelope, egress).await
+    }
+
+    /// Slack routes an `EphemeralTo` text notice to `chat.postEphemeral`,
+    /// which the workspace shows to that one user only (#7681).
+    fn supports_private_delivery(&self) -> bool {
+        true
     }
 
     /// Provision (or reuse) the 1:1 DM conversation for a proven Slack actor.
@@ -308,7 +310,7 @@ impl ChannelDelivery for SlackChannelAdapter {
         let response = egress
             .send(RestrictedEgressRequest {
                 method: NetworkMethod::Post,
-                url: format!("https://{SLACK_API_HOST}/api/conversations.open"),
+                url: SlackWebApiMethod::ConversationsOpen.url(),
                 headers: vec![(
                     "content-type".to_string(),
                     "application/json; charset=utf-8".to_string(),
@@ -383,7 +385,7 @@ struct SlackChatPostResponse {
 
 /// Posts one text chunk. `ephemeral_user` selects `chat.postEphemeral`
 /// (visible only to that Slack user id) over the default `chat.postMessage`.
-async fn post_slack_chunk(
+pub(crate) async fn post_slack_chunk(
     egress: &dyn RestrictedEgress,
     credential: &SecretHandle,
     channel: &str,
@@ -391,11 +393,12 @@ async fn post_slack_chunk(
     text: &str,
     ephemeral_user: Option<&str>,
 ) -> PartDeliveryOutcome {
-    let method = if ephemeral_user.is_some() {
-        "chat.postEphemeral"
+    let endpoint = if ephemeral_user.is_some() {
+        SlackWebApiMethod::ChatPostEphemeral
     } else {
-        "chat.postMessage"
+        SlackWebApiMethod::ChatPostMessage
     };
+    let method = endpoint.name();
     let mut body = serde_json::json!({ "channel": channel, "text": text });
     if let Some(user) = ephemeral_user {
         body["user"] = serde_json::Value::String(user.to_string());
@@ -421,7 +424,7 @@ async fn post_slack_chunk(
     let response = egress
         .send(RestrictedEgressRequest {
             method: NetworkMethod::Post,
-            url: format!("https://{SLACK_API_HOST}/api/{method}"),
+            url: endpoint.url(),
             headers: vec![(
                 "content-type".to_string(),
                 "application/json; charset=utf-8".to_string(),
@@ -488,7 +491,7 @@ async fn delete_slack_message(
     let response = egress
         .send(RestrictedEgressRequest {
             method: NetworkMethod::Post,
-            url: format!("https://{SLACK_API_HOST}/api/chat.delete"),
+            url: SlackWebApiMethod::ChatDelete.url(),
             headers: vec![(
                 "content-type".to_string(),
                 "application/json; charset=utf-8".to_string(),
@@ -549,10 +552,11 @@ async fn react_slack_message(
     name: &str,
     action: ReactionAction,
 ) -> PartDeliveryOutcome {
-    let path = match action {
-        ReactionAction::Add => "reactions.add",
-        ReactionAction::Remove => "reactions.remove",
+    let endpoint = match action {
+        ReactionAction::Add => SlackWebApiMethod::ReactionsAdd,
+        ReactionAction::Remove => SlackWebApiMethod::ReactionsRemove,
     };
+    let path = endpoint.name();
     let body = match serde_json::to_vec(
         &serde_json::json!({ "channel": channel, "timestamp": ts, "name": name }),
     ) {
@@ -566,7 +570,7 @@ async fn react_slack_message(
     let response = egress
         .send(RestrictedEgressRequest {
             method: NetworkMethod::Post,
-            url: format!("https://{SLACK_API_HOST}/api/{path}"),
+            url: endpoint.url(),
             headers: vec![(
                 "content-type".to_string(),
                 "application/json; charset=utf-8".to_string(),
@@ -745,10 +749,223 @@ mod tests {
         let message = &messages[0];
         assert_eq!(message.text, "hello there");
         assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
-        assert_eq!(message.event_id.as_str(), "slack-install_alpha-Ev123");
+        // Keyed on the MESSAGE (team, channel, ts), not on Slack's per-event
+        // `event_id` — the twins Slack sends for one post carry different
+        // `event_id`s and would otherwise each admit their own run. The
+        // envelope's `event_id` is still required (see
+        // `oversized_payload_and_missing_event_id_fail_closed`), it just no
+        // longer decides identity.
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-install_alpha-msg-T-A-D123-1710000000.000100"
+        );
         assert_eq!(message.actor.id(), "U123");
         assert_eq!(message.conversation.conversation_id(), "D123");
-        assert!(message.reply_context.is_none());
+        // Every normalized message carries the package-owned reply context
+        // the reply sink needs to stream (recipient ids, session thread). A
+        // top-level DM roots its session on the message itself.
+        let context = crate::reply_context::SlackReplyContext::from_bytes(
+            message
+                .reply_context
+                .as_deref()
+                .expect("every normalized message carries a reply context"),
+        )
+        .expect("reply context parses");
+        assert_eq!(
+            context,
+            crate::reply_context::SlackReplyContext {
+                team_id: Some("T-A".to_string()),
+                channel: "D123".to_string(),
+                thread_ts: Some("1710000000.000100".to_string()),
+                user: "U123".to_string(),
+                is_dm: true,
+            }
+        );
+        message
+            .validate()
+            .expect("the reply context stays within the host's 4 KiB bound");
+    }
+
+    /// Slack's native stop button (`agent_session_stopped`) carries no
+    /// message: it is normalized into the channel's declared `stop` command
+    /// — the same `/stop` dispatch text the `/ironclaw stop` slash path
+    /// produces — in the session's conversation, with the same trigger split
+    /// as that path (`DirectChat` in a DM, `BotCommand` elsewhere).
+    #[tokio::test]
+    async fn agent_session_stopped_reaches_receive_as_the_declared_stop_command() {
+        let outcome = inbound(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvStop",
+                "team_id": "T-A",
+                "event": {
+                    "type": "agent_session_stopped",
+                    "channel": "C0123ABC456",
+                    "thread_ts": "1782234671.392669",
+                    "user": "U123ABC456",
+                    "streaming_message_ts": ["1782234987.693923"],
+                    "event_ts": "1783536983.783769"
+                }
+            }"#,
+        )
+        .await
+        .expect("stop event parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages: the stop button must become a command");
+        };
+        let message = &messages[0];
+        assert_eq!(message.text, "/stop");
+        assert_eq!(message.trigger, ProductTriggerReason::BotCommand);
+        assert_eq!(message.actor.id(), "U123ABC456");
+        assert_eq!(message.conversation.conversation_id(), "C0123ABC456");
+        assert_eq!(message.conversation.topic_id(), Some("1782234671.392669"));
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-install_alpha-agent-stop-1783536983.783769"
+        );
+        let context = crate::reply_context::SlackReplyContext::from_bytes(
+            message.reply_context.as_deref().expect("reply context"),
+        )
+        .expect("reply context parses");
+        assert_eq!(context.channel, "C0123ABC456");
+        assert_eq!(context.thread_ts.as_deref(), Some("1782234671.392669"));
+        assert!(!context.is_dm);
+
+        let outcome = inbound(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvStopDm",
+                "team_id": "T-A",
+                "event": {
+                    "type": "agent_session_stopped",
+                    "channel": "D0123ABC456",
+                    "thread_ts": "1782234671.392669",
+                    "user": "U123ABC456",
+                    "streaming_message_ts": [],
+                    "event_ts": "1783536983.783770"
+                }
+            }"#,
+        )
+        .await
+        .expect("stop event parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages");
+        };
+        assert_eq!(messages[0].text, "/stop");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::DirectChat);
+    }
+
+    /// The rest of the Agent event family is an authenticated no-op, each
+    /// with its own reason in the drop log — never filed as "unsupported",
+    /// which is what a subscribed-but-unhandled event would look like.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn agent_lifecycle_events_are_authenticated_noops_with_specific_reasons() {
+        for (event, expected_reason) in [
+            (
+                r#"{"type":"app_home_opened","user":"U1","channel":"D1","tab":"messages","event_ts":"1.0"}"#,
+                "AppHomeOpened",
+            ),
+            (
+                r#"{"type":"app_context_changed","user":"U1","channel":"D1","event_ts":"1.1"}"#,
+                "AppContextChanged",
+            ),
+            (
+                r#"{"type":"assistant_thread_started","assistant_thread":{"user_id":"U1","channel_id":"D1","thread_ts":"1.2","context":{}},"event_ts":"1.2"}"#,
+                "AssistantThreadStarted",
+            ),
+            (
+                r#"{"type":"assistant_thread_context_changed","assistant_thread":{"user_id":"U1","channel_id":"D1","thread_ts":"1.2","context":{"channel_id":"C1"}},"event_ts":"1.3"}"#,
+                "AssistantThreadContextChanged",
+            ),
+            (
+                r#"{"type":"agent_session_title_changed","channel":"C1","thread_ts":"1.2","user":"U1","title":"New","previous_title":"Old","team_id":"T-A","event_ts":"1.4"}"#,
+                "AgentSessionTitleChanged",
+            ),
+        ] {
+            let body = format!(
+                r#"{{"type":"event_callback","event_id":"Ev-{expected_reason}","team_id":"T-A","event":{event}}}"#
+            );
+            let outcome = inbound(body.as_bytes()).await.expect("agent event parses");
+            assert!(
+                matches!(outcome, InboundOutcome::Ignore),
+                "expected Ignore for {expected_reason}"
+            );
+            assert!(
+                logs_contain(expected_reason),
+                "the drop log did not carry reason {expected_reason}"
+            );
+            assert!(
+                !logs_contain("UnsupportedEventType"),
+                "an Agent event must never be filed as unsupported"
+            );
+        }
+    }
+
+    /// The incident's root symptom was not the drop — it was that the drop
+    /// left no trace. The router turns an ignore into a bare 200, so without
+    /// this log line a human message discarded by mistake is invisible in
+    /// every system we own. Deleting the `debug!` makes this fail.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn every_ignored_event_records_why_it_was_dropped() {
+        for (body, expected_reason) in [
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-bot",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "D1", "channel_type": "im",
+                    "user": "U1", "bot_id": "B1", "text": "echo",
+                    "ts": "1710000000.000300"
+                }
+            }"#
+                .as_slice(),
+                "BotAuthored",
+            ),
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-subtype",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "D1", "channel_type": "im",
+                    "user": "U1", "subtype": "channel_join",
+                    "text": "joined", "ts": "1710000000.000301"
+                }
+            }"#
+                .as_slice(),
+                "NonUserMessageSubtype",
+            ),
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-ambient",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "C1", "user": "U1",
+                    "text": "chatter", "ts": "1710000000.000302"
+                }
+            }"#
+                .as_slice(),
+                "AmbientChannelMessage",
+            ),
+        ] {
+            let outcome = inbound(body).await.expect("payload parses");
+            assert!(
+                matches!(outcome, InboundOutcome::Ignore),
+                "expected Ignore for {expected_reason}"
+            );
+            assert!(
+                logs_contain("slack inbound event produced no message"),
+                "the drop for {expected_reason} produced no log line"
+            );
+            assert!(
+                logs_contain(expected_reason),
+                "the drop log did not carry reason {expected_reason}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -778,6 +995,150 @@ mod tests {
             messages[0].conversation.topic_id(),
             Some("1710000000.000200"),
             "mention without thread anchors on its own ts"
+        );
+    }
+
+    /// Regression for the "Also send to channel" drop (#7925): Slack stamps
+    /// the SAME `app_mention` event with `subtype: "thread_broadcast"` when a
+    /// threaded reply is broadcast to the channel. Coverage previously lived
+    /// only on the private `normalize_slack_event` helper — this drives the
+    /// production caller, `SlackChannelAdapter::receive`, so a regression in
+    /// the `receive`-level admission guard (not just the helper) fails here.
+    #[tokio::test]
+    async fn a_broadcast_mention_reaches_receive_as_a_bot_mention_anchored_on_its_thread() {
+        let outcome = inbound(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvBroadcast",
+                "team_id": "T-A",
+                "event": {
+                    "type": "app_mention",
+                    "user": "U123",
+                    "channel": "C123",
+                    "subtype": "thread_broadcast",
+                    "text": "<@UBOT> what do you think?",
+                    "thread_ts": "1710000000.000010",
+                    "ts": "1710000000.000011"
+                }
+            }"#,
+        )
+        .await
+        .expect("broadcast mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages, broadcast mention must not be dropped");
+        };
+        assert_eq!(messages[0].text, "what do you think?");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotMention);
+        assert_eq!(
+            messages[0].conversation.topic_id(),
+            Some("1710000000.000010"),
+            "a broadcast mention stays anchored to the thread it was written in, not its own ts"
+        );
+    }
+
+    /// `inbound` with an explicit host-resolved config (the plain `inbound`
+    /// helper above always passes an empty config, so `mentions_bot` never
+    /// fires through it — this is the seam for driving a `message` event
+    /// that names the bot via text alone, with `slack_bot_user_id` resolved
+    /// the way the host actually resolves it).
+    async fn inbound_with_config(
+        body: &[u8],
+        config: &[(String, String)],
+    ) -> Result<InboundOutcome, ChannelError> {
+        SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config,
+                    body,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &ScriptedEgress::new(Vec::new()),
+            )
+            .await
+    }
+
+    /// The point of `TextMention` driven through the production caller: a
+    /// `message` event with NO `app_mention` twin, whose text names the bot,
+    /// still reaches `receive` as a `BotMention` rather than being dropped as
+    /// ambient chatter.
+    #[tokio::test]
+    async fn a_message_event_naming_the_bot_reaches_receive_as_a_bot_mention_with_no_app_mention_twin()
+     {
+        let config = vec![("slack_bot_user_id".to_string(), "UBOT".to_string())];
+        let outcome = inbound_with_config(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvTextMention",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message",
+                    "user": "U123",
+                    "channel": "C123",
+                    "text": "<@UBOT> can you help",
+                    "ts": "1710000000.000950"
+                }
+            }"#,
+            &config,
+        )
+        .await
+        .expect("text mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages, a message naming the bot must not be dropped");
+        };
+        assert_eq!(messages[0].text, "can you help");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotMention);
+    }
+
+    /// The counterexample to the fix above: `app_mention` with
+    /// `subtype: "document_mention"` is a canvas-body mention, not a person
+    /// addressing the bot in conversation. Slack writes `text` itself (a
+    /// caption); the person's real words live only in `blocks`, a field
+    /// this contract never reads. Fixture is Slack's own documented example
+    /// payload (<https://docs.slack.dev/reference/events/message/document_mention/>).
+    /// Drives the production caller, `SlackChannelAdapter::receive`, so a
+    /// regression that re-admits this shape through the `AppMention`
+    /// exemption fails here, not just on the private normalization helper.
+    #[tokio::test]
+    async fn a_canvas_document_mention_is_ignored_by_receive() {
+        let outcome = inbound(
+            br#"{
+                "event": {
+                    "user": "UA1BCD3EF",
+                    "subtype": "document_mention",
+                    "document_mention": {
+                        "file_id": "F123ABCDEFG",
+                        "section_id": "temp:C:GQL...",
+                        "mentioning_user_ids": ["UA1BCD3EF"]
+                    },
+                    "type": "app_mention",
+                    "ts": "1716411280.657549",
+                    "text": "<@U123456ABC7> was mentioned in a canvas",
+                    "blocks": [{
+                        "type": "section",
+                        "block_id": "gcn3v",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ">>>Hey <@U123456ABC7>",
+                            "verbatim": false
+                        }
+                    }],
+                    "team": "T1ABC2DE3",
+                    "channel": "C012ABCDEFG",
+                    "event_ts": "1716411280.657549"
+                },
+                "type": "event_callback",
+                "team_id": "T1ABC2DE3",
+                "event_id": "EvDocumentMention"
+            }"#,
+        )
+        .await
+        .expect("document mention parses");
+        assert!(
+            matches!(outcome, InboundOutcome::Ignore),
+            "a canvas-body mention must not start a turn on Slack-written caption text"
         );
     }
 
@@ -1166,6 +1527,7 @@ mod tests {
 
         fn ok(body: &str) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: body.as_bytes().to_vec(),
             })
@@ -1173,6 +1535,7 @@ mod tests {
 
         fn status(status: u16) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status,
                 body: Vec::new(),
             })
@@ -1250,6 +1613,7 @@ mod tests {
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 5".to_vec(),
             }),
@@ -1264,6 +1628,7 @@ mod tests {
                 r#"{"ok":true,"file":{"id":"F123","name":"notes.txt","mimetype":"text/plain","size":5,"url_private_download":"https://files.slack.com/files-pri/T-F/download/notes.txt"}}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"hello".to_vec(),
             }),
@@ -1475,6 +1840,7 @@ mod tests {
                 r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","size":5,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"four".to_vec(),
             }),
@@ -1569,6 +1935,7 @@ mod tests {
                         r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
                     ),
                     Ok(RestrictedEgressResponse {
+                        retry_after: None,
                         status: 200,
                         body: vec![
                             0;
@@ -1586,6 +1953,7 @@ mod tests {
                         r#"{"ok":true,"file":{"id":"F123","name":"../secret","mimetype":"text/plain","size":5,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
                     ),
                     Ok(RestrictedEgressResponse {
+                        retry_after: None,
                         status: 200,
                         body: b"hello".to_vec(),
                     }),
@@ -1638,6 +2006,7 @@ mod tests {
                 r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","size":5,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"hello".to_vec(),
             }),
@@ -1655,6 +2024,7 @@ mod tests {
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 5".to_vec(),
             }),
@@ -1716,6 +2086,7 @@ mod tests {
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 5".to_vec(),
             }),
@@ -1768,6 +2139,7 @@ mod tests {
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 5".to_vec(),
             }),
@@ -1776,6 +2148,7 @@ mod tests {
         responses.extend(
             (0..crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS).map(|_| {
                 Ok(RestrictedEgressResponse {
+                    retry_after: None,
                     status: 503,
                     body: Vec::new(),
                 })
@@ -1891,6 +2264,7 @@ mod tests {
         };
         let uploaded = || {
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 5".to_vec(),
             })
@@ -2028,6 +2402,7 @@ mod tests {
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/one","file_id":"FONE"}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 5".to_vec(),
             }),
@@ -2035,6 +2410,7 @@ mod tests {
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/two","file_id":"FTWO"}"#,
             ),
             Ok(RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: b"OK - 3".to_vec(),
             }),

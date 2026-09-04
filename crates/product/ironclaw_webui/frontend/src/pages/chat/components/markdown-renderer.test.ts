@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -32,6 +31,17 @@ function rendererEnhancerSourceForTest() {
 }
 
 class FakeElement {
+  tagName;
+  children;
+  parentNode;
+  dataset;
+  style;
+  listeners;
+  className;
+  textContent;
+  innerText;
+  scrollHeight;
+
   constructor(tagName) {
     this.tagName = tagName.toUpperCase();
     this.children = [];
@@ -125,7 +135,7 @@ function setupEnhancerContext() {
   const clipboardWrites = [];
   const timers = [];
   const clearedTimers = [];
-  const context = {
+  const context: vm.Context = {
     document: {
       createElement: (tagName) => new FakeElement(tagName),
     },

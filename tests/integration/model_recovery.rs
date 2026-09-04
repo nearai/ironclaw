@@ -184,12 +184,13 @@ async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_
 }
 
 #[tokio::test]
-async fn compaction_summary_chain_preserves_earlier_compacted_history() {
+async fn cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history() {
     const OLDEST_TURN: &str = "oldest transcript marker before compaction";
     const MIDDLE_TURN: &str = "middle transcript marker before the newest summary";
     const RETAINED_TAIL: &str = "retained transcript tail after the newest summary";
-    const OLDER_SUMMARY: &str = "older summary preserving earlier compacted history";
-    const NEWEST_SUMMARY: &str = "newest incremental compaction summary";
+    const OLDER_SUMMARY: &str = "obsolete incremental summary envelope";
+    const CUMULATIVE_SUMMARY: &str =
+        "cumulative checkpoint preserving the oldest and middle transcript facts";
 
     let harness = RebornIntegrationHarness::test_default()
         .script([
@@ -223,46 +224,52 @@ async fn compaction_summary_chain_preserves_earlier_compacted_history() {
             oldest.sequence,
             middle.sequence.checked_sub(1).expect("ordered messages"),
             OLDER_SUMMARY,
+            None,
         )
         .await
         .expect("older summary persists");
     harness
         .create_compaction_summary_for_test(
-            middle.sequence,
+            oldest.sequence,
             retained.sequence.checked_sub(1).expect("ordered messages"),
-            NEWEST_SUMMARY,
+            CUMULATIVE_SUMMARY,
+            Some(ironclaw_threads::SummaryContextMode::CumulativeBarrier),
         )
         .await
-        .expect("newest summary persists");
+        .expect("cumulative summary persists");
 
     harness
-        .submit_turn("build the prompt after the newest summary")
+        .submit_turn("build the prompt after the cumulative barrier")
         .await
         .expect("post-summary turn");
     harness
-        .assert_last_model_message_content_contains(NEWEST_SUMMARY)
+        .assert_last_model_message_content_contains(CUMULATIVE_SUMMARY)
         .await
-        .expect("newest summary reaches the prompt");
+        .expect("cumulative summary reaches the prompt");
     harness
         .assert_last_model_message_content_contains(RETAINED_TAIL)
         .await
         .expect("tail after the barrier remains visible");
     harness
-        .assert_last_model_message_content_contains(OLDER_SUMMARY)
+        .assert_last_model_message_content_not_contains(OLDER_SUMMARY)
         .await
-        .expect("earlier compacted history remains represented");
+        .expect("superseded incremental summary stays out of the prompt");
     harness
         .assert_last_model_message_content_not_contains(OLDEST_TURN)
         .await
-        .expect("raw history covered by a summary stays out of the prompt");
+        .expect("oldest raw history stays behind the barrier");
+    harness
+        .assert_last_model_message_content_not_contains(MIDDLE_TURN)
+        .await
+        .expect("middle raw history stays behind the barrier");
     harness
         .assert_conversation_history_contains(OLDEST_TURN)
         .await
-        .expect("summary projection does not delete durable history");
+        .expect("barrier projection does not delete durable history");
 }
 
 #[tokio::test]
-async fn context_overflow_recovers_with_model_visible_observation() {
+async fn context_overflow_compacts_once_and_resumes() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.
     let input_secret = concat!("AKIA", "IOSFODNN7EXAMPLE");
@@ -275,7 +282,8 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         "compacted recovery history\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n{output_secret}\n-----END ENCRYPTED PRIVATE KEY-----\nretained"
     );
     let harness = RebornIntegrationHarness::test_default()
-        .context_overflow_model_after(3, 3)
+        .with_durable_milestone_event_store_for_test()
+        .context_overflow_model_after(3, 1)
         .script([
             RebornScriptedReply::text("first setup reply"),
             RebornScriptedReply::text("second setup reply"),
@@ -305,17 +313,17 @@ async fn context_overflow_recovers_with_model_visible_observation() {
     harness
         .submit_turn("answer after compacting")
         .await
-        .expect("turn recovers after context overflow exhausts normal retries");
+        .expect("turn recovers after one context overflow");
     harness
         .assert_reply_contains("recovered after context overflow")
         .await
         .expect("recovered reply persisted");
     harness
-        .assert_model_message_content_contains(
+        .assert_model_message_content_not_contains(
             "model error observation: context overflowed; use the available context and continue",
         )
         .await
-        .expect("recovery request carries the typed context-overflow observation");
+        .expect("overflow recovery resumes from compaction without an observation retry");
     harness
         .assert_model_message_content_contains("compacted recovery history")
         .await
@@ -365,21 +373,90 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .await
         .expect("the durable compaction summary contains only redaction markers");
     harness
-        .assert_interactive_model_provider_call_count(7)
+        .assert_interactive_model_provider_call_count(5)
         .await
-        .expect("setup and context-overflow recovery use the bounded interactive budget");
+        .expect("setup, one overflow, and one resumed request use the bounded budget");
     harness
         .assert_text_model_provider_call_count_at_least(1)
         .await
         .expect("context overflow performs a real text-only compaction inference");
     harness
-        .assert_model_message_content_occurrences("model error observation", 1)
+        .assert_model_message_content_occurrences("model error observation", 0)
         .await
-        .expect("context overflow injects exactly one recovery observation");
+        .expect("context overflow does not inject an extra observation attempt");
     harness
         .assert_model_message_content_not_contains(&CONTEXT_OVERFLOW_USED_TOKENS.to_string())
         .await
         .expect("provider diagnostics do not enter the recovery prompt");
+    harness
+        .assert_model_recovery_class(
+            LoopRecoveryClass::ModelContextOverflow,
+            LoopRecoveryClass::ModelInvalidOutput,
+        )
+        .await
+        .expect("the consumed overflow recovery is recorded durably");
+}
+
+#[tokio::test]
+async fn second_context_overflow_fails_after_one_compaction() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_turn_event_sink()
+        .with_durable_milestone_event_store_for_test()
+        .context_overflow_model_after(3, 2)
+        .script([
+            RebornScriptedReply::text("first setup reply"),
+            RebornScriptedReply::text("second setup reply"),
+            RebornScriptedReply::text("third setup reply"),
+            RebornScriptedReply::text("single overflow compaction summary"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("first setup turn")
+        .await
+        .expect("first setup turn");
+    harness
+        .submit_turn("second setup turn")
+        .await
+        .expect("second setup turn");
+    harness
+        .submit_turn(&format!("third setup turn {}", "history ".repeat(5_000)))
+        .await
+        .expect("third setup turn");
+
+    let run_id = harness
+        .submit_turn_async("fail after one overflow recovery")
+        .await
+        .expect("turn submitted");
+    harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("second overflow fails the run");
+
+    harness
+        .assert_summary_artifact_count_at_least(1)
+        .await
+        .expect("exactly one recovery path reaches durable compaction");
+    harness
+        .assert_interactive_model_provider_call_count(5)
+        .await
+        .expect("setup plus two overflow attempts are bounded");
+    harness
+        .assert_model_message_content_occurrences("model error observation", 0)
+        .await
+        .expect("a second overflow does not receive an observation retry");
+    harness
+        .assert_turn_event_recorded(TurnEventKind::Failed)
+        .await
+        .expect("terminal overflow failure is durable");
+    harness
+        .assert_model_recovery_class(
+            LoopRecoveryClass::ModelContextOverflow,
+            LoopRecoveryClass::ModelInvalidOutput,
+        )
+        .await
+        .expect("the single consumed recovery remains durably recorded");
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test, vi } from "vitest";
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import {
   adminUserActionErrorMessage,
   formatRelativeTime,
@@ -8,7 +8,7 @@ import {
   formatUserStatus,
 } from "./admin-presenters";
 
-function keyedT(key, params = {}) {
+function keyedT(key, params: DynamicTestOptions = {}) {
   return params.count == null ? key : `${key}:${params.count}`;
 }
 

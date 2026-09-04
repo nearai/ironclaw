@@ -1,8 +1,12 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type {
+  DynamicTestOptions,
+  VmComponentProps,
+} from "../../test-support/dynamic-test-types";
 
 // Load the page source, drop its imports, and expose LogsPage so we can invoke
 // it with mocked dependencies and inspect the lightweight TSX tree shape emitted
@@ -47,9 +51,11 @@ function createLogsPageHarness(overrides = {}) {
   const hookValues = [];
   let hookCursor = 0;
   function ConfirmDialog() {}
+  function SearchField() {}
   function SelectMenu() {}
-  const context = {
+  const context: vm.Context = {
     ConfirmDialog,
+    SearchField,
     SelectMenu,
     globalThis: {},
     React: {
@@ -91,6 +97,7 @@ function createLogsPageHarness(overrides = {}) {
   vm.runInNewContext(logsPageSourceForTest(), context);
   return {
     ConfirmDialog,
+    SearchField,
     SelectMenu,
     render() {
       hookCursor = 0;
@@ -110,7 +117,10 @@ function renderLogsPage(overrides = {}) {
 // LogEntry adds more state. `window` injects a stub so the onClick selection
 // guard can be exercised (the vm sandbox has no `window` otherwise, which is
 // the production-safe SSR/no-window path).
-function renderLogEntry(entry, { expanded = false, window: windowStub } = {}) {
+function renderLogEntry(
+  entry,
+  { expanded = false, window: windowStub }: DynamicTestOptions = {},
+) {
   const setExpanded = (() => {
     const fn = (arg) => {
       fn.calls.push(arg);
@@ -119,7 +129,7 @@ function renderLogEntry(entry, { expanded = false, window: windowStub } = {}) {
     return fn;
   })();
   let firstUseState = true;
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     React: {
       useRef: (initial) => ({ current: initial }),
@@ -180,12 +190,12 @@ function visit(node, fn, visited = new WeakSet()) {
 }
 
 function componentProps(root, component) {
-  const props = [];
+  const props: VmComponentProps[] = [];
   visit(root, (node) => {
     if (!Array.isArray(node.values)) return;
     for (let index = 0; index < node.values.length; index += 1) {
       if (node.values[index] !== component) continue;
-      const current = {};
+      const current: VmComponentProps = {};
       for (let propIndex = index + 1; propIndex < node.values.length; propIndex += 1) {
         const name = node.strings[propIndex]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
         if (name) current[name] = node.values[propIndex];
@@ -345,7 +355,7 @@ test("LogsPage changes the log level through the compact shared SelectMenu", () 
   assert.equal(levelSelect.align, "left");
   assert.equal(levelSelect["data-testid"], "logs-level-filter");
   assert.equal(
-    Array.from(levelSelect.options, (option) => option.value).join(","),
+    Array.from(levelSelect.options, (option: VmComponentProps) => option.value).join(","),
     "all,trace,debug,info,warn,error",
   );
   assert.match(flattenMarkup(rendered), /ironclaw::agent/);
@@ -353,6 +363,25 @@ test("LogsPage changes the log level through the compact shared SelectMenu", () 
 
   levelSelect.onChange("warn");
   assert.deepEqual(changes, ["warn"]);
+});
+
+test("LogsPage filters targets through the compact shared SearchField", () => {
+  const changes = [];
+  const harness = createLogsPageHarness({
+    targetFilter: "ironclaw::agent",
+    setTargetFilter: (value) => changes.push(value),
+  });
+
+  const [targetSearch] = componentProps(harness.render(), harness.SearchField);
+  assert.ok(targetSearch, "expected LogsPage to render the shared SearchField");
+  assert.equal(targetSearch.value, "ironclaw::agent");
+  assert.equal(targetSearch.size, "sm");
+  assert.equal(targetSearch["aria-label"], "logs.filterTarget");
+  assert.equal(targetSearch.clearLabel, "settings.clearSearch");
+
+  targetSearch.onChange("ironclaw::runtime");
+  targetSearch.onClear();
+  assert.deepEqual(changes, ["ironclaw::runtime", ""]);
 });
 
 test("LogsPage changes the server level through the compact shared SelectMenu", () => {
@@ -369,7 +398,7 @@ test("LogsPage changes the server level through the compact shared SelectMenu", 
   assert.equal(serverSelect.size, "sm");
   assert.equal(serverSelect["data-testid"], "logs-server-level");
   assert.equal(
-    Array.from(serverSelect.options, (option) => option.value).join(","),
+    Array.from(serverSelect.options, (option: VmComponentProps) => option.value).join(","),
     "trace,debug,info,warn,error",
   );
 

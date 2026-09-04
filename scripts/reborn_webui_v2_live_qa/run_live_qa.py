@@ -2551,7 +2551,7 @@ async def _live_github_latest_release(owner: str, repo: str) -> dict[str, str]:
 async def _wait_for_google_sheet_marker_after_slack_event(
     ctx: LiveQaContext,
     *,
-    event_id: str,
+    message_key: str,
     access_token: str,
     spreadsheet_id: str,
     marker: str,
@@ -2566,7 +2566,7 @@ async def _wait_for_google_sheet_marker_after_slack_event(
     while time.monotonic() < deadline:
         approval = await _approve_slack_event_gates(
             ctx,
-            event_id=event_id,
+            message_key=message_key,
             approved_gate_refs=approved_gate_refs,
         )
         if approval.get("run_id"):
@@ -2948,9 +2948,26 @@ def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[
     return routes
 
 
-def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | None:
+def _slack_message_key(channel_id: str, ts: str) -> str:
+    """The message identity Slack ingress keys its admission record on.
+
+    Slack sends twins -- an `app_mention` and a `message` -- with DISTINCT
+    envelope `event_id`s for one post, so keying admission on the envelope id
+    would admit two runs and answer one mention twice. Ingress therefore builds
+    its `external_event_id` from the message itself:
+    `slack-{installation}-msg-{team}-{channel}-{ts}` (see
+    `build_message_event_id` in `crates/extensions/packages/slack/src/payload.rs`).
+
+    `(channel, ts)` is the trailing, installation- and team-independent part of
+    that id, which is what lets this match without resolving an installation id
+    the harness never sees.
+    """
+    return f"-{channel_id}-{ts}"
+
+
+def _slack_event_run_id_for_message(reborn_home: Path, message_key: str) -> str | None:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    if not db_path.exists() or not event_id:
+    if not db_path.exists() or not message_key:
         return None
     with closing(sqlite3.connect(db_path)) as db:
         row = db.execute(
@@ -2964,7 +2981,7 @@ def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | Non
             ORDER BY updated_at DESC, path DESC
             LIMIT 1
             """,
-            (event_id,),
+            (message_key,),
         ).fetchone()
     if not row:
         return None
@@ -3017,10 +3034,10 @@ async def _approve_delivered_gate_routes_for_run(
 async def _approve_slack_event_gates(
     ctx: LiveQaContext,
     *,
-    event_id: str,
+    message_key: str,
     approved_gate_refs: set[str],
 ) -> dict[str, object]:
-    run_id = _slack_event_run_id_for_event(ctx.reborn_home, event_id)
+    run_id = _slack_event_run_id_for_message(ctx.reborn_home, message_key)
     if not run_id:
         return {"run_id": None, "approval_attempts": []}
     return {
@@ -3036,18 +3053,18 @@ async def _approve_slack_event_gates(
 async def _wait_for_slack_event_run_id(
     ctx: LiveQaContext,
     *,
-    event_id: str,
+    message_key: str,
     timeout: float = 180.0,
 ) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        run_id = _slack_event_run_id_for_event(ctx.reborn_home, event_id)
+        run_id = _slack_event_run_id_for_message(ctx.reborn_home, message_key)
         if run_id:
             return run_id
         await asyncio.sleep(1.0)
     raise AssertionError(
         "Slack event was not accepted into a Reborn run before timeout. "
-        f"event_id={event_id!r}"
+        f"message_key={message_key!r}"
     )
 
 
@@ -5295,7 +5312,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             event_id=f"EvREBORNQA5D{suffix}",
         )
         observed["signed_event"] = post_result
-        event_id = str(post_result.get("event_id") or f"EvREBORNQA5D{suffix}")
+        message_key = str(post_result["message_key"])
         deadline = time.monotonic() + 360.0
         last_history: dict[str, object] | None = None
         approved_gate_refs: set[str] = set()
@@ -5304,7 +5321,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
         while time.monotonic() < deadline:
             approval = await _approve_slack_event_gates(
                 ctx,
-                event_id=event_id,
+                message_key=message_key,
                 approved_gate_refs=approved_gate_refs,
             )
             if approval.get("run_id"):
@@ -6147,20 +6164,25 @@ async def _post_signed_slack_dm_event(
         setup = slack.get("setup")
         if isinstance(setup, dict):
             api_app_id = setup.get("api_app_id")
+    # Minted here, not inline in the payload, because it is half of the message
+    # identity ingress dedups on -- the caller needs it to find the admitted run
+    # (see `_slack_message_key`).
+    now = time.time()
+    ts = f"{int(now)}.{int((now % 1) * 1_000_000):06d}"
     payload = {
         "token": "live-qa-local-signed-event",
         "team_id": str(team_id or ""),
         "api_app_id": str(api_app_id or ""),
         "type": "event_callback",
         "event_id": event_id,
-        "event_time": int(time.time()),
+        "event_time": int(now),
         "event": {
             "type": "message",
             "user": user_id,
             "text": text,
             "channel": channel_id,
             "channel_type": "im",
-            "ts": f"{int(time.time())}.{int((time.time() % 1) * 1_000_000):06d}",
+            "ts": ts,
         },
     }
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -6179,6 +6201,8 @@ async def _post_signed_slack_dm_event(
         "status_code": response.status_code,
         "body_excerpt": response_text,
         "event_id": event_id,
+        "ts": ts,
+        "message_key": _slack_message_key(channel_id, ts),
         "channel_id_present": bool(channel_id),
         "synthetic_user_id": user_id,
     }
@@ -6223,7 +6247,7 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
         observed["signed_event"] = post_result
         run_id = await _wait_for_slack_event_run_id(
             ctx,
-            event_id=event_id,
+            message_key=str(post_result["message_key"]),
             timeout=180.0,
         )
         observed["accepted_run_id"] = run_id
@@ -6323,7 +6347,7 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
         )
         marker_check = await _wait_for_google_sheet_marker_after_slack_event(
             ctx,
-            event_id=str(post_result.get("event_id") or event_id),
+            message_key=str(post_result["message_key"]),
             access_token=access_token,
             spreadsheet_id=spreadsheet_id,
             marker=row_marker,

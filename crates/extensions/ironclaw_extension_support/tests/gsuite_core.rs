@@ -51,6 +51,23 @@ fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
         .map(|package| package.capabilities.len())
         .sum::<usize>();
     assert_eq!(capability_count, 15);
+
+    let gmail = ironclaw_extension_support::packages::bundled_packages()
+        .into_iter()
+        .find(|package| package.id == "gmail")
+        .expect("Gmail package is bundled");
+    assert!(gmail.manifest_toml.contains("version = \"0.2.0\""));
+    assert!(
+        gmail
+            .manifest_toml
+            .contains("output_schema_ref = \"schemas/gmail/get_message.output.v2.json\"")
+    );
+    assert!(
+        gmail
+            .assets
+            .iter()
+            .any(|asset| { asset.path == "schemas/gmail/get_message.output.v2.json" })
+    );
 }
 
 #[test]
@@ -1016,7 +1033,10 @@ async fn gmail_handler_integration_tests() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
-    let egress = Arc::new(RecordingEgress::permissive_success());
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({ "messages": [] })),
+        RecordingEgress::json(fixture("gmail", "message_get.json")),
+    ]));
 
     dispatch_ok(
         auth.clone(),
@@ -1799,8 +1819,6 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
         provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE),
     ];
     let auth = auth_with_google_account(&scope, all_scopes).await;
-    let egress = Arc::new(RecordingEgress::permissive_success());
-
     let cases = [
         (
             CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
@@ -1887,6 +1905,18 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
             "/users/me/messages/msg-1/trash",
         ),
     ];
+    let egress = Arc::new(RecordingEgress::with_responses(
+        cases
+            .iter()
+            .map(|(capability, _, _, _)| {
+                if *capability == GMAIL_GET_MESSAGE_CAPABILITY_ID {
+                    RecordingEgress::json(fixture("gmail", "message_get.json"))
+                } else {
+                    RecordingEgress::json(json!({ "id": "provider-result" }))
+                }
+            })
+            .collect(),
+    ));
 
     for (capability, input, _, _) in &cases {
         dispatch_ok(

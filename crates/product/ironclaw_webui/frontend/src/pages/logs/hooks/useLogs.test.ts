@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 function useLogsSourceForTest() {
   const source = readFileSync(new URL("./useLogs.ts", import.meta.url), "utf8");
@@ -29,7 +30,7 @@ function createHookHarness({
   useLogsArgs = {},
   queryLogsImpl,
   queryOperatorLogsImpl,
-} = {}) {
+}: DynamicTestOptions = {}): DynamicTestOptions {
   const calls = [];
   const intervals = [];
   let location = { search };
@@ -84,7 +85,7 @@ function createHookHarness({
     },
   };
 
-  const context = {
+  const context: vm.Context = {
     AbortController,
     React,
     clearInterval: () => {},
@@ -206,8 +207,10 @@ test("useLogs falls back to caller-scoped logs when operator logs reject privile
     search: "?thread_id=thread-a",
     useLogsArgs: { isAdmin: true },
     queryOperatorLogsImpl: async () => {
-      const error = new Error("Operator WebUI configuration privileges required");
-      error.status = 403;
+      const error = Object.assign(
+        new Error("Operator WebUI configuration privileges required"),
+        { status: 403 },
+      );
       throw error;
     },
     queryLogsImpl: async () => ({
@@ -260,7 +263,7 @@ test("useLogs requests the next cursor and merges deduplicated older entries", a
   assert.equal(harness.calls.length, 2);
   assert.equal(harness.calls[1].cursor, "cursor-1");
   assert.deepEqual(
-    Array.from(result.entries, (entry) => entry.id),
+    Array.from(result.entries, (entry: DynamicTestOptions) => entry.id),
     ["latest", "overlap", "older"],
   );
   assert.equal(result.nextCursor, null);
@@ -301,7 +304,7 @@ test("useLogs preserves paginated entries while polling refreshes the latest pag
   result = harness.render();
 
   assert.deepEqual(
-    Array.from(result.entries, (entry) => entry.id),
+    Array.from(result.entries, (entry: DynamicTestOptions) => entry.id),
     ["latest-3", "latest-2", "latest-1", "overlap", "older"],
   );
   assert.equal(
@@ -371,14 +374,20 @@ test("useLogs resets paginated entries and cursor when filters change", async ()
   let result = harness.render();
   await result.loadOlder();
   result = harness.render();
-  assert.deepEqual(Array.from(result.entries, (entry) => entry.id), ["latest", "older"]);
+  assert.deepEqual(
+    Array.from(result.entries, (entry: DynamicTestOptions) => entry.id),
+    ["latest", "older"],
+  );
 
   result.setLevelFilter("warn");
   harness.render();
   await harness.runEffects();
   result = harness.render();
 
-  assert.deepEqual(Array.from(result.entries, (entry) => entry.id), ["warn-latest"]);
+  assert.deepEqual(
+    Array.from(result.entries, (entry: DynamicTestOptions) => entry.id),
+    ["warn-latest"],
+  );
   assert.equal(result.nextCursor, "warn-cursor");
   assert.equal(harness.calls.at(-1).level, "warn");
   assert.equal(harness.calls.at(-1).cursor, null);
@@ -474,7 +483,7 @@ test("useLogs exposes pagination errors and retries the same cursor", async () =
   assert.equal(result.loadMoreError, null);
   assert.equal(result.nextCursor, null);
   assert.deepEqual(
-    Array.from(result.entries, (entry) => entry.id),
+    Array.from(result.entries, (entry: DynamicTestOptions) => entry.id),
     ["latest", "older"],
   );
 });
@@ -528,13 +537,16 @@ test("useLogs surfaces the fallback error when caller-scoped logs also fail", as
     search: "?thread_id=thread-a",
     useLogsArgs: { isAdmin: true },
     queryOperatorLogsImpl: async () => {
-      const error = new Error("Operator WebUI configuration privileges required");
-      error.status = 403;
+      const error = Object.assign(
+        new Error("Operator WebUI configuration privileges required"),
+        { status: 403 },
+      );
       throw error;
     },
     queryLogsImpl: async () => {
-      const error = new Error("caller logs unavailable");
-      error.status = 503;
+      const error = Object.assign(new Error("caller logs unavailable"), {
+        status: 503,
+      });
       throw error;
     },
   });
@@ -640,8 +652,7 @@ test("useLogs recovers public logs after a stale scoped thread returns 404", asy
     useLogsArgs: { isAdmin: false },
     queryLogsImpl: async (request, callCount) => {
       if (request.threadId === "thread-stale") {
-        const error = new Error("not found");
-        error.status = 404;
+        const error = Object.assign(new Error("not found"), { status: 404 });
         throw error;
       }
       return { entries: [{ id: String(callCount) }] };

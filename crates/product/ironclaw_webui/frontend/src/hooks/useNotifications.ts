@@ -15,6 +15,11 @@ type RenderedNotificationSource = {
   turnRunId: string;
 };
 
+export type NotificationProfile = {
+  tenant_id: string;
+  user_id: string;
+};
+
 const NOTIFICATION_LIMIT = 30;
 /* A stop so one hook cannot walk an unbounded inbox in a single pass. The
  * store's own per-recipient bound is far larger than anyone pages through by
@@ -98,7 +103,7 @@ function optimisticHandlers(queryClient, queryKey, archive) {
 }
 
 export function useNotifications(
-  options: { profile?: any; enabled?: boolean } = {},
+  options: { profile?: NotificationProfile | null; enabled?: boolean } = {},
 ) {
   const { profile, enabled = true } = options;
   const { t } = useI18n();

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ironclaw_host_api::resolution::{Blocked, Resolution, Suspension};
 use ironclaw_loop_contracts::{
     CapabilityApprovalResume, CapabilityCallCandidate, CapabilityResultMessage, LoopBlocked,
     LoopExit, LoopProgressEvent,
@@ -42,6 +43,36 @@ fn enforce_gate_outcome_contract(outcome: GateOutcome, kind: GateKind) -> GateOu
             GateOutcome::Abort { gate, failure_kind }
         }
     }
+}
+
+/// The gate kind this outcome would stage a BeforeBlock checkpoint for, or
+/// `None` when the outcome is not gate-writing.
+///
+/// Single source of truth for the gate-writing variant set:
+/// [`gate_outcome_writes_before_block`] and
+/// [`crate::executor::capability_outcomes::persist_later_gate_outcome`]
+/// both derive from this mapping, so a future gate-writing `Resolution`
+/// variant can never be added to the predicate without the later-sibling
+/// persistence handling it (a divergence would otherwise surface only at
+/// runtime as the terminal `PlannerContract` error). `DependentRun` maps to
+/// `GateKind::AwaitDependentRun` but is persisted with its concrete result.
+pub(super) fn gate_outcome_kind(resolution: &Resolution) -> Option<GateKind> {
+    match resolution {
+        Resolution::Blocked(Blocked::Approval(_)) => Some(GateKind::Approval),
+        Resolution::Blocked(Blocked::Auth(_)) => Some(GateKind::Auth),
+        Resolution::Blocked(Blocked::Resource(_)) => Some(GateKind::Resource),
+        Resolution::Suspended(Suspension::ExternalTool(_)) => Some(GateKind::ExternalTool),
+        Resolution::Suspended(Suspension::DependentRun { .. }) => Some(GateKind::AwaitDependentRun),
+        Resolution::Done(_) | Resolution::Denied(_) => None,
+        Resolution::Suspended(Suspension::Process(_)) => None,
+    }
+}
+
+/// Whether handling this outcome through `CapabilityStage::handle_capability_outcome`
+/// stages a BeforeBlock checkpoint — the gate-writing outcomes the drain must
+/// treat as candidates for the batch's single gate exit.
+pub(super) fn gate_outcome_writes_before_block(resolution: &Resolution) -> bool {
+    gate_outcome_kind(resolution).is_some()
 }
 
 #[derive(Debug, Default, Clone, Copy)]
