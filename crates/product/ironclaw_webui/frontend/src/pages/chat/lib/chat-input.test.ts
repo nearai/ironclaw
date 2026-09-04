@@ -1337,6 +1337,73 @@ test("ChatInput command-menu footer usage hint follows the active row after Arro
   assert.equal(usageAt(tree), MENU_COMMANDS[1].usage);
 });
 
+test("ChatInput keeps the active command-menu option inside the scroll viewport", () => {
+  const { render } = renderChatInputStateful({
+    getDraftByKey: { thread: "/mo" },
+  });
+
+  let tree = render({ draftKey: "thread", commands: MENU_COMMANDS });
+  const listbox = findNode(
+    tree,
+    (node) => node.props?.id === "chat-command-menu-listbox",
+  );
+  const listboxProps = templateProps(listbox);
+  const scrollCalls = [];
+  const options = new Map([
+    ["chat-command-option-model", {
+      getBoundingClientRect: () => ({ top: 20, bottom: 60 }),
+    }],
+    ["chat-command-option-modelinfo", {
+      getBoundingClientRect: () => ({ top: 95, bottom: 135 }),
+    }],
+  ]);
+  listboxProps.ref.current = {
+    getBoundingClientRect: () => ({ top: 20, bottom: 100 }),
+    querySelector: (selector) => options.get(selector.slice(1)) || null,
+    scrollBy: (options) => scrollCalls.push(options),
+  };
+
+  templateProps(findTextarea(tree)).onKeyDown({
+    key: "ArrowDown",
+    preventDefault: () => {},
+  });
+  tree = render({ draftKey: "thread", commands: MENU_COMMANDS });
+
+  assert.equal(extractText(findCommandOption(tree, "modelinfo")).includes("Model info"), true);
+  assert.equal(scrollCalls.length, 1);
+  assert.equal(scrollCalls[0].top, 35);
+});
+
+test("ChatInput scrolls a hovered command-menu option into view", () => {
+  const refs = [];
+  const { tree } = renderChatInput({
+    refs,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/",
+    commands: MENU_COMMANDS,
+  });
+  const listbox = findNode(
+    tree,
+    (node) => node.props?.id === "chat-command-menu-listbox",
+  );
+  const scrollCalls = [];
+  templateProps(listbox).ref.current = {
+    getBoundingClientRect: () => ({ top: 20, bottom: 100 }),
+    scrollBy: (options) => scrollCalls.push(options),
+  };
+
+  templateProps(findCommandOption(tree, "status")).onMouseEnter({
+    currentTarget: {
+      getBoundingClientRect: () => ({ top: 90, bottom: 130 }),
+    },
+  });
+
+  assert.equal(scrollCalls.length, 1);
+  assert.equal(scrollCalls[0].top, 30);
+});
+
 test("ChatInput command-menu header shows a label and the match count out of the full inventory", () => {
   const { tree } = renderChatInput({
     disabled: false,

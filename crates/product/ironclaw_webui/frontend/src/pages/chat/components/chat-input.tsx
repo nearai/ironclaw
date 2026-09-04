@@ -27,6 +27,17 @@ import {
   shouldAutoFocusComposer,
 } from "../lib/chat-input-focus";
 
+function keepCommandOptionVisible(listbox, option) {
+  if (!listbox || !option) return;
+  const listboxRect = listbox.getBoundingClientRect();
+  const optionRect = option.getBoundingClientRect();
+  if (optionRect.top < listboxRect.top) {
+    listbox.scrollBy({ top: optionRect.top - listboxRect.top });
+  } else if (optionRect.bottom > listboxRect.bottom) {
+    listbox.scrollBy({ top: optionRect.bottom - listboxRect.bottom });
+  }
+}
+
 export function ChatInput({
   onSend,
   commands = [],
@@ -198,6 +209,7 @@ export function ChatInput({
   // Tracks the token as of the last `handleChange` (or mount), so typing that
   // changes the filtered set can reset the selection — see `handleChange`.
   const commandTokenRef = React.useRef(commandToken);
+  const commandMenuListRef = React.useRef(null);
   const hasCommandInventory = commands.length > 0;
   const hasMenuMatches = menuCommands.length > 0;
   // Broader than "has matches": when commands are available, the popover
@@ -216,6 +228,15 @@ export function ChatInput({
   );
   const activeMenuCommand =
     menuVisible && hasMenuMatches ? menuCommands[activeMenuIndex] : null;
+
+  React.useEffect(() => {
+    const listbox = commandMenuListRef.current;
+    if (!listbox || !activeMenuCommand) return;
+    const option = listbox.querySelector(
+      `#chat-command-option-${activeMenuCommand.name}`,
+    );
+    keepCommandOptionVisible(listbox, option);
+  }, [activeMenuCommand]);
 
   // Shared by every place `text` is set PROGRAMMATICALLY rather than via
   // `handleChange` (draft restore on a thread switch, an explicit
@@ -647,6 +668,7 @@ export function ChatInput({
             </div>
 
             <div
+              ref={commandMenuListRef}
               id="chat-command-menu-listbox"
               role="listbox"
               aria-label={t("chat.commandMenu")}
@@ -680,7 +702,13 @@ export function ChatInput({
                       role="option"
                       aria-selected={isActive}
                       onMouseDown={(e) => e.preventDefault()}
-                      onMouseEnter={() => selectMenuIndex(index)}
+                      onMouseEnter={(event) => {
+                        selectMenuIndex(index);
+                        keepCommandOptionVisible(
+                          commandMenuListRef.current,
+                          event.currentTarget,
+                        );
+                      }}
                       onClick={() => completeMenuCommand(command)}
                       className={[
                         "flex w-full items-start gap-2.5 rounded-lg border-l-2 px-2.5 py-2 text-left",

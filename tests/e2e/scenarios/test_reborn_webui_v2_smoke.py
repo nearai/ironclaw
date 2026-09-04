@@ -3480,6 +3480,50 @@ async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
     await expect(assistant_bubble).not_to_contain_text("IronClaw")
 
 
+async def test_reborn_v2_command_menu_keeps_keyboard_selection_visible(
+    reborn_v2_page, reborn_v2_server
+):
+    """Keyboard navigation scrolls the active slash command into view."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await expect(composer).to_be_visible(timeout=15000)
+    await composer.fill("/")
+
+    listbox = reborn_v2_page.locator(SEL_V2["command_menu_listbox"])
+    options = reborn_v2_page.locator(SEL_V2["command_menu_option"])
+    await expect(listbox).to_be_visible()
+    option_count = await options.count()
+    assert option_count > 5, "the command inventory must overflow the bounded menu"
+
+    for _ in range(option_count - 1):
+        await composer.press("ArrowDown")
+
+    selected = listbox.locator('[role="option"][aria-selected="true"]')
+    await expect(selected).to_have_count(1)
+    metrics = await selected.evaluate(
+        """option => {
+          const listbox = option.closest('[role="listbox"]');
+          const optionRect = option.getBoundingClientRect();
+          const listboxRect = listbox.getBoundingClientRect();
+          return {
+            listboxBottom: listboxRect.bottom,
+            listboxTop: listboxRect.top,
+            optionBottom: optionRect.bottom,
+            optionTop: optionRect.top,
+            scrollTop: listbox.scrollTop,
+          };
+        }"""
+    )
+    assert metrics["scrollTop"] > 0, metrics
+    assert metrics["optionTop"] >= metrics["listboxTop"] - 1, metrics
+    assert metrics["optionBottom"] <= metrics["listboxBottom"] + 1, metrics
+
+
 async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
     """Links inside an assistant reply open in a new tab."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
