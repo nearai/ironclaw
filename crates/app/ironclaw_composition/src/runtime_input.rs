@@ -315,6 +315,44 @@ impl TriggerPollerSettings {
     }
 }
 
+/// How often the periodic subagent background-edge sweep
+/// (`sweep_unclosed_background_edges`) re-scans the deployment for stranded
+/// background await-edges, after its once-at-boot pass. Deliberately far
+/// above the process supervisor's 10s `lease_recovery_interval`: this sweep
+/// is a deployment-wide healing backstop for the rare case where a parent
+/// thread's own attention delivery was refused and no other run-start ever
+/// re-drives it, not a hot loop — 5 minutes bounds how long a stranded
+/// background reply can wait between passes without re-scanning every scope
+/// in the deployment every few seconds.
+pub(crate) const DEFAULT_SUBAGENT_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Configuration for the composition-owned subagent background-edge sweep
+/// (`ironclaw_turn_runner::subagent::await_edge::boot_recovery::sweep_unclosed_background_edges`).
+///
+/// Mirrors [`KeepaliveSweepSettings`]'s enabled/interval shape: a boot pass
+/// runs once regardless, then the periodic pass repeats on `interval` for as
+/// long as `enabled` stays true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubagentSweepSettings {
+    /// Whether the periodic pass runs after the boot pass. Defaults to
+    /// `true`: without this sweep a background subagent's result can be
+    /// written into its parent's thread with no run ever attending to it
+    /// again, so leaving it off is not a safe default the way the trigger
+    /// poller's or keepalive sweep's off-by-default is.
+    pub enabled: bool,
+    /// How often the periodic pass repeats. Default: [`DEFAULT_SUBAGENT_SWEEP_INTERVAL`].
+    pub interval: Duration,
+}
+
+impl Default for SubagentSweepSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval: DEFAULT_SUBAGENT_SWEEP_INTERVAL,
+        }
+    }
+}
+
 /// Full input for `build_reborn_runtime` — substrate config plus the extras
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
@@ -336,6 +374,7 @@ pub struct RebornRuntimeInput {
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: KeepaliveSweepSettings,
+    pub subagent_sweep: SubagentSweepSettings,
     /// Explicit fire-time access checker override. Primarily a test/advanced
     /// seam; production callers set [`trigger_fire_access`](Self::trigger_fire_access)
     /// and let the build construct the checker. When set, it takes precedence
@@ -416,6 +455,7 @@ impl RebornRuntimeInput {
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: KeepaliveSweepSettings::default(),
+            subagent_sweep: SubagentSweepSettings::default(),
             trigger_fire_access_checker: None,
             trigger_fire_access: TriggerFireAccessPolicy::default(),
             poll: PollSettings::default(),
@@ -591,6 +631,11 @@ impl RebornRuntimeInput {
         credential_refresh: KeepaliveSweepSettings,
     ) -> Self {
         self.credential_refresh = credential_refresh;
+        self
+    }
+
+    pub fn with_subagent_sweep_settings(mut self, subagent_sweep: SubagentSweepSettings) -> Self {
+        self.subagent_sweep = subagent_sweep;
         self
     }
 

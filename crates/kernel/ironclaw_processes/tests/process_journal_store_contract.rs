@@ -35,9 +35,9 @@ use ironclaw_processes::{
     ProcessSubmissionEdge, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
     ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort, ProcessWorkerId,
     PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
-    ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
-    StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
-    TransitionProcessDependencyRequest,
+    ReserveProcessTreeRequest, ResumeProcessRequest, ScanUnclosedProcessDependenciesRequest,
+    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest, SuspendProcessRequest, TransitionProcessDependencyRequest,
 };
 use serde_json::json;
 use std::{
@@ -3058,6 +3058,329 @@ async fn explicit_dependency_open_is_idempotent_scope_bound_and_abandonable() {
             .await
             .expect("query open dependencies")
             .is_empty()
+    );
+}
+
+fn other_tenant_scope() -> ResourceScope {
+    let mut scope = scope();
+    scope.tenant_id = TenantId::new("tenant-journal-other").expect("other tenant");
+    scope
+}
+
+/// R4 boot/periodic pass primitive: an unscoped `scan_unclosed_process_dependencies`
+/// must surface unclosed dependencies from every scope in one call — the whole
+/// point of the primitive over `ProcessDependencyQuery`, whose `scope` field is
+/// mandatory.
+#[tokio::test]
+async fn scan_unclosed_process_dependencies_crosses_scopes() {
+    let store = new_store();
+    let scope_a = scope();
+    let scope_b = other_tenant_scope();
+    let dependent_a = ProcessId::new();
+    let dependent_b = ProcessId::new();
+    submit_internal_process(&store, &scope_a, dependent_a).await;
+    submit_internal_process(&store, &scope_b, dependent_b).await;
+
+    let opened_a = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_a,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_a,
+            scope: scope_a.clone(),
+            group_ref: Some("bg:cross-scope".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency in scope a");
+    let opened_b = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_b,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_b,
+            scope: scope_b.clone(),
+            group_ref: Some("bg:cross-scope".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency in scope b");
+
+    let response = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: None,
+            states: Vec::new(),
+            group_ref_prefix: None,
+            limit: 100,
+            after: None,
+        })
+        .await
+        .expect("scan unclosed dependencies");
+
+    let mut expected = vec![opened_a, opened_b];
+    expected.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    assert_eq!(response.dependencies, expected);
+    assert_eq!(response.next_after, None);
+}
+
+/// `scope_filter` narrows the cross-scope scan to one scope's owner.
+#[tokio::test]
+async fn scan_unclosed_process_dependencies_narrows_by_scope_filter() {
+    let store = new_store();
+    let scope_a = scope();
+    let scope_b = other_tenant_scope();
+    let dependent_a = ProcessId::new();
+    let dependent_b = ProcessId::new();
+    submit_internal_process(&store, &scope_a, dependent_a).await;
+    submit_internal_process(&store, &scope_b, dependent_b).await;
+
+    let opened_a = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_a,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_a,
+            scope: scope_a.clone(),
+            group_ref: Some("bg:scope-filter".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency in scope a");
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_b,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_b,
+            scope: scope_b.clone(),
+            group_ref: Some("bg:scope-filter".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency in scope b");
+
+    let response = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: Some(scope_a),
+            states: Vec::new(),
+            group_ref_prefix: None,
+            limit: 100,
+            after: None,
+        })
+        .await
+        .expect("scan unclosed dependencies narrowed to scope a");
+
+    assert_eq!(response.dependencies, vec![opened_a]);
+    assert_eq!(response.next_after, None);
+}
+
+/// A consumed (closed) dependency must never surface, whether reached alone
+/// or alongside a still-open edge in another scope.
+#[tokio::test]
+async fn scan_unclosed_process_dependencies_excludes_closed() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+    let consumed = store
+        .consume_process_dependency(CloseProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            closed_at: Utc::now(),
+        })
+        .await
+        .expect("consume dependency")
+        .expect("dependency exists");
+    assert_eq!(consumed.state, ProcessDependencyState::Consumed);
+
+    let still_open_dependent = ProcessId::new();
+    submit_internal_process(&store, &scope(), still_open_dependent).await;
+    let still_open = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: still_open_dependent,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: still_open_dependent,
+            scope: scope(),
+            group_ref: Some("gate:transition".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open still-unclosed dependency");
+
+    let response = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: None,
+            states: Vec::new(),
+            group_ref_prefix: None,
+            limit: 100,
+            after: None,
+        })
+        .await
+        .expect("scan unclosed dependencies");
+
+    assert_eq!(response.dependencies, vec![still_open]);
+}
+
+/// `states` narrows the scan to exactly the requested delivery states.
+#[tokio::test]
+async fn scan_unclosed_process_dependencies_filters_by_states() {
+    let store = new_store();
+    let (settled_dependent, settled_dependency) = open_settled_dependency(&store).await;
+    let settled = stored_dependency(&store, settled_dependent, settled_dependency).await;
+    assert_eq!(settled.state, ProcessDependencyState::Settled);
+
+    let open_dependent = ProcessId::new();
+    submit_internal_process(&store, &scope(), open_dependent).await;
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: open_dependent,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: open_dependent,
+            scope: scope(),
+            group_ref: Some("gate:transition".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency");
+
+    let response = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: None,
+            states: vec![ProcessDependencyState::Settled],
+            group_ref_prefix: None,
+            limit: 100,
+            after: None,
+        })
+        .await
+        .expect("scan unclosed dependencies filtered by state");
+
+    assert_eq!(response.dependencies, vec![settled]);
+}
+
+/// `group_ref_prefix` narrows the scan to edges whose `group_ref` starts with
+/// the given prefix, e.g. only background (`"bg:"`) edges.
+#[tokio::test]
+async fn scan_unclosed_process_dependencies_filters_by_group_ref_prefix() {
+    let store = new_store();
+    let dependent = ProcessId::new();
+    submit_internal_process(&store, &scope(), dependent).await;
+
+    let background = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent,
+            scope: scope(),
+            group_ref: Some("bg:sweep".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open background dependency");
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent,
+            scope: scope(),
+            group_ref: Some("gate:not-background".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open non-background dependency");
+
+    let response = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: None,
+            states: Vec::new(),
+            group_ref_prefix: Some("bg:".to_string()),
+            limit: 100,
+            after: None,
+        })
+        .await
+        .expect("scan unclosed dependencies filtered by group_ref prefix");
+
+    assert_eq!(response.dependencies, vec![background]);
+}
+
+/// `limit` + `after` page the scan deterministically in canonical
+/// `(dependent_process_id, dependency_process_id)` order: two one-row pages
+/// return distinct rows and the final page's `next_after` is `None`.
+#[tokio::test]
+async fn scan_unclosed_process_dependencies_pages_deterministically() {
+    let store = new_store();
+    let dependent = ProcessId::new();
+    submit_internal_process(&store, &scope(), dependent).await;
+
+    let mut expected = Vec::new();
+    for _ in 0..2 {
+        let record = store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: ProcessId::new(),
+                root_process_id: dependent,
+                scope: scope(),
+                group_ref: Some("bg:paging".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open paged dependency");
+        expected.push(record);
+    }
+    expected.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+
+    let first_page = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: None,
+            states: Vec::new(),
+            group_ref_prefix: Some("bg:".to_string()),
+            limit: 1,
+            after: None,
+        })
+        .await
+        .expect("first scan page");
+    assert_eq!(first_page.dependencies, vec![expected[0].clone()]);
+    let cursor = first_page.next_after.expect("first page has a next cursor");
+    assert_eq!(
+        cursor,
+        (
+            expected[0].dependent_process_id,
+            expected[0].dependency_process_id
+        )
+    );
+
+    let second_page = store
+        .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+            scope_filter: None,
+            states: Vec::new(),
+            group_ref_prefix: Some("bg:".to_string()),
+            limit: 1,
+            after: Some(cursor),
+        })
+        .await
+        .expect("second scan page");
+    assert_eq!(second_page.dependencies, vec![expected[1].clone()]);
+    assert_eq!(
+        second_page.next_after, None,
+        "the final page must not hand back a cursor"
+    );
+    assert_ne!(
+        first_page.dependencies[0].dependency_process_id,
+        second_page.dependencies[0].dependency_process_id,
+        "no row may be seen twice across pages"
     );
 }
 

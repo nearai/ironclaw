@@ -890,6 +890,50 @@ pub struct ProcessDependencyQuery {
     pub limit: Option<u32>,
 }
 
+/// A bounded, scope-optional recovery scan over unclosed dependency edges,
+/// mirroring [`RecoverExpiredProcessLeasesRequest`]'s cross-scope shape for
+/// the same reason: a boot/periodic pass has to ask "which dependencies
+/// anywhere are still unclosed" without naming a scope up front, which
+/// [`ProcessDependencyQuery::scope`] (mandatory by design) cannot answer.
+///
+/// This is legal without violating the kernel charter's "normal startup and
+/// process requests may use exact reads and bounded, partition-leading
+/// keyset queries only" (`AGENTS.md`): the store performs the *same* unscoped
+/// `unresolved` dependency read [`ProcessDependencyPort::unresolved_process_dependencies`]
+/// already performs — no *new* filesystem index enumeration is added
+/// (`reborn_process_storage_scan_gate.rs` pins the store's file to zero new
+/// `.query(`/`.tail_bounded(` call sites) — and then applies every filter
+/// here, the scope narrowing, and the keyset page entirely in memory. `limit`
+/// is always clamped (never unbounded — see the implementation), and
+/// pagination is a stable keyset cursor over the same
+/// `(dependent_process_id, dependency_process_id)` canonical order every
+/// other dependency query in this module uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanUnclosedProcessDependenciesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_filter: Option<ResourceScope>,
+    /// Dependency states to include. Empty means every non-closed state.
+    #[serde(default)]
+    pub states: Vec<ProcessDependencyState>,
+    /// Only dependencies whose `group_ref` starts with this prefix, e.g. "bg:"
+    /// for background edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_ref_prefix: Option<String>,
+    pub limit: u32,
+    /// Keyset cursor: the `(dependent_process_id, dependency_process_id)` pair
+    /// of the last row a prior page returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<(ProcessId, ProcessId)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanUnclosedProcessDependenciesResponse {
+    pub dependencies: Vec<ProcessDependencyRecord>,
+    /// Cursor for the next page, `None` when the scan reached the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<(ProcessId, ProcessId)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessCheckpointRecord {
     pub checkpoint_id: ProcessCheckpointId,
@@ -1167,6 +1211,15 @@ pub trait ProcessDependencyPort: Send + Sync {
     async fn unresolved_process_dependencies(
         &self,
     ) -> Result<Vec<ProcessDependencyRecord>, Self::Error>;
+
+    /// Host-owned, bounded, scope-optional recovery scan over unclosed
+    /// dependency edges. See [`ScanUnclosedProcessDependenciesRequest`] for
+    /// why an unscoped scan is legal here. Product-facing callers must use
+    /// the scope-bound query above.
+    async fn scan_unclosed_process_dependencies(
+        &self,
+        request: ScanUnclosedProcessDependenciesRequest,
+    ) -> Result<ScanUnclosedProcessDependenciesResponse, Self::Error>;
 }
 
 #[async_trait]

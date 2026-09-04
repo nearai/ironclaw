@@ -1489,6 +1489,81 @@ impl ProcessJournalMaterializedState {
     }
 }
 
+/// Filters, scope-narrows, sorts, and pages an already-read set of dependency
+/// records — the free-function counterpart of [`ProcessJournalMaterializedState::expired_process_ids`]'s
+/// in-memory-scan shape. A free function rather than a method on
+/// `ProcessJournalMaterializedState` because the caller
+/// ([`super::ProcessJournalStore::scan_unclosed_process_dependencies`]) already
+/// owns a `Vec<crate::ProcessDependencyRecord>` from a direct filesystem read;
+/// building a throwaway materialized-state value purely to call a method on
+/// it would be a scratchpad object, not a real state consumer. See
+/// [`crate::ScanUnclosedProcessDependenciesRequest`] for why an unscoped,
+/// cross-scope scan is legal here.
+///
+/// `limit` is always clamped to at least 1 and at most
+/// `MAX_UNCLOSED_DEPENDENCY_SCAN_LIMIT` so a zero or absurd caller-supplied
+/// limit cannot turn this into an unbounded scan.
+pub(super) fn scan_unclosed_dependencies(
+    records: impl IntoIterator<Item = crate::ProcessDependencyRecord>,
+    request: &crate::ScanUnclosedProcessDependenciesRequest,
+) -> crate::ScanUnclosedProcessDependenciesResponse {
+    let limit = request.limit.clamp(1, MAX_UNCLOSED_DEPENDENCY_SCAN_LIMIT) as usize;
+    let mut records = records
+        .into_iter()
+        .filter(|record| !record.state.is_closed())
+        .filter(|record| request.states.is_empty() || request.states.contains(&record.state))
+        .filter(|record| {
+            request
+                .scope_filter
+                .as_ref()
+                .is_none_or(|scope| same_scope_owner(&record.scope, scope))
+        })
+        .filter(|record| {
+            request.group_ref_prefix.as_deref().is_none_or(|prefix| {
+                record
+                    .group_ref
+                    .as_deref()
+                    .is_some_and(|group_ref| group_ref.starts_with(prefix))
+            })
+        })
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    let start = request
+        .after
+        .map_or(0, |(after_dependent, after_dependency)| {
+            let after_key = (after_dependent.as_uuid(), after_dependency.as_uuid());
+            records.partition_point(|record| {
+                (
+                    record.dependent_process_id.as_uuid(),
+                    record.dependency_process_id.as_uuid(),
+                ) <= after_key
+            })
+        });
+    let remaining = &records[start.min(records.len())..];
+    let page_end = remaining.len().min(limit);
+    let page = remaining[..page_end].to_vec();
+    let next_after = if page_end < remaining.len() {
+        page.last()
+            .map(|record| (record.dependent_process_id, record.dependency_process_id))
+    } else {
+        None
+    };
+    crate::ScanUnclosedProcessDependenciesResponse {
+        dependencies: page,
+        next_after,
+    }
+}
+
+/// Clamp ceiling for [`scan_unclosed_dependencies`]: a boot/periodic sweep
+/// pages through this many rows at a time regardless of what a caller
+/// requests, so a misconfigured caller cannot turn the scan unbounded.
+const MAX_UNCLOSED_DEPENDENCY_SCAN_LIMIT: u32 = 1_000;
+
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod tests;

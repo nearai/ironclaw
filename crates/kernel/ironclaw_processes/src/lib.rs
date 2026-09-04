@@ -67,7 +67,8 @@ pub use journal::{
     ProcessTreeReservation, ProcessWorkerId, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest,
     RecoverExpiredProcessLeasesResponse, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
-    ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest,
+    ResumeProcessRequest, ScanUnclosedProcessDependenciesRequest,
+    ScanUnclosedProcessDependenciesResponse, SettleProcessDependencyRequest, StopProcessRequest,
     SubmitProcessAtEdgeRequest, SubmitProcessRequest, SubmitProcessWithCheckpointRequest,
     SuspendProcessRequest, TransitionProcessDependencyRequest,
 };

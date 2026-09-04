@@ -1255,6 +1255,13 @@ impl ironclaw_processes::ProcessDependencyPort for ScriptedDependencyFailures {
     ) -> Result<Vec<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
         self.inner.unresolved_process_dependencies().await
     }
+
+    async fn scan_unclosed_process_dependencies(
+        &self,
+        request: ironclaw_processes::ScanUnclosedProcessDependenciesRequest,
+    ) -> Result<ironclaw_processes::ScanUnclosedProcessDependenciesResponse, Self::Error> {
+        self.inner.scan_unclosed_process_dependencies(request).await
+    }
 }
 
 /// Stub `AgentTurnSpawnTreeRuntimePort`: `get_run_record` always answers

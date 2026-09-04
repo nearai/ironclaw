@@ -119,6 +119,55 @@ async fn local_filesystem_build_input_carries_resolved_runtime_policy() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+/// R4 wiring: `SubagentSweepSettings::enabled` (default `true`) must actually
+/// start the composition-owned boot+periodic background-edge sweep task, and
+/// `shutdown` must stop it rather than leaving it running past teardown.
+#[tokio::test]
+async fn subagent_background_sweep_runs_by_default_and_stops_on_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let input =
+        RebornRuntimeInput::from_build_input(ironclaw_composition::local_filesystem_build_input(
+            "subagent-sweep-owner",
+            root.path().join("standalone"),
+        ));
+
+    let runtime = build_reborn_runtime(input)
+        .await
+        .expect("default settings build a runtime with the sweep enabled");
+    assert!(
+        ironclaw_composition::test_support::subagent_background_sweep_is_running_for_test(&runtime),
+        "subagent background sweep must be running by default (SubagentSweepSettings::enabled = true)"
+    );
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+/// R4 wiring, disabled side: `SubagentSweepSettings { enabled: false, .. }`
+/// must not start the sweep task at all.
+#[tokio::test]
+async fn subagent_background_sweep_does_not_start_when_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let input =
+        RebornRuntimeInput::from_build_input(ironclaw_composition::local_filesystem_build_input(
+            "subagent-sweep-disabled-owner",
+            root.path().join("standalone"),
+        ))
+        .with_subagent_sweep_settings(ironclaw_composition::SubagentSweepSettings {
+            enabled: false,
+            interval: Duration::from_secs(300),
+        });
+
+    let runtime = build_reborn_runtime(input)
+        .await
+        .expect("runtime builds with the subagent sweep disabled");
+    assert!(
+        !ironclaw_composition::test_support::subagent_background_sweep_is_running_for_test(
+            &runtime
+        ),
+        "subagent background sweep must not start when SubagentSweepSettings::enabled is false"
+    );
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
 #[tokio::test]
 async fn hosted_single_tenant_volume_builds_live_runtime() {
     // Regression for #5346: the runtime profile match was hardcoded after
