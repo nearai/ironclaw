@@ -303,7 +303,7 @@ impl RunDeliveryObserver {
     /// Observe one workflow ack for an inbound envelope. This is the
     /// entry point the composition's post-admission observer seam calls.
     pub async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.close_connect_nudge_epoch_after_accepted_user_message(&envelope, &ack);
+        self.close_connect_nudge_epoch_after_accepted_message(&envelope, &ack);
         // Product commands settle synchronously; their result or
         // user-correctable rejection is the only reply this event will see.
         if self.post_command_feedback(&envelope, &ack).await {
@@ -1415,14 +1415,24 @@ impl RunDeliveryObserver {
         }
     }
 
-    fn close_connect_nudge_epoch_after_accepted_user_message(
+    fn close_connect_nudge_epoch_after_accepted_message(
         &self,
         envelope: &ProductInboundEnvelope,
         ack: &ProductInboundAck,
     ) {
-        if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
-            || !matches!(ack, ProductInboundAck::Accepted { .. })
-        {
+        // A successful command closes the epoch too: the sender is paired, so
+        // a later disconnect must re-nudge instead of hitting a stale
+        // reservation.
+        let closes_epoch = match envelope.payload() {
+            ProductInboundPayload::UserMessage(_) => {
+                matches!(ack, ProductInboundAck::Accepted { .. })
+            }
+            ProductInboundPayload::Command(_) => {
+                matches!(ack, ProductInboundAck::CommandResult { .. })
+            }
+            _ => false,
+        };
+        if !closes_epoch {
             return;
         }
         let conversation_key = envelope

@@ -1152,6 +1152,15 @@ impl ProductBindingResolver for NoopTriggeredBindingService {
             reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
         })
     }
+
+    async fn ensure_actor_bound(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
+            reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
+        })
+    }
 }
 
 /// Poll-only [`TurnCoordinator`] for driving a [`TriggeredRunDeliveryDriver`].

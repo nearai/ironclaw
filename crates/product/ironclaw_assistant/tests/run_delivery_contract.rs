@@ -2514,6 +2514,58 @@ async fn observer_connect_nudge_reopens_after_connected_message_is_accepted() {
 }
 
 #[tokio::test]
+async fn observer_connect_nudge_reopens_after_successful_command() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+    let command = InboundCommandPayload::new("status", "", ProductTriggerReason::BotCommand)
+        .expect("command");
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-before-connect"),
+            rejected.clone(),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            envelope(ProductInboundPayload::Command(command), "evt-command-ok"),
+            ProductInboundAck::CommandResult {
+                command: "status".to_string(),
+                payload: ProductCommandResultPayload::new(serde_json::json!({ "state": "idle" })),
+            },
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-after-disconnect"),
+            rejected,
+        )
+        .await;
+
+    let connect_notices = harness
+        .adapter
+        .texts()
+        .into_iter()
+        .filter(|text| text == &harness.connection_notices.connect_required)
+        .count();
+    assert_eq!(
+        connect_notices, 2,
+        "a successful command must close the prior unbound throttle epoch"
+    );
+}
+
+#[tokio::test]
 async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry() {
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],

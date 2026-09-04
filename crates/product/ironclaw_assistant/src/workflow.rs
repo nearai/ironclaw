@@ -1187,8 +1187,8 @@ async fn dispatch_payload(
         }
         ProductInboundPayload::Command(cmd) => {
             // Pairing before admission: an unpaired sender's first contact
-            // (Telegram's Start button sends a bare `/start`) gets the connect
-            // notice, not the command inventory (#7956).
+            // (a chat app's start button can send a bare `/start`) gets the
+            // connect notice, not the command inventory (#7956).
             ports
                 .binding_service
                 .ensure_actor_bound(resolve_binding_request(envelope)?)

@@ -612,9 +612,16 @@ impl ProductBindingResolver for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
-        resolve_actor_user(&installation_scope, &request)
-            .await
-            .map(|_| ())
+        let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
+        // The freshness recheck bypasses any positive resolver cache, so a
+        // just-revoked actor fails the pre-check instead of reaching command
+        // admission on a stale read.
+        self.ensure_resolved_actor_binding_still_current(
+            &installation_scope,
+            &request,
+            expected_actor.as_ref(),
+        )
+        .await
     }
 
     async fn reset_binding(

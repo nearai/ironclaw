@@ -4290,6 +4290,36 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
 }
 
 #[tokio::test]
+async fn ensure_actor_bound_rechecks_revocation_bypassing_positive_caches() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let actor_resolver = Arc::new(RevokingProductActorUserResolver::new(
+        actor_ref,
+        UserId::new("user:resolved-slack").expect("user"),
+    ));
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations, actor_resolver.clone());
+
+    let err = binding
+        .ensure_actor_bound(
+            ResolveBindingRequest::from_envelope(&sample_envelope("ensure-revoked"))
+                .expect("verified envelope binding request"),
+        )
+        .await
+        .expect_err("a just-revoked actor must fail the pre-check, not pass on a stale read");
+
+    assert!(matches!(
+        err,
+        ProductOperationFailure::BindingRequired { .. }
+    ));
+    assert_eq!(
+        actor_resolver.calls(),
+        2,
+        "the freshness recheck must bypass the initial (cacheable) resolution"
+    );
+}
+
+#[tokio::test]
 async fn actor_user_resolver_revalidation_cannot_unpair_a_newer_generation() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
