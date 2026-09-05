@@ -3480,6 +3480,47 @@ async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
     await expect(assistant_bubble).not_to_contain_text("IronClaw")
 
 
+async def test_reborn_v2_command_menu_stacks_in_sidebar_constrained_viewport(
+    reborn_v2_page, reborn_v2_server
+):
+    """The tablet-width chat pane keeps command metadata in one column."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    await reborn_v2_page.set_viewport_size({"width": 768, "height": 720})
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await expect(composer).to_be_visible(timeout=15000)
+    await composer.fill("/")
+
+    listbox = reborn_v2_page.locator(SEL_V2["command_menu_listbox"])
+    options = reborn_v2_page.locator(SEL_V2["command_menu_option"])
+    await expect(listbox).to_be_visible()
+    assert await options.count() > 5
+    metrics = await options.first.evaluate(
+        """row => {
+          const style = getComputedStyle(row);
+          const command = row.children[0].getBoundingClientRect();
+          const metadata = row.children[1].getBoundingClientRect();
+          return {
+            commandLeft: command.left,
+            commandTop: command.top,
+            metadataLeft: metadata.left,
+            metadataTop: metadata.top,
+            metadataWidth: metadata.width,
+            contentWidth: row.clientWidth
+              - parseFloat(style.paddingLeft)
+              - parseFloat(style.paddingRight),
+          };
+        }"""
+    )
+    assert abs(metrics["commandLeft"] - metrics["metadataLeft"]) <= 1, metrics
+    assert metrics["metadataTop"] > metrics["commandTop"], metrics
+    assert abs(metrics["metadataWidth"] - metrics["contentWidth"]) <= 1, metrics
+
+
 async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
     """Links inside an assistant reply open in a new tab."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])

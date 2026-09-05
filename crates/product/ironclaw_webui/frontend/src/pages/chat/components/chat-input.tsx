@@ -683,7 +683,7 @@ export function ChatInput({
                       onMouseEnter={() => selectMenuIndex(index)}
                       onClick={() => completeMenuCommand(command)}
                       className={[
-                        "flex w-full items-start gap-2.5 rounded-lg border-l-2 px-2.5 py-2 text-left",
+                        "grid w-full grid-cols-1 items-start gap-x-2.5 gap-y-1.5 rounded-lg border-l-2 px-2.5 py-2 text-left lg:grid-cols-[18rem_minmax(0,1fr)]",
                         isActive
                           ? "border-[var(--v2-accent)] bg-[var(--v2-accent-soft)]"
                           : "border-transparent hover:bg-[var(--v2-surface-soft)]",
@@ -691,7 +691,7 @@ export function ChatInput({
                     >
                       <span
                         className={[
-                          "shrink-0 rounded-md border px-1.5 py-0.5 font-mono leading-4 text-[var(--v2-text-strong)]",
+                          "w-fit max-w-full truncate rounded-md border px-1.5 py-0.5 font-mono leading-4 text-[var(--v2-text-strong)]",
                           isActive
                             ? "border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] bg-[var(--v2-surface)]"
                             : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
@@ -699,7 +699,7 @@ export function ChatInput({
                       >
                         /<span className="text-signal">{matchedPrefix}</span>{restOfName}
                       </span>
-                      <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="flex min-w-0 w-full flex-col">
                         <span
                           className={[
                             "truncate text-sm font-medium",

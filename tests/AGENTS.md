@@ -36,7 +36,7 @@ them in the same commit; re-derive any of them with:
   | wc -l`.
 - Top-level Rust bins: `ls tests/*.rs | wc -l`.
 - E2E files: `ls tests/e2e/scenarios/test_*.py | wc -l`.
-- E2E test *functions* (the §2 "889" figure — every `test_*` function or
+- E2E test *functions* (the §2 "893" figure — every `test_*` function or
   method, top-level or in a class, across all 103 files; this is an exhaustive
   syntactic count, not filtered by active/legacy status):
   ```
@@ -50,7 +50,7 @@ them in the same commit; re-derive any of them with:
   print(n)
   "
   ```
-- E2E collected pytest items (the §6 "1180 top-level tests" figure — pytest's
+- E2E collected pytest items (the §6 "1184 top-level tests" figure — pytest's
   own collection count, which differs from the syntactic function count above
   when a function is parametrized, skipped at collection, or a class groups
   several `test_*` methods under one node): `cd tests/e2e && python3 -m pytest
@@ -102,7 +102,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 
 Totals: **62** group scenarios · **63** flat integration bins (56 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**103** Python scenario files (**889** test functions) registered in the active
+**103** Python scenario files (**893** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
@@ -415,7 +415,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1180 top-level tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1184 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -435,6 +435,7 @@ entries.
 | Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_reborn_webui_v2_legacy_message_persistence.py`, `test_message_persistence.py` (10) |
 | Type a draft while a run is processing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_accepts_draft_while_run_is_processing` |
 | Click "+ New" or open a thread and start typing immediately — focus lands in the composer without a second click | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_takes_focus_from_sidebar_navigation` |
+| Read slash-command metadata in a single-column layout when the default sidebar constrains a tablet-width chat pane | `test_reborn_webui_v2_smoke.py::test_reborn_v2_command_menu_stacks_in_sidebar_constrained_viewport` |
 | Start a new chat while a run is active (the #5256 deadlock regression) | `test_reborn_webui_v2_smoke.py` |
 | Page through older messages/threads without losing scroll position | `test_reborn_webui_v2_smoke.py::test_reborn_v2_timeline_pagination`, `…::test_reborn_v2_loading_older_messages_preserves_viewport` |
 | Keep DOM bounded on huge histories, without SSE timer leaks | `test_reborn_webui_v2_legacy_dom_resource_limits.py` (4) |
