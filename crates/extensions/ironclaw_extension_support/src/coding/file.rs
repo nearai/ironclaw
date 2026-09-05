@@ -17,7 +17,7 @@ use super::{
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
-    operation_error, operation_error_with_summary,
+    operation_error_with_summary,
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
         create_parent_dir_unless_sensitive, filesystem_error, filesystem_error_with_summary,
@@ -637,7 +637,14 @@ pub(super) async fn list_dir(
             return Err(
                 match super::paths::unactivated_skill_hint(resolved.scoped_path.as_str()) {
                     Some(hint) => operation_error_with_summary(hint),
-                    None => operation_error(),
+                    // Name the path, as every other coding tool does through
+                    // `filesystem_error_with_summary`. Without it the failure carries only the
+                    // kind's fixed sentence and the loop has no cause to pass on, so the model
+                    // cannot tell a missing directory from a broken filesystem.
+                    None => operation_error_with_summary(format!(
+                        "list_dir failed for {}: path not found",
+                        safe_summary_path(resolved.scoped_path.as_str())
+                    )),
                 },
             );
         }

@@ -281,6 +281,40 @@ async fn builtin_coding_grep_failure_reports_missing_root_path() {
     );
 }
 
+/// `list_dir` on a path that does not exist must name the path, like every sibling tool does.
+///
+/// Observed in production: `list_dir {"path": "commitments", "recursive": true}` against a
+/// directory that was never created. The failure carried no message at all, so the loop fell back
+/// to the shared `MODEL_DIAGNOSTIC_UNAVAILABLE` constant and the model was told only "the tool
+/// operation failed" with "the capability runtime did not provide additional diagnostic detail".
+/// It cannot tell a missing directory from a broken filesystem from that, and `operation_failed`
+/// permits retrying the same call.
+///
+/// `grep`, `read_file`, `apply_patch` and `document_edit` all route their misses through
+/// `filesystem_error_with_summary` and name the path. `list_dir` resolves its own miss from a
+/// `stat` that returns `None`, and that branch was the one place the path was dropped.
+#[tokio::test]
+async fn builtin_coding_list_dir_failure_reports_missing_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        LIST_DIR_CAPABILITY_ID,
+        json!({"path": "/workspace/commitments", "recursive": true}),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("list_dir failed for path workspace commitments: path not found")
+    );
+}
+
 #[tokio::test]
 async fn builtin_coding_grep_failure_reports_file_disappeared_before_read() {
     let temp = tempfile::tempdir().unwrap();
