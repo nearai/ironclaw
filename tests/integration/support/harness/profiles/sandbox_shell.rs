@@ -12,7 +12,11 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 
-pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+pub(crate) async fn sandbox_shell_tools(
+    sandbox_loop_worker_kind: Option<
+        ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind,
+    >,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let runtime_policy =
         ironclaw_composition::hosted_single_tenant_volume_sandboxed_runtime_policy()?;
     let tenant_id = TenantId::new("tenant-itest")?;
@@ -25,6 +29,10 @@ pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapability
     .with_sandboxed_shell()
     .with_workspace_scoped_per_caller()
     .with_durable_capability_io();
+    let options = match sandbox_loop_worker_kind {
+        Some(kind) => options.with_sandbox_loop_worker_kind(kind),
+        None => options,
+    };
 
     ToolsProfile {
         capability_ids: vec![

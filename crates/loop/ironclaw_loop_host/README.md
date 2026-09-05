@@ -8,6 +8,9 @@ policy vocabulary, the driver-host port adapters, progressive tool disclosure,
 and the loop tier's system-prompt content assets.
 
 - **Family / layer:** `loop` / `loops` · **Package:** `ironclaw_loop_host` · **Manifest:** `crates/loop/ironclaw_loop_host/Cargo.toml`
+- Same-build loop-worker wire contract (`remote_host.rs`): framing, frames,
+  and the content-visibility rule are documented in
+  `docs/internal/reborn/contracts/loop-worker-wire.md`.
 - **Use this when:** implementing or decorating a loop port over a kernel or
   domain service; adding prompt-safe context builders; changing tool
   disclosure or model routing.
@@ -28,10 +31,11 @@ and the loop tier's system-prompt content assets.
 - Driver-host port adapters (`driver_host_port_adapters.rs`):
   `HostManagedLoopCheckpointPort`, `HostManagedLoopProgressPort`,
   `NoExtraLoopInputPort`.
-- Same-build sandbox loop-host bridge (`remote_host.rs`): bounded private
-  process frames that forward the canonical loop's existing host ports without
-  moving kernel authority or making raw context/checkpoint bytes public wire
-  contracts.
+- Same-build sandbox loop-host bridge (`remote_host/`): bounded private
+  process frames that forward the loop's host ports without moving kernel
+  authority. Wire v2 permits host-resolved message text only for an authorized
+  `Resolved` worker. The default Rust worker stays `Blind`; the protocol is
+  private and same-build.
 - Progressive tool disclosure (`tool_disclosure*.rs`): catalog/selector, the
   deferring `LoopCapabilityPort` decorator, the `REBORN_TOOL_DISCLOSURE`
   switch.

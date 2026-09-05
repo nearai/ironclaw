@@ -99,6 +99,7 @@ pub(crate) async fn mock_mcp_tools(
         real_egress_transport: None,
         process_port: None,
         sandbox_loop_worker_transport: None,
+        sandbox_loop_worker_kind: None,
         profile_filesystem: None,
         project_service: None,
         skill_activation_source: None,

@@ -2,6 +2,16 @@
 
 use std::{num::NonZeroU32, sync::Arc};
 
+use crate::{
+    app_loop_family::build_loop_family_registry_with_overrides,
+    driver_registry::{DriverKind, DriverRegistry, LoopDriverRegistryKey},
+    planned_driver::PlannedDriver,
+    planned_driver_factory::{
+        DefaultPlannedDriverRegistrationError, planned_driver_descriptor,
+        planned_driver_requirements,
+    },
+    turn_runner::sanitized_driver_failure,
+};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::InvocationId,
@@ -13,39 +23,108 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     LoopWorkerFailure, LoopWorkerInvocation, LoopWorkerOutcome, LoopWorkerSettings,
-    read_worker_bootstrap, remote_host_from_stdio, serve_loop_worker,
-};
-
-use crate::{
-    app_loop_family::build_loop_family_registry_with_overrides,
-    driver_registry::{DriverKind, DriverRegistry, LoopDriverRegistryKey},
-    planned_driver::PlannedDriver,
-    planned_driver_factory::{
-        DefaultPlannedDriverRegistrationError, planned_driver_descriptor,
-        planned_driver_requirements,
-    },
-    turn_runner::sanitized_driver_failure,
+    WorkerContentVisibility, read_worker_bootstrap, remote_host_from_stdio, serve_loop_worker,
 };
 
 pub const LOOP_WORKER_EXECUTABLE: &str = "/usr/local/bin/ironclaw-loop-worker";
 
+pub const PI_LOOP_WORKER_EXECUTABLE: &str = "/usr/local/bin/ironclaw-pi-worker";
+pub(crate) const PI_CHECKPOINT_SCHEMA_ID: &str = "pi_worker_session";
+
+pub(crate) struct PiRunProfileResolver {
+    pub(crate) inner: Arc<dyn ironclaw_loop_contracts::RunProfileResolver>,
+}
+
+#[async_trait]
+impl ironclaw_loop_contracts::RunProfileResolver for PiRunProfileResolver {
+    async fn resolve_run_profile(
+        &self,
+        request: ironclaw_loop_contracts::RunProfileResolutionRequest,
+    ) -> Result<
+        ironclaw_loop_contracts::ResolvedRunProfile,
+        ironclaw_loop_contracts::RunProfileResolutionError,
+    > {
+        let mut profile = self.inner.resolve_run_profile(request).await?;
+        if profile.loop_driver.id.as_str()
+            == crate::planned_driver_factory::PLANNED_DRIVER_DEFAULT_ID
+        {
+            let schema = ironclaw_loop_contracts::CheckpointSchemaId::new(PI_CHECKPOINT_SCHEMA_ID)
+                .map_err(|reason| {
+                    ironclaw_loop_contracts::RunProfileResolutionError::InvalidRequest { reason }
+                })?;
+            let version = ironclaw_host_api::turn::RunProfileVersion::new(1);
+            profile.loop_driver.checkpoint_schema_id = Some(schema.clone());
+            profile.loop_driver.checkpoint_schema_version = Some(version);
+            profile.checkpoint_schema_id = schema;
+            profile.checkpoint_schema_version = version;
+        }
+        Ok(profile)
+    }
+}
+
+/// Which loop-worker binary the sandboxed driver launches, and how much of
+/// the run's own transcript the worker may see. Default stays the #7908 Rust
+/// worker (content-blind); the Pi worker is launched content-resolved. See
+/// `docs/internal/reborn/2026-09-pi-loop-worker-plan.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoopWorkerKind {
+    #[default]
+    Rust,
+    Pi,
+}
+
+impl LoopWorkerKind {
+    pub fn executable(self) -> &'static str {
+        match self {
+            Self::Rust => LOOP_WORKER_EXECUTABLE,
+            Self::Pi => PI_LOOP_WORKER_EXECUTABLE,
+        }
+    }
+
+    pub fn content_visibility(self) -> WorkerContentVisibility {
+        match self {
+            Self::Rust => WorkerContentVisibility::Blind,
+            Self::Pi => WorkerContentVisibility::Resolved,
+        }
+    }
+
+    /// Case-insensitive `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "rust" => Some(Self::Rust),
+            "pi" => Some(Self::Pi),
+            _ => None,
+        }
+    }
+}
+
 pub struct SandboxedPlannedDriver {
     descriptor: AgentLoopDriverDescriptor,
     transport: Arc<dyn SandboxLoopWorkerTransport>,
+    kind: LoopWorkerKind,
     settings: LoopWorkerSettings,
 }
 
 impl SandboxedPlannedDriver {
     pub fn new(
         transport: Arc<dyn SandboxLoopWorkerTransport>,
+        kind: LoopWorkerKind,
         default_iteration_limit: Option<NonZeroU32>,
         model_availability_attempts: Option<NonZeroU32>,
     ) -> Result<Self, AgentLoopDriverError> {
         let descriptor = planned_driver_descriptor()
+            .and_then(|descriptor| match kind {
+                LoopWorkerKind::Rust => Ok(descriptor),
+                LoopWorkerKind::Pi => descriptor.with_checkpoint_schema(
+                    PI_CHECKPOINT_SCHEMA_ID,
+                    ironclaw_host_api::turn::RunProfileVersion::new(1),
+                ),
+            })
             .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
         Ok(Self {
             descriptor,
             transport,
+            kind,
             settings: LoopWorkerSettings {
                 default_iteration_limit: default_iteration_limit.map(NonZeroU32::get),
                 model_availability_attempts: model_availability_attempts.map(NonZeroU32::get),
@@ -70,13 +149,24 @@ impl SandboxedPlannedDriver {
             .transport
             .start_loop_worker(SandboxLoopWorkerStartRequest {
                 scope,
-                executable: LOOP_WORKER_EXECUTABLE.to_string(),
+                executable: self.kind.executable().to_string(),
                 args: Vec::new(),
                 workdir: Some("/workspace".to_string()),
             })
             .await
             .map_err(worker_process_transport_error)?;
-        let outcome = serve_loop_worker(session.as_mut(), host, invocation, self.settings).await;
+        // The run host owns the same content resolver and instruction store as
+        // its prompt port. The transport independently gates resolved visibility.
+        let content = host.worker_content_port();
+        let outcome = serve_loop_worker(
+            session.as_mut(),
+            host,
+            invocation,
+            self.settings,
+            content,
+            self.kind.content_visibility(),
+        )
+        .await;
         let cleanup = session.terminate().await;
         if let Err(error) = cleanup {
             return Err(worker_process_transport_error(error));
@@ -97,6 +187,7 @@ impl SandboxedPlannedDriver {
         }
     }
 }
+
 fn worker_process_transport_error(error: RuntimeProcessError) -> AgentLoopDriverError {
     let error_kind = match error {
         RuntimeProcessError::Timeout(_) => "timeout",
@@ -124,11 +215,13 @@ fn unavailable_worker_error() -> AgentLoopDriverError {
 pub fn register_sandboxed_default_planned_driver(
     registry: &mut DriverRegistry,
     transport: Arc<dyn SandboxLoopWorkerTransport>,
+    kind: LoopWorkerKind,
     default_iteration_limit: Option<NonZeroU32>,
     model_availability_attempts: Option<NonZeroU32>,
 ) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
     let driver = Arc::new(SandboxedPlannedDriver::new(
         transport,
+        kind,
         default_iteration_limit,
         model_availability_attempts,
     )?);
@@ -302,6 +395,7 @@ mod tests {
             Arc::new(HangingTransport {
                 terminated: Arc::clone(&terminated),
             }),
+            LoopWorkerKind::Rust,
             None,
             None,
         )
@@ -342,6 +436,7 @@ mod tests {
     fn sandbox_worker_receives_resolved_family_overrides() {
         let driver = SandboxedPlannedDriver::new(
             Arc::new(UnusedTransport),
+            LoopWorkerKind::Rust,
             NonZeroU32::new(7),
             NonZeroU32::new(2),
         )
@@ -349,6 +444,34 @@ mod tests {
 
         assert_eq!(driver.settings.default_iteration_limit, Some(7));
         assert_eq!(driver.settings.model_availability_attempts, Some(2));
+    }
+
+    #[test]
+    fn worker_kind_selects_executable_and_visibility() {
+        assert_eq!(LoopWorkerKind::default(), LoopWorkerKind::Rust);
+        assert_eq!(
+            LoopWorkerKind::Rust.executable(),
+            "/usr/local/bin/ironclaw-loop-worker"
+        );
+        assert_eq!(LoopWorkerKind::Pi.executable(), PI_LOOP_WORKER_EXECUTABLE);
+        assert_eq!(
+            LoopWorkerKind::Rust.content_visibility(),
+            WorkerContentVisibility::Blind
+        );
+        assert_eq!(
+            LoopWorkerKind::Pi.content_visibility(),
+            WorkerContentVisibility::Resolved
+        );
+    }
+
+    #[test]
+    fn worker_kind_parse_accepts_case_insensitive_values_and_rejects_others() {
+        assert_eq!(LoopWorkerKind::parse("rust"), Some(LoopWorkerKind::Rust));
+        assert_eq!(LoopWorkerKind::parse("RUST"), Some(LoopWorkerKind::Rust));
+        assert_eq!(LoopWorkerKind::parse(" pi "), Some(LoopWorkerKind::Pi));
+        assert_eq!(LoopWorkerKind::parse("Pi"), Some(LoopWorkerKind::Pi));
+        assert_eq!(LoopWorkerKind::parse("node"), None);
+        assert_eq!(LoopWorkerKind::parse(""), None);
     }
 
     #[test]

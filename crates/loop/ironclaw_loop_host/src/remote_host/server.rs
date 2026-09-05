@@ -1,5 +1,7 @@
 use ironclaw_host_api::process::{RuntimeProcessError, SandboxLoopWorkerSession};
 use ironclaw_loop_contracts::*;
+use ironclaw_turns::LoopMessageRef;
+use std::collections::HashMap;
 
 use crate::remote_host::protocol::*;
 #[cfg(not(test))]
@@ -44,17 +46,43 @@ pub(super) fn wire_error_to_host_error(error: WireError) -> AgentLoopHostError {
     }
 }
 
-struct HostRpcState {
+pub(super) struct HostRpcState {
     max_model_calls: u32,
     max_capability_invocations: u32,
     model_calls: u32,
     prompt_builds: u32,
     capability_invocations: u32,
+    resolve_messages: u32,
     last_model_iteration: Option<u32>,
     model_calls_this_iteration: u32,
     max_model_iteration: Option<u32>,
     max_model_calls_per_iteration: Option<u32>,
     model_usage: Option<LoopModelUsage>,
+    /// Every `LoopModelMessage` (ref + role) the host has ever handed this
+    /// run's worker, including the role it was issued with. `ResolveMessages`
+    /// may only resolve pairs present here, so a worker cannot widen its
+    /// visibility by guessing refs or re-labeling roles.
+    issued_messages: HashMap<IssuedMessageKey, ()>,
+}
+
+/// Upper bound on tracked issued refs. A legal run issues far fewer; the cap
+/// only stops a worker from spinning issue-producing calls to grow the ledger
+/// without bound.
+const MAX_TRACKED_ISSUED_REFS: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IssuedMessageKey {
+    content_ref: String,
+    role: String,
+}
+
+impl IssuedMessageKey {
+    fn of(message: &LoopModelMessage) -> Self {
+        Self {
+            content_ref: message.content_ref.as_str().to_string(),
+            role: message.role.clone(),
+        }
+    }
 }
 
 impl HostRpcState {
@@ -69,6 +97,7 @@ impl HostRpcState {
             model_calls: 0,
             prompt_builds: 0,
             capability_invocations: 0,
+            resolve_messages: 0,
             last_model_iteration: None,
             model_calls_this_iteration: 0,
             max_model_iteration: settings.default_iteration_limit,
@@ -76,6 +105,7 @@ impl HostRpcState {
                 .model_availability_attempts
                 .map(|attempts| attempts.saturating_add(2)),
             model_usage: None,
+            issued_messages: HashMap::new(),
         }
     }
 
@@ -142,6 +172,14 @@ impl HostRpcState {
                     "capability",
                 )?;
             }
+            HostCall::ResolveMessages(_) => {
+                self.resolve_messages = checked_budget_increment(
+                    self.resolve_messages,
+                    1,
+                    self.resolve_budget(),
+                    "resolve-messages",
+                )?;
+            }
             _ => {}
         }
         Ok(())
@@ -157,6 +195,108 @@ impl HostRpcState {
             LoopExit::Blocked(_) | LoopExit::Cancelled(_) => {}
         }
         exit
+    }
+    /// Bound on `ResolveMessages` admissions: one initial resolution plus one
+    /// per completed capability call. A legal multi-tool batch resolves once
+    /// per tool result, so the cap derives from the model and capability
+    /// budgets rather than the model budget alone.
+    fn resolve_budget(&self) -> u32 {
+        self.max_model_calls
+            .saturating_add(self.max_capability_invocations)
+    }
+
+    /// Record a message (ref + role) the host has issued to this run's worker.
+    fn issue_message(&mut self, message: &LoopModelMessage) {
+        if self.issued_messages.len() >= MAX_TRACKED_ISSUED_REFS {
+            return;
+        }
+        self.issued_messages
+            .insert(IssuedMessageKey::of(message), ());
+    }
+
+    /// Record every message in a response payload the worker just received.
+    fn issue_messages<'a>(&mut self, messages: impl IntoIterator<Item = &'a LoopModelMessage>) {
+        for message in messages {
+            self.issue_message(message);
+        }
+    }
+
+    /// Record resolvable refs carried by a `LoadContext` bundle response.
+    fn issue_context_bundle(&mut self, bundle: &LoopContextBundle) {
+        for message in bundle
+            .identity_messages
+            .iter()
+            .chain(bundle.messages.iter())
+        {
+            let Some(content_ref) = message.message_ref.as_ref() else {
+                continue;
+            };
+            self.issue_message(&LoopModelMessage {
+                role: message.role.clone(),
+                content_ref: content_ref.clone(),
+            });
+        }
+        for snippet in bundle
+            .instruction_snippets
+            .iter()
+            .chain(bundle.memory_snippets.iter())
+        {
+            let Ok(content_ref) = LoopMessageRef::new(snippet.snippet_ref.clone()) else {
+                continue;
+            };
+            self.issue_message(&LoopModelMessage {
+                role: "system".to_string(),
+                content_ref,
+            });
+        }
+    }
+
+    /// Record message refs carried by a polled input batch.
+    fn issue_input_batch(&mut self, batch: &LoopInputBatch) {
+        for input in &batch.inputs {
+            let message_ref = match input {
+                LoopInput::UserMessage { message_ref }
+                | LoopInput::FollowUp { message_ref }
+                | LoopInput::Steering { message_ref }
+                | LoopInput::SubagentSettled { message_ref, .. } => message_ref,
+                LoopInput::Interrupt { .. }
+                | LoopInput::Cancel { .. }
+                | LoopInput::GateResolved { .. }
+                | LoopInput::CapabilitySurfaceChanged { .. } => continue,
+            };
+            self.issue_message(&LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: message_ref.clone(),
+            });
+        }
+    }
+
+    /// Check a `ResolveMessages` request against the issued ledger. Empty
+    /// requests are rejected: the contract scopes resolution to refs the host
+    /// already issued, and an empty request would otherwise resolve the run's
+    /// whole context window instead.
+    fn authorize_resolve_messages(
+        &self,
+        request: &ResolveMessagesRequest,
+    ) -> Result<(), WireError> {
+        if request.messages.is_empty() {
+            return Err(WireError::Host(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "sandbox loop worker must name the message refs to resolve",
+            )));
+        }
+        for message in &request.messages {
+            if !self
+                .issued_messages
+                .contains_key(&IssuedMessageKey::of(message))
+            {
+                return Err(WireError::Host(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::PolicyDenied,
+                    "sandbox loop worker may only resolve message refs issued to this run",
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -179,8 +319,11 @@ fn budget_error(operation: &'static str) -> WireError {
         format!("sandbox loop worker exceeded the host-owned {operation} budget"),
     ))
 }
-async fn dispatch_host_call(
+#[allow(unreachable_pub)]
+pub(super) async fn dispatch_host_call(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
+    content: Option<&dyn LoopMessageContentPort>,
+    visibility: WorkerContentVisibility,
     call: HostCall,
     state: &mut HostRpcState,
 ) -> Result<serde_json::Value, WireError> {
@@ -195,19 +338,75 @@ async fn dispatch_host_call(
     }
 
     match call {
+        HostCall::ResolveMessages(request) => {
+            let content = match (visibility, content) {
+                (WorkerContentVisibility::Resolved, Some(content)) => content,
+                (WorkerContentVisibility::Resolved, None) => {
+                    return Err(WireError::Host(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::PolicyDenied,
+                        "sandbox loop worker content resolution is unavailable on this host",
+                    )));
+                }
+                (WorkerContentVisibility::Blind, _) => {
+                    return Err(WireError::Host(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::PolicyDenied,
+                        "sandbox loop worker is not permitted to resolve message content",
+                    )));
+                }
+            };
+            state.authorize_resolve_messages(&request)?;
+            let resolved = content
+                .resolve_message_content(request.messages)
+                .await
+                .map_err(WireError::Host)?;
+            let wire: Vec<WireResolvedModelMessage> = resolved
+                .into_iter()
+                .map(|message| WireResolvedModelMessage {
+                    role: message.role,
+                    content_ref: message.content_ref,
+                    content: message.content,
+                    tool_result: message.tool_result.map(|result| WireResolvedToolResult {
+                        provider_call_id: result.provider_call_id,
+                        content: result.content,
+                    }),
+                })
+                .collect();
+            serde_json::to_value(wire).map_err(|error| {
+                WireError::Protocol(format!("resolved message serialization failed: {error}"))
+            })
+        }
         HostCall::LoadContext(request) => {
             let bundle = host
                 .load_loop_context(request)
                 .await
                 .map_err(WireError::Host)?;
+            state.issue_context_bundle(&bundle);
             serde_json::to_value(WireLoopContextBundle::from(bundle)).map_err(|error| {
                 WireError::Protocol(format!(
                     "loop context response serialization failed: {error}"
                 ))
             })
         }
-        HostCall::BuildPrompt(request) => host_call!(host.build_prompt_bundle(request)),
-        HostCall::PollInputs { after, limit } => host_call!(host.poll_inputs(after, limit)),
+        HostCall::BuildPrompt(request) => {
+            let bundle = host
+                .build_prompt_bundle(request)
+                .await
+                .map_err(WireError::Host)?;
+            state.issue_messages(&bundle.messages);
+            serde_json::to_value(bundle).map_err(|error| {
+                WireError::Protocol(format!("host response serialization failed: {error}"))
+            })
+        }
+        HostCall::PollInputs { after, limit } => {
+            let batch = host
+                .poll_inputs(after, limit)
+                .await
+                .map_err(WireError::Host)?;
+            state.issue_input_batch(&batch);
+            serde_json::to_value(batch).map_err(|error| {
+                WireError::Protocol(format!("host response serialization failed: {error}"))
+            })
+        }
         HostCall::AckInputs(tokens) => host_call!(host.ack_inputs(tokens)),
         HostCall::StreamModel(request) => {
             let response = host.stream_model(request).await.map_err(WireError::Host)?;
@@ -237,10 +436,30 @@ async fn dispatch_host_call(
         HostCall::BeginAssistantDraft(request) => host_call!(host.begin_assistant_draft(request)),
         HostCall::UpdateAssistantDraft(request) => host_call!(host.update_assistant_draft(request)),
         HostCall::FinalizeAssistantMessage(request) => {
-            host_call!(host.finalize_assistant_message(request))
+            let message_ref = host
+                .finalize_assistant_message(request)
+                .await
+                .map_err(WireError::Host)?;
+            state.issue_message(&LoopModelMessage {
+                role: "assistant".to_string(),
+                content_ref: message_ref.clone(),
+            });
+            serde_json::to_value(message_ref).map_err(|error| {
+                WireError::Protocol(format!("host response serialization failed: {error}"))
+            })
         }
         HostCall::AppendCapabilityResultRef(request) => {
-            host_call!(host.append_capability_result_ref(*request))
+            let message_ref = host
+                .append_capability_result_ref(*request)
+                .await
+                .map_err(WireError::Host)?;
+            state.issue_message(&LoopModelMessage {
+                role: "tool_result_reference".to_string(),
+                content_ref: message_ref.clone(),
+            });
+            serde_json::to_value(message_ref).map_err(|error| {
+                WireError::Protocol(format!("host response serialization failed: {error}"))
+            })
         }
         HostCall::Checkpoint(request) => host_call!(host.checkpoint(request)),
         HostCall::StageCheckpointPayload(request) => {
@@ -261,6 +480,19 @@ async fn dispatch_host_call(
                 .compact_loop_context(request)
                 .await
                 .map_err(WireError::Compaction)?;
+            if let LoopCompactionOutcome::Compacted(response) = &value {
+                let Ok(content_ref) =
+                    LoopMessageRef::new(format!("msg:summary-{}", response.summary_artifact_id))
+                else {
+                    return Err(WireError::Protocol(
+                        "compaction summary ref could not be represented".to_string(),
+                    ));
+                };
+                state.issue_message(&LoopModelMessage {
+                    role: "assistant".to_string(),
+                    content_ref,
+                });
+            }
             serde_json::to_value(value).map_err(|error| {
                 WireError::Protocol(format!("compaction response serialization failed: {error}"))
             })
@@ -273,6 +505,8 @@ pub async fn serve_loop_worker(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     invocation: LoopWorkerInvocation,
     settings: LoopWorkerSettings,
+    content: Option<&dyn LoopMessageContentPort>,
+    visibility: WorkerContentVisibility,
 ) -> Result<LoopWorkerOutcome, AgentLoopHostError> {
     let mut rpc_state = HostRpcState::new(&invocation, settings);
     let bootstrap = LoopWorkerBootstrap {
@@ -292,6 +526,7 @@ pub async fn serve_loop_worker(
                     format!("visible capability bootstrap serialization failed: {error}"),
                 )
             })?,
+        content_visibility: visibility,
     };
     session
         .send(encode(&HostFrame::Bootstrap(Box::new(bootstrap)))?)
@@ -338,7 +573,13 @@ pub async fn serve_loop_worker(
                 });
             }
             WorkerFrame::HostRequest(request) => {
-                let mut dispatch = Box::pin(dispatch_host_call(host, request.call, &mut rpc_state));
+                let mut dispatch = Box::pin(dispatch_host_call(
+                    host,
+                    content,
+                    visibility,
+                    request.call,
+                    &mut rpc_state,
+                ));
                 let result = loop {
                     tokio::select! {
                         result = &mut dispatch => break result,
@@ -369,21 +610,26 @@ pub async fn serve_loop_worker(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn rpc_state(max_model_calls: u32, max_capability_invocations: u32) -> HostRpcState {
+    pub(in crate::remote_host) fn rpc_state(
+        max_model_calls: u32,
+        max_capability_invocations: u32,
+    ) -> HostRpcState {
         HostRpcState {
             max_model_calls,
             max_capability_invocations,
             model_calls: 0,
             prompt_builds: 0,
             capability_invocations: 0,
+            resolve_messages: 0,
             last_model_iteration: None,
             model_calls_this_iteration: 0,
             max_model_iteration: Some(1),
             max_model_calls_per_iteration: Some(2),
             model_usage: None,
+            issued_messages: HashMap::new(),
         }
     }
 

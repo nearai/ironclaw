@@ -117,6 +117,9 @@ impl RebornCapabilityBackend {
         shell_mode: ShellMode,
         scripting: CapabilityScriptingInputs,
         park_capability_gate: Option<ParkingCapabilityGate>,
+        sandbox_loop_worker_kind: Option<
+            ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind,
+        >,
     ) -> HarnessResult<GroupCapability> {
         // Fail fast rather than silently ignore: only `BuiltinHttpTools` wires
         // `park_capability_dispatch` below, so a gate paired with any other
@@ -266,8 +269,10 @@ impl RebornCapabilityBackend {
                             .into(),
                     );
                 }
-                let host_runtime =
-                    super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
+                let host_runtime = super::harness::profiles::sandbox_shell::sandbox_shell_tools(
+                    sandbox_loop_worker_kind,
+                )
+                .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

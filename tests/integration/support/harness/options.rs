@@ -139,6 +139,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Build through the Docker-backed sandbox profile instead of the normal
     /// local-development profile. Only the real sandbox-shell E2E enables it.
     pub(crate) sandboxed_shell: bool,
+    /// Which sandbox loop-worker binary the sandboxed-shell profile launches.
+    /// `None` (the default) keeps the harness's current behavior: loop worker
+    /// enabled with the default Rust kind. `Some(kind)` selects the worker
+    /// binary/content-visibility pair (see
+    /// `ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind`).
+    pub(crate) sandbox_loop_worker_kind:
+        Option<ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind>,
     /// Raise the deployment's workspace scoping to per-caller, exactly as
     /// `serve` does unconditionally
     /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
@@ -175,8 +182,19 @@ impl HostRuntimeHarnessOptions {
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
             sandboxed_shell: false,
+            sandbox_loop_worker_kind: None,
             workspace_scoped_per_caller: false,
         }
+    }
+
+    /// Select the sandbox loop-worker kind for the sandboxed-shell profile.
+    /// Only meaningful together with [`Self::with_sandboxed_shell`].
+    pub(crate) fn with_sandbox_loop_worker_kind(
+        mut self,
+        kind: ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind,
+    ) -> Self {
+        self.sandbox_loop_worker_kind = Some(kind);
+        self
     }
 
     /// Request the post-construction real `TriggerActiveRunLookup` rewire

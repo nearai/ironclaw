@@ -1,8 +1,9 @@
 use ironclaw_host_api::process::MAX_SANDBOX_LOOP_WORKER_FRAME_BYTES;
 use ironclaw_loop_contracts::*;
+use ironclaw_turns::LoopMessageRef;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const LOOP_WORKER_WIRE_VERSION: u16 = 1;
+pub const LOOP_WORKER_WIRE_VERSION: u16 = 2;
 pub const LOOP_WORKER_MAX_FRAME_BYTES: usize = MAX_SANDBOX_LOOP_WORKER_FRAME_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,22 @@ pub struct LoopWorkerBootstrap {
     pub settings: LoopWorkerSettings,
     pub tool_definitions: Vec<ProviderToolDefinition>,
     pub current_visible_capabilities: Option<serde_json::Value>,
+    /// Whether the worker is allowed to see resolved transcript content.
+    /// An omitted field is blind; workers still reject unsupported wire versions.
+    #[serde(default)]
+    pub content_visibility: WorkerContentVisibility,
+}
+
+/// Whether the worker was bootstrapped allowed to request resolved
+/// model-visible content for the message refs the host already issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerContentVisibility {
+    /// The worker sees refs and safe summaries only (canonical Rust worker).
+    #[default]
+    Blind,
+    /// The worker may call `HostCall::ResolveMessages` for issued refs.
+    Resolved,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,25 +57,25 @@ pub enum LoopWorkerOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct HostRequestFrame {
-    pub(super) id: u64,
-    pub(super) call: HostCall,
+pub struct HostRequestFrame {
+    pub id: u64,
+    pub call: HostCall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct HostResponseFrame {
-    pub(super) id: u64,
-    pub(super) result: Result<serde_json::Value, WireError>,
+pub struct HostResponseFrame {
+    pub id: u64,
+    pub result: Result<serde_json::Value, WireError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) enum WorkerFrame {
+pub enum WorkerFrame {
     HostRequest(Box<HostRequestFrame>),
     Outcome(LoopWorkerOutcome),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) enum HostFrame {
+pub enum HostFrame {
     Bootstrap(Box<LoopWorkerBootstrap>),
     HostResponse(HostResponseFrame),
     Cancel(LoopCancellationSignal),
@@ -66,14 +83,15 @@ pub(super) enum HostFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) enum WireError {
+pub enum WireError {
     Host(AgentLoopHostError),
     Compaction(LoopCompactionError),
     Protocol(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) enum HostCall {
+pub enum HostCall {
+    ResolveMessages(ResolveMessagesRequest),
     LoadContext(LoopContextRequest),
     BuildPrompt(LoopPromptBundleRequest),
     PollInputs {
@@ -95,6 +113,29 @@ pub(super) enum HostCall {
     LoadCheckpointPayload(LoadCheckpointPayloadRequest),
     EmitProgress(LoopProgressEvent),
     Compact(LoopCompactionRequest),
+}
+
+/// Request for host-resolved model-visible content of message refs the run
+/// already holds. Only honored for a worker bootstrapped `Resolved`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveMessagesRequest {
+    pub messages: Vec<LoopModelMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireResolvedToolResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_call_id: Option<String>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireResolvedModelMessage {
+    pub role: String,
+    pub content_ref: LoopMessageRef,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<WireResolvedToolResult>,
 }
 
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, AgentLoopHostError> {

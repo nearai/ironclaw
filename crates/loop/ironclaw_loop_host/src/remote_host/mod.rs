@@ -13,7 +13,9 @@ mod tests;
 
 pub use client::{RemoteAgentLoopDriverHost, read_worker_bootstrap, remote_host_from_stdio};
 pub use protocol::{
-    LOOP_WORKER_MAX_FRAME_BYTES, LOOP_WORKER_WIRE_VERSION, LoopWorkerBootstrap, LoopWorkerFailure,
-    LoopWorkerInvocation, LoopWorkerOutcome, LoopWorkerSettings,
+    HostCall, HostFrame, HostRequestFrame, HostResponseFrame, LOOP_WORKER_MAX_FRAME_BYTES,
+    LOOP_WORKER_WIRE_VERSION, LoopWorkerBootstrap, LoopWorkerFailure, LoopWorkerInvocation,
+    LoopWorkerOutcome, LoopWorkerSettings, ResolveMessagesRequest, WireError,
+    WireResolvedModelMessage, WireResolvedToolResult, WorkerContentVisibility, WorkerFrame,
 };
 pub use server::serve_loop_worker;

@@ -1974,7 +1974,7 @@ where
                             &instruction_materialization_store,
                         )),
                         capabilities: Some(Arc::clone(&capabilities)),
-                        prompt_authority,
+                        prompt_authority: prompt_authority.clone(),
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
@@ -1997,7 +1997,7 @@ where
                             &instruction_materialization_store,
                         )),
                         capabilities: Some(Arc::clone(&capabilities)),
-                        prompt_authority,
+                        prompt_authority: prompt_authority.clone(),
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
@@ -2110,12 +2110,41 @@ where
         let cancellation: Arc<dyn LoopCancellationPort> =
             Arc::new(RunStateLoopCancellationPort::new(cancellation_handle));
 
+        let worker_content: Option<Arc<dyn ironclaw_loop_contracts::LoopMessageContentPort>> =
+            if run_context.checkpoint_schema_id.as_str()
+                == crate::sandboxed_planned_driver::PI_CHECKPOINT_SCHEMA_ID
+            {
+                let mut port = ironclaw_loop_host::ThreadBackedLoopModelPort::new(
+                    Arc::clone(&self.thread_service),
+                    effective_scope,
+                    run_context.clone(),
+                    Arc::clone(&self.model_gateway),
+                    max_messages,
+                )
+                .with_instruction_materialization_store(instruction_materialization_store);
+                if !unbound_run {
+                    if let Some(source) = self.skill_context_source.clone() {
+                        port = port.with_skill_context_source(source);
+                    }
+                    if let Some(source) = self.identity_context_source.clone() {
+                        port = port.with_identity_context_source(source);
+                    }
+                }
+                if let Some(attachment_port) = self.attachment_read_port.clone() {
+                    port = port.with_attachment_read_port(attachment_port);
+                }
+                Some(Arc::new(port))
+            } else {
+                None
+            };
+
         Ok(RebornLoopDriverHost {
             run_context,
             context,
             prompt,
             input,
             model,
+            worker_content,
             structured_finalization,
             checkpoint,
             capabilities,
@@ -2200,6 +2229,7 @@ pub struct RebornLoopDriverHost {
     prompt: Arc<dyn LoopPromptPort>,
     input: Arc<dyn LoopInputPort>,
     model: Arc<dyn LoopModelPort>,
+    worker_content: Option<Arc<dyn ironclaw_loop_contracts::LoopMessageContentPort>>,
     structured_finalization: Option<Arc<dyn StructuredFinalizationPort>>,
     checkpoint: Arc<dyn LoopCheckpointPort>,
     capabilities: Arc<dyn LoopCapabilityPort>,
@@ -2417,6 +2447,10 @@ mod terminal_output_selection_tests {
 impl LoopRunInfoPort for RebornLoopDriverHost {
     fn run_context(&self) -> &LoopRunContext {
         &self.run_context
+    }
+
+    fn worker_content_port(&self) -> Option<&dyn ironclaw_loop_contracts::LoopMessageContentPort> {
+        self.worker_content.as_deref()
     }
 
     fn finalize_terminal_output<'a>(

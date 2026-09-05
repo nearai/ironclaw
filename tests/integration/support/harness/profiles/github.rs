@@ -185,6 +185,7 @@ fn github_issue_tools_with_credential_result(
         real_egress_transport: None,
         process_port: None,
         sandbox_loop_worker_transport: None,
+        sandbox_loop_worker_kind: None,
         profile_filesystem: None,
         project_service: None,
         skill_activation_source: None,

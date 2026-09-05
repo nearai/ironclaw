@@ -157,6 +157,26 @@ where
     }
 }
 
+impl<R, W> RemoteAgentLoopDriverHost<R, W>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    /// Worker-side `HostCall::ResolveMessages`. Only meaningful for a worker
+    /// bootstrapped `WorkerContentVisibility::Resolved`; a blind host denies
+    /// the call with `PolicyDenied`.
+    pub async fn resolve_messages(
+        &self,
+        messages: Vec<LoopModelMessage>,
+    ) -> Result<Vec<WireResolvedModelMessage>, AgentLoopHostError> {
+        self.rpc
+            .call(HostCall::ResolveMessages(ResolveMessagesRequest {
+                messages,
+            }))
+            .await
+    }
+}
+
 impl<R, W> LoopRunInfoPort for RemoteAgentLoopDriverHost<R, W>
 where
     R: AsyncRead + Unpin + Send + Sync,

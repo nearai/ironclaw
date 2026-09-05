@@ -30,6 +30,13 @@ before anything durable commits. It never decides durability itself.
   default `CanonicalAgentLoopExecutor` in the persistent user sandbox. The
   runner, scoped host, and `LoopExitApplier` remain host-side; absent the
   test-support transport, production keeps the in-process `PlannedDriver`.
+  The worker is selected by `LoopWorkerKind`: `Rust` (default) launches
+  `/usr/local/bin/ironclaw-loop-worker` content-blind (`WorkerContentVisibility::Blind`),
+  `Pi` launches `/usr/local/bin/ironclaw-pi-worker` content-resolved
+  (`Resolved`, served through the run's `LoopMessageContentPort`). Operators
+  pick the kind with `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust|pi`
+  (case-insensitive, default `rust`); it takes effect only when
+  `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=true`.
 - `loop_driver_host.rs` / `runtime.rs` — the loop-host factory that composes a
   claimed run's port set and the capability-port decorator chain (the
   *ordering* lives here by charter).

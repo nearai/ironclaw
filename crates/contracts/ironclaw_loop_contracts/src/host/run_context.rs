@@ -356,6 +356,13 @@ impl LoopRunContext {
 pub trait LoopRunInfoPort: Send + Sync {
     fn run_context(&self) -> &LoopRunContext;
 
+    /// Optional run-owned content port. The sandbox transport must separately
+    /// authorize resolved visibility before it exposes this port to a worker.
+    /// This does not add a supertrait requirement to `AgentLoopDriverHost`.
+    fn worker_content_port(&self) -> Option<&dyn super::model::LoopMessageContentPort> {
+        None
+    }
+
     /// Run host-owned terminal work after the driver has returned its exit
     /// claim and before the runner snapshots host usage. The default is a
     /// no-op so hosts without terminal post-processing remain compatible;

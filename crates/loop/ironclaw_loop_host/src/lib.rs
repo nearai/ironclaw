@@ -129,9 +129,11 @@ pub use model_routes::{
 };
 pub use model_visible_scrub::scrub_model_visible_detail;
 pub use remote_host::{
-    LOOP_WORKER_MAX_FRAME_BYTES, LOOP_WORKER_WIRE_VERSION, LoopWorkerBootstrap, LoopWorkerFailure,
-    LoopWorkerInvocation, LoopWorkerOutcome, LoopWorkerSettings, RemoteAgentLoopDriverHost,
-    read_worker_bootstrap, remote_host_from_stdio, serve_loop_worker,
+    HostCall, HostFrame, HostRequestFrame, HostResponseFrame, LOOP_WORKER_MAX_FRAME_BYTES,
+    LOOP_WORKER_WIRE_VERSION, LoopWorkerBootstrap, LoopWorkerFailure, LoopWorkerInvocation,
+    LoopWorkerOutcome, LoopWorkerSettings, RemoteAgentLoopDriverHost, ResolveMessagesRequest,
+    WireError, WireResolvedModelMessage, WireResolvedToolResult, WorkerContentVisibility,
+    WorkerFrame, read_worker_bootstrap, remote_host_from_stdio, serve_loop_worker,
 };
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
@@ -221,10 +223,11 @@ use ironclaw_loop_contracts::{
     LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort,
     LoopContextRequest, LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind,
     LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor,
-    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
-    LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
-    LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad, MemoryPromptContextService,
-    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, SystemInferenceContextMessage,
+    LoopMessageContentPort, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+    LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad,
+    MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
+    ResolvedModelMessage, ResolvedToolResult, SystemInferenceContextMessage,
     SystemInferenceContextRole, UpdateAssistantDraft, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
     sort_instruction_snippets_for_prompt,
@@ -1969,6 +1972,47 @@ where
     }
 }
 
+#[async_trait]
+impl<S, G> LoopMessageContentPort for ThreadBackedLoopModelPort<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn resolve_message_content(
+        &self,
+        messages: Vec<LoopModelMessage>,
+    ) -> Result<Vec<ResolvedModelMessage>, AgentLoopHostError> {
+        let resolved = self.resolve_model_messages(messages).await?;
+        resolved
+            .into_iter()
+            .map(|message| {
+                let content = message.content;
+                Ok(ResolvedModelMessage {
+                    role: message.role.as_loop_role().to_string(),
+                    content_ref: message.content_ref,
+                    tool_result: message.tool_result_content.map(|tool_content| {
+                        ResolvedToolResult {
+                            provider_call_id: message
+                                .tool_result_provider_call
+                                .as_ref()
+                                .map(|call| call.provider_call_id.clone()),
+                            content: match &tool_content {
+                                HostManagedToolResultContent::Reference { envelope } => {
+                                    envelope.model_visible_content_or_safe_summary()
+                                }
+                                HostManagedToolResultContent::Resolved { safe_summary: _ } => {
+                                    content.clone()
+                                }
+                            },
+                        }
+                    }),
+                    content,
+                })
+            })
+            .collect()
+    }
+}
+
 impl<S, G> ThreadBackedLoopModelPort<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
@@ -2795,6 +2839,17 @@ impl HostManagedModelMessageRole {
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "model message role is unsupported",
             )),
+        }
+    }
+}
+
+impl HostManagedModelMessageRole {
+    fn as_loop_role(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::ToolResult => "tool_result_reference",
         }
     }
 }

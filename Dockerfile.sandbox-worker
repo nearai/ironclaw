@@ -19,6 +19,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         --bin ironclaw-loop-worker \
     && cp target/release/ironclaw-loop-worker /ironclaw-loop-worker
 
+# Pi loop worker, compiled for the final image's architecture and glibc runtime.
+# Keep the Bun version pinned by digest; bump version + digest together.
+FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS pi_worker_builder
+
+ARG TARGETARCH
+WORKDIR /pi-worker
+COPY docker/sandbox/pi-worker/package.json docker/sandbox/pi-worker/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY docker/sandbox/pi-worker/src ./src
+RUN case "$TARGETARCH" in \
+        amd64) target=bun-linux-x64 ;; \
+        arm64) target=bun-linux-arm64 ;; \
+        *) echo "Unsupported worker architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && bun build --compile --target="$target" src/main.ts --outfile /ironclaw-pi-worker
+
 # Phase 2 worker for the persistent local-Docker user sandbox.
 # Keep the base digest aligned with RailwayPreviewSandboxConfig's default.
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
@@ -45,9 +61,11 @@ COPY --chmod=0755 docker/sandbox/ironclaw-exec \
 COPY --from=loop_worker_builder --chmod=0755 \
     /ironclaw-loop-worker \
     /usr/local/bin/ironclaw-loop-worker
+COPY --from=pi_worker_builder --chmod=0755 \
+    /ironclaw-pi-worker \
+    /usr/local/bin/ironclaw-pi-worker
 ENV HOME=/home/sandbox \
     GH_CONFIG_DIR=/workspace/.config/gh
-WORKDIR /workspace
 USER 1000:1000
 
 ENTRYPOINT ["tini", "--"]

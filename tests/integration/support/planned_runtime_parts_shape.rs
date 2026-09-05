@@ -77,6 +77,7 @@ where
         subagent_spawn_limits: _,
         loop_exit_evidence: _,
         sandbox_loop_worker_transport,
+        sandbox_loop_worker_kind: _,
         config: _,
         model_route_resolver,
         cancellation_factory,
