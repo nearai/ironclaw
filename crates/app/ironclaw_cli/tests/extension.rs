@@ -85,6 +85,7 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
         .arg("--json")
         .env_clear()
         .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .output()
@@ -134,6 +135,7 @@ fn extension_search_human_output_escapes_control_characters() {
         .arg("zztest-evil")
         .env_clear()
         .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn extension search should run");
@@ -183,6 +185,7 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
         .args(args)
         .env_clear()
         .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", reborn_home);
     preserve_windows_runtime_environment(&mut command);
     let output = command

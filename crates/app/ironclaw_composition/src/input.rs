@@ -18,6 +18,7 @@ use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::ProcessConcurrencyLimits;
 use ironclaw_trust::HostTrustPolicy;
+use ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind;
 use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
@@ -105,7 +106,6 @@ pub(crate) struct OAuthProviderBackendConfig {
 pub(crate) struct OAuthDcrCallbackConfig {
     pub(crate) callback_origin: String,
 }
-
 #[derive(Clone, Default)]
 pub enum RebornRuntimeProcessBinding {
     #[default]
@@ -114,6 +114,10 @@ pub enum RebornRuntimeProcessBinding {
         process_port: Arc<UserSandboxProcessPort>,
         loop_worker_transport:
             Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
+        /// Which sandbox loop-worker binary the transport launches. Read only
+        /// when `loop_worker_transport` is `Some`; `None` selects the default
+        /// Rust worker. Deployment shape is data (§4.4), never `#[cfg]`.
+        loop_worker_kind: Option<LoopWorkerKind>,
     },
 }
 impl std::fmt::Debug for RebornRuntimeProcessBinding {
@@ -160,16 +164,19 @@ impl RebornRuntimeProcessBinding {
         Self::UserSandbox {
             process_port,
             loop_worker_transport: None,
+            loop_worker_kind: None,
         }
     }
 
-    pub fn user_sandbox_with_loop_worker(
+    pub fn user_sandbox_with_loop_worker_kind(
         process_port: Arc<UserSandboxProcessPort>,
         loop_worker_transport: Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>,
+        loop_worker_kind: LoopWorkerKind,
     ) -> Self {
         Self::UserSandbox {
             process_port,
             loop_worker_transport: Some(loop_worker_transport),
+            loop_worker_kind: Some(loop_worker_kind),
         }
     }
 
@@ -181,6 +188,15 @@ impl RebornRuntimeProcessBinding {
                 loop_worker_transport,
                 ..
             } => loop_worker_transport.clone(),
+            Self::None => None,
+        }
+    }
+
+    pub fn loop_worker_kind(&self) -> Option<LoopWorkerKind> {
+        match self {
+            Self::UserSandbox {
+                loop_worker_kind, ..
+            } => *loop_worker_kind,
             Self::None => None,
         }
     }

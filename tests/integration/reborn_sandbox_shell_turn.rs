@@ -222,6 +222,73 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
     });
 }
 
+const PI_LOOP_WORKER_MARKER: &str = "PI_LOOP_WORKER_ACTIVE";
+
+/// Pi loop-worker lane: the same sandbox membrane launches
+/// `/usr/local/bin/ironclaw-pi-worker` (content-`Resolved` wire v2) instead of
+/// the canonical Rust worker when
+/// `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=pi`. Gated on
+/// `IRONCLAW_REQUIRE_DOCKER_TESTS` like the Rust lane above.
+#[test]
+fn sandbox_shell_turn_runs_the_pi_loop_worker_in_a_real_container() {
+    run_with_larger_stack(async {
+        if !docker_gate::docker_available().await {
+            eprintln!("SKIP: pi loop-worker lane requires a Docker daemon");
+            return;
+        }
+        let image = docker_gate::configured_sandbox_image();
+        if !docker_gate::docker_image_available(&image).await {
+            eprintln!("SKIP: sandbox worker image {image:?} is not built");
+            return;
+        }
+
+        let mut cleanup = DockerCleanup::new();
+        let harness = RebornIntegrationHarness::builder(format!(
+            "sandbox-pi-worker-{}",
+            InvocationId::new()
+        ))
+        .with_sandbox_shell_tools()
+        .with_sandbox_loop_worker_kind(Default::default())
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.shell",
+                json!({
+                    "command": format!(
+                        "set -eu; test -f /.dockerenv; found=0; for exe in /proc/[0-9]*/exe; do target=$(readlink \"$exe\" 2>/dev/null || true); if [ \"$target\" = '/usr/local/bin/ironclaw-pi-worker' ]; then found=1; break; fi; done; test \"$found\" -eq 1; echo {PI_LOOP_WORKER_MARKER}"
+                    ),
+                    "credential_contexts": [],
+                }),
+            ),
+            RebornScriptedReply::text("pi loop worker finished the turn"),
+        ])
+        .build()
+        .await
+        .expect("pi-loop-worker harness builds");
+        let identity = ContainerIdentity {
+            tenant: harness.binding.tenant_id.as_str().to_string(),
+            user: harness.binding.actor_user_id.as_str().to_string(),
+        };
+        cleanup.track_identity(identity);
+
+        harness
+            .submit_turn("run a turn driven by the pi loop worker")
+            .await
+            .expect("pi lane turn completes");
+        harness
+            .assert_tool_invoked("builtin.shell")
+            .await
+            .expect("shell dispatches in the pi lane");
+        harness
+            .assert_tool_result_contains(PI_LOOP_WORKER_MARKER)
+            .await
+            .expect("the pi loop worker process was active in the container");
+        harness
+            .assert_reply_contains("pi loop worker finished the turn")
+            .await
+            .expect("the pi-driven turn finalizes its reply");
+    });
+}
+
 fn run_with_larger_stack<F>(test: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,

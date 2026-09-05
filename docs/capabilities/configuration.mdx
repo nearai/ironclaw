@@ -30,12 +30,12 @@ providers:    ~/.ironclaw/reborn/providers.json
 Two files matter, and both are optional — delete them and IronClaw falls back to built-in
 defaults.
 
-| File | Layer | Contents |
-| --- | --- | --- |
-| `config.toml` | Selection | Which profile, identity, model slot, and runtime settings to use |
-| `providers.json` | Catalog | Which inference providers this install knows about |
+| File             | Layer     | Contents                                                         |
+| ---------------- | --------- | ---------------------------------------------------------------- |
+| `config.toml`    | Selection | Which profile, identity, model slot, and runtime settings to use |
+| `providers.json` | Catalog   | Which inference providers this install knows about               |
 
-`config.toml` selects *by id* from the catalog `providers.json` defines. The compiled-in
+`config.toml` selects _by id_ from the catalog `providers.json` defines. The compiled-in
 provider defaults are appended with your entries, and later entries override earlier ones
 by id.
 
@@ -74,12 +74,12 @@ ironclaw config get llm.default.provider_id
 `list` and `get` read every key. `set` is deliberately narrower — it accepts only the keys
 that have a routing destination:
 
-| Key | Destination |
-| --- | --- |
-| `<provider>.api_key` | Encrypted secret store (prompts, hidden) |
-| `google.client_id`, `google.redirect_uri` | `config.toml` |
-| `google.client_secret` | Encrypted secret store (prompts, hidden) |
-| `webui.token --rotate` | Web token file |
+| Key                                       | Destination                              |
+| ----------------------------------------- | ---------------------------------------- |
+| `<provider>.api_key`                      | Encrypted secret store (prompts, hidden) |
+| `google.client_id`, `google.redirect_uri` | `config.toml`                            |
+| `google.client_secret`                    | Encrypted secret store (prompts, hidden) |
+| `webui.token --rotate`                    | Web token file                           |
 
 ```bash
 ironclaw config set google.client_id <your-client-id>
@@ -113,6 +113,7 @@ Until you do, a running instance keeps serving the old value.
     SSH in only to run the `ironclaw config` commands, then restart the agent from the
     [Agent Dashboard](https://agent.near.ai/). That is the only way to restart a hosted
     instance.
+
   </Tab>
 
   <Tab title="Self-hosted">
@@ -121,6 +122,7 @@ Until you do, a running instance keeps serving the old value.
     ```
 
     Or stop and restart `ironclaw serve` if you're running it in the foreground.
+
   </Tab>
 </Tabs>
 
@@ -128,7 +130,7 @@ Until you do, a running instance keeps serving the old value.
 
 ## Secrets
 
-Secrets are never stored in `config.toml`. Reference them by environment variable *name*:
+Secrets are never stored in `config.toml`. Reference them by environment variable _name_:
 
 ```toml
 [llm.default]
@@ -138,8 +140,8 @@ api_key_env = "ANTHROPIC_API_KEY"
 ```
 
 <Warning>
-Pasting a secret value where a variable name is expected is rejected at parse time, not
-silently accepted. `api_key_env = "sk-ant-..."` will fail to load.
+  Pasting a secret value where a variable name is expected is rejected at parse
+  time, not silently accepted. `api_key_env = "sk-ant-..."` will fail to load.
 </Warning>
 
 Your master encryption key lives in the OS keychain. On a headless host, supply it through
@@ -156,21 +158,23 @@ storage is expected, and how processes are isolated.
 ironclaw profile list
 ```
 
-| Profile | Use |
-| --- | --- |
-| `local-dev` | Default. Single user on your own machine |
-| `local-dev-yolo` | Local development with host filesystem access; `serve` requires `--confirm-host-access` |
-| `hosted-single-tenant` | One tenant served over the network, backed by PostgreSQL |
-| `hosted-single-tenant-volume` | One tenant served over the network, keeping local embedded storage on a persistent volume. Does not accept `[storage]` |
-| `production` | Multi-user production deployment |
-| `migration-dry-run` | Migration rehearsal |
+| Profile                                         | Use                                                                                                                                                                                                 |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hosted-single-tenant-volume-sandboxed`         | Default. One tenant with per-user sandboxed processes on a local Docker daemon. Needs a sandbox image built from `Dockerfile.sandbox-worker`; the agent loop runs as a Pi worker inside the sandbox |
+| `hosted-single-tenant-volume-sandboxed-railway` | Preview. Same as above, with per-user sandbox lifecycle provided by Railway Sandboxes                                                                                                               |
+| `local-dev`                                     | Single user on your own machine, with the loop in-process                                                                                                                                           |
+| `local-dev-yolo`                                | Local development with host filesystem access; `serve` requires `--confirm-host-access`                                                                                                             |
+| `hosted-single-tenant`                          | One tenant served over the network, backed by PostgreSQL                                                                                                                                            |
+| `hosted-single-tenant-volume`                   | One tenant served over the network, keeping local embedded storage on a persistent volume. Does not accept `[storage]`                                                                              |
+| `production`                                    | Multi-user production deployment                                                                                                                                                                    |
+| `migration-dry-run`                             | Migration rehearsal                                                                                                                                                                                 |
 
 Set it in `config.toml` under `[boot]`, or per-invocation with `IRONCLAW_REBORN_PROFILE`.
 
 <Warning>
-Profile choice is a security boundary, not a preset. A deployment that serves more than
-one user must not run a profile with single-user host semantics. See
-[Security](/security).
+  Profile choice is a security boundary, not a preset. A deployment that serves
+  more than one user must not run a profile with single-user host semantics. See
+  [Security](/security).
 </Warning>
 
 ---
@@ -185,7 +189,7 @@ Run `ironclaw config list` to see every key with its current value. The main gro
 
 ```toml
 [boot]
-profile = "local-dev"
+profile = "hosted-single-tenant-volume-sandboxed"
 
 [identity]
 default_owner = "reborn-cli"
@@ -307,15 +311,15 @@ tag activation, and explicit `$skill-name` mentions, still work. See
 
 Overrides are namespaced `IRONCLAW_REBORN_*`. The ones you're most likely to need:
 
-| Variable | Purpose |
-| --- | --- |
-| `IRONCLAW_REBORN_HOME` | Where configuration and state live |
-| `IRONCLAW_REBORN_PROFILE` | Boot profile |
-| `IRONCLAW_REBORN_LOG` | Log level, for example `debug` |
-| `IRONCLAW_REBORN_POSTGRES_URL` | Database URL when using the Postgres backend |
+| Variable                            | Purpose                                           |
+| ----------------------------------- | ------------------------------------------------- |
+| `IRONCLAW_REBORN_HOME`              | Where configuration and state live                |
+| `IRONCLAW_REBORN_PROFILE`           | Boot profile                                      |
+| `IRONCLAW_REBORN_LOG`               | Log level, for example `debug`                    |
+| `IRONCLAW_REBORN_POSTGRES_URL`      | Database URL when using the Postgres backend      |
 | `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Master encryption key on hosts without a keychain |
-| `IRONCLAW_REBORN_WEBUI_TOKEN` | Bearer token for the web interface |
-| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Canonical URL when running behind a proxy |
+| `IRONCLAW_REBORN_WEBUI_TOKEN`       | Bearer token for the web interface                |
+| `IRONCLAW_REBORN_WEBUI_BASE_URL`    | Canonical URL when running behind a proxy         |
 
 Provider API keys use each provider's own variable name — `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `NEARAI_API_KEY`, and so on.

@@ -12,8 +12,9 @@ state to PostgreSQL.
 
 ## Local Storage
 
-Under the default `local-dev` profile, IronClaw keeps state in embedded database files
-inside your IronClaw home:
+Under the default `hosted-single-tenant-volume-sandboxed` profile (and the
+explicit `local-dev` and `hosted-single-tenant-volume` profiles), IronClaw
+keeps state in embedded database files inside your IronClaw home:
 
 ```bash
 ls ~/.ironclaw/reborn
@@ -71,9 +72,10 @@ Use `production` for a multi-user deployment. See
 [Configuration](/capabilities/configuration#profiles).
 
 <Warning>
-`hosted-single-tenant-volume` does **not** accept `[storage]`, despite the name. It is a
-volume-backed variant of local embedded storage, not a PostgreSQL profile. Pairing it with
-a `[storage]` block leaves the instance unable to start.
+  `hosted-single-tenant-volume` does **not** accept `[storage]`, despite the
+  name. It is a volume-backed variant of local embedded storage, not a
+  PostgreSQL profile. Pairing it with a `[storage]` block leaves the instance
+  unable to start.
 </Warning>
 
 </Step>
@@ -95,8 +97,8 @@ pool_max_size         = 8
 ```
 
 <Warning>
-The URL is environment-only. `config.toml` may name the variable that holds it, but must
-never contain the URL itself — it carries the database password.
+  The URL is environment-only. `config.toml` may name the variable that holds
+  it, but must never contain the URL itself — it carries the database password.
 </Warning>
 
 </Step>
@@ -146,17 +148,17 @@ export IRONCLAW_REBORN_SECRET_MASTER_KEY=...
 ```
 
 <Warning>
-Losing the master key makes every stored credential unrecoverable. Back it up somewhere
-other than the machine running IronClaw. See [Security](/security).
+  Losing the master key makes every stored credential unrecoverable. Back it up
+  somewhere other than the machine running IronClaw. See [Security](/security).
 </Warning>
 
 ---
 
 ## Choosing
 
-| | Local (default) | PostgreSQL |
-| --- | --- | --- |
-| Setup | None | Provision a server |
-| Best for | Personal use, one machine | Served, multi-user, production |
-| Backup | Copy the home directory | `pg_dump`, replication |
-| Profile | `local-dev` | `hosted-single-tenant`, `production` |
+|          | Local (default)                                                                               | PostgreSQL                           |
+| -------- | --------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Setup    | None                                                                                          | Provision a server                   |
+| Best for | Personal use, one machine                                                                     | Served, multi-user, production       |
+| Backup   | Copy the home directory                                                                       | `pg_dump`, replication               |
+| Profile  | `hosted-single-tenant-volume-sandboxed` (default), `local-dev`, `hosted-single-tenant-volume` | `hosted-single-tenant`, `production` |

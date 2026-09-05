@@ -1,0 +1,18 @@
+{
+  "name": "@ironclaw/ironclaw-pi-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IronClaw sandbox loop worker that drives @earendil-works/pi-agent-core behind the host membrane",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "build": "bun build --compile --target=bun-linux-x64 src/main.ts --outfile ironclaw-pi-worker"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.85.0",
+    "@earendil-works/pi-ai": "0.85.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.4"
+  }
+}

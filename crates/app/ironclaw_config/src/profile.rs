@@ -2,15 +2,16 @@ use std::{ffi::OsString, str::FromStr};
 
 use crate::RebornConfigError;
 
-/// Environment variable that selects the standalone Reborn boot profile.
+/// Environment variable that selects the Reborn boot profile. Unset selects
+/// the compiled default (the Docker-sandboxed hosted volume profile).
 pub const REBORN_PROFILE_ENV: &str = "IRONCLAW_REBORN_PROFILE";
 
 /// Coarse boot profile for the standalone Reborn binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RebornProfile {
-    /// Standalone single-user runtime. This is the safe default for a
-    /// separately invoked binary.
-    #[default]
+    /// Standalone single-user runtime on the local host. Selected explicitly
+    /// for laptop-style invocations and tests that must not require a Docker
+    /// daemon; never the compiled default anymore.
     Standalone,
     /// Standalone runtime with explicitly confirmed unrestricted host access.
     /// Never selected by default.
@@ -23,7 +24,10 @@ pub enum RebornProfile {
     /// the full PostgreSQL production composition continues to mature.
     HostedSingleTenantVolume,
     /// Hosted single-tenant volume profile whose shell/process lane runs in a
-    /// per-user sandbox on a locally reachable Docker daemon.
+    /// per-user sandbox on a locally reachable Docker daemon. This is the
+    /// default boot profile: an unchanged startup requires Docker and fails
+    /// closed (no in-process fallback) when the daemon is unreachable.
+    #[default]
     HostedSingleTenantVolumeSandboxed,
     /// Hosted single-tenant volume profile whose per-user sandbox lifecycle is
     /// provided by Railway Sandboxes and durable Railway checkpoints.

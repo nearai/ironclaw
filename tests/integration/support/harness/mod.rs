@@ -323,6 +323,8 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
     sandbox_loop_worker_transport:
         Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
+    sandbox_loop_worker_kind:
+        Option<ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind>,
     /// Raw local-dev memory filesystem backing the user-profile source
     /// (E-PROFILE seam). `Some` only for `new_with_options`-built harnesses (which
     /// flow through `RebornServices`); `None` for the lower-level constructors and
@@ -797,6 +799,7 @@ impl HostRuntimeCapabilityHarness {
             recording_network_egress,
             google_oauth_backend_for_test,
             sandboxed_shell,
+            sandbox_loop_worker_kind,
             workspace_scoped_per_caller,
         } = options;
         let root = Arc::new(if sandboxed_shell {
@@ -866,7 +869,9 @@ impl HostRuntimeCapabilityHarness {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
                 workspace_root.clone(),
                 None,
-                true,
+                Some(
+                    sandbox_loop_worker_kind.unwrap_or(ironclaw_composition::LoopWorkerKind::Rust),
+                ),
             )
             .await?;
             sandbox_loop_worker_transport = user_sandbox.loop_worker_transport();
@@ -1099,8 +1104,8 @@ impl HostRuntimeCapabilityHarness {
             http_egress: None,
             network_egress: recording_network_egress,
             real_egress_transport: None,
-            process_port: None,
             sandbox_loop_worker_transport,
+            sandbox_loop_worker_kind,
             profile_filesystem,
             project_service,
             skill_activation_source,
@@ -1110,11 +1115,18 @@ impl HostRuntimeCapabilityHarness {
             scope_capability_by_run_owner: false,
             product_auth,
             tool_permission_overrides,
+            process_port: None,
             persistent_approval_policies,
             trigger_repository,
             reborn_services: Some(services),
             trigger_active_run_lookup_requested,
         })
+    }
+
+    pub(crate) fn sandbox_loop_worker_kind(
+        &self,
+    ) -> Option<ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind> {
+        self.sandbox_loop_worker_kind
     }
 
     /// Park this harness's tool/capability dispatch until released

@@ -56,6 +56,8 @@ const LOOP_PORT_OWNERS: &[(&str, &str)] = &[
     ("LoopCompactionPort", "ironclaw_loop_contracts"),
     ("LoopContextPort", "ironclaw_loop_contracts"),
     ("LoopInputPort", "ironclaw_loop_contracts"),
+    // Run-scoped message-resolution authority; implementations stay in loop_host.
+    ("LoopMessageContentPort", "ironclaw_loop_contracts"),
     ("LoopModelPort", "ironclaw_loop_contracts"),
     ("LoopProgressPort", "ironclaw_loop_contracts"),
     ("LoopPromptPort", "ironclaw_loop_contracts"),

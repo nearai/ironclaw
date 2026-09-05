@@ -188,6 +188,12 @@ pub struct RebornIntegrationHarnessBuilder {
     /// `BuiltinHttpTools` capability dispatch parks until released (issue
     /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
     park_tool_gate: Option<ParkingCapabilityGate>,
+    /// Loop-worker kind for the Docker-backed sandbox profile
+    /// (`RebornCapabilityBackend::SandboxShellTools`). `None` keeps the
+    /// profile default (canonical Rust worker, content-blind). Threaded into
+    /// `RebornCapabilityBackend::install`.
+    sandbox_loop_worker_kind:
+        Option<ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind>,
     /// Shortens the underlying group's turn-state store lease TTL (default
     /// 90s) for lease-expiry-under-a-wedged-tool coverage. Threaded into
     /// `RebornIntegrationGroupBuilder::with_runner_lease_ttl_for_test`.
@@ -402,6 +408,18 @@ impl RebornIntegrationHarnessBuilder {
     /// `ParkingCapabilityGate`.
     pub fn park_tool_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
         self.park_tool_gate = Some(gate);
+        self
+    }
+
+    /// Select the sandbox loop worker for the Docker-backed sandbox profile.
+    /// `LoopWorkerKind::Pi` launches `/usr/local/bin/ironclaw-pi-worker` with a
+    /// content-`Resolved` wire v2 bootstrap; the default (`None`) keeps the
+    /// canonical Rust worker. Only meaningful with `.with_sandbox_shell_tools()`.
+    pub fn with_sandbox_loop_worker_kind(
+        mut self,
+        kind: ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind,
+    ) -> Self {
+        self.sandbox_loop_worker_kind = Some(kind);
         self
     }
 
@@ -752,6 +770,7 @@ impl RebornIntegrationHarnessBuilder {
                     real_egress_response_bodies: self.real_egress_response_bodies,
                 },
                 self.park_tool_gate,
+                self.sandbox_loop_worker_kind,
             )
             .await?;
 
@@ -923,6 +942,7 @@ impl RebornIntegrationHarness {
             hook_dispatcher_builder_factory: None,
             trajectory_observer: None,
             park_tool_gate: None,
+            sandbox_loop_worker_kind: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             runner_heartbeat_interval: None,

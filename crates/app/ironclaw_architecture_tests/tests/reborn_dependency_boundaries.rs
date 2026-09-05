@@ -1016,7 +1016,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // production prompt validation checks structural limits and control
         // characters only; decoded Basic-auth samples remain test-only. Count
         // read from this test's own failure message after merging #7416 and #6985.
-        ("ironclaw_loop_contracts", 13_608),
+        // 13_608 -> 13_778 (Pi sandbox worker): resolved-message DTOs and the
+        // optional run-owned content-port accessor. Resolution, authorization,
+        // transport, and worker execution remain outside the contracts tier.
+        ("ironclaw_loop_contracts", 13_778),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

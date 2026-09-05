@@ -49,7 +49,7 @@ use crate::{
         register_subagent_planned_driver, register_unbound_planned_driver,
         register_unbound_structured_planned_driver,
     },
-    sandboxed_planned_driver::register_sandboxed_default_planned_driver,
+    sandboxed_planned_driver::{LoopWorkerKind, register_sandboxed_default_planned_driver},
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
         prompt_material::GateBackedSubagentPromptMaterialSource,
@@ -391,6 +391,10 @@ where
     /// `None` preserves the in-process planned driver.
     pub sandbox_loop_worker_transport:
         Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
+    /// Which sandbox loop-worker binary the transport launches (Rust default,
+    /// Pi for the content-resolved worker). Read only when
+    /// `sandbox_loop_worker_transport` is `Some`; `None` selects the default.
+    pub sandbox_loop_worker_kind: Option<LoopWorkerKind>,
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
@@ -731,10 +735,12 @@ where
             ),
         )
     })?;
+    let sandbox_loop_worker_kind = parts.sandbox_loop_worker_kind.unwrap_or_default();
     if let Some(transport) = parts.sandbox_loop_worker_transport.clone() {
         register_sandboxed_default_planned_driver(
             &mut registry,
             transport,
+            sandbox_loop_worker_kind,
             parts.config.planned_default_iteration_limit,
             parts.config.planned_model_availability_retry_attempts,
         )?;
@@ -751,6 +757,16 @@ where
             .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
+    let run_profile_resolver: Arc<dyn RunProfileResolver> =
+        if parts.sandbox_loop_worker_transport.is_some()
+            && sandbox_loop_worker_kind == LoopWorkerKind::Pi
+        {
+            Arc::new(crate::sandboxed_planned_driver::PiRunProfileResolver {
+                inner: run_profile_resolver,
+            })
+        } else {
+            run_profile_resolver
+        };
 
     let process_system = parts.process_system.clone();
     let agent_turn_runtime = Arc::new(process_system.agent_turn_runtime());

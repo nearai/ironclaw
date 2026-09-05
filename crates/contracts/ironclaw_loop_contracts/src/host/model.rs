@@ -419,6 +419,33 @@ pub trait LoopModelPort: Send + Sync {
     ) -> Result<LoopModelResponse, AgentLoopHostError>;
 }
 
+/// Host boundary for resolving model-message refs into the host-owned
+/// model-visible text for refs the run already holds. Used by content-resolved
+/// loop workers (wire v2 `ResolveMessages`); content-blind workers never call
+/// it. The resolved transcript is the run's own thread content — the host still
+/// owns scoping, policy, and authorization checks on every ref.
+#[async_trait]
+pub trait LoopMessageContentPort: Send + Sync {
+    async fn resolve_message_content(
+        &self,
+        messages: Vec<LoopModelMessage>,
+    ) -> Result<Vec<ResolvedModelMessage>, AgentLoopHostError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelMessage {
+    pub role: String,
+    pub content_ref: LoopMessageRef,
+    pub content: String,
+    pub tool_result: Option<ResolvedToolResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedToolResult {
+    pub provider_call_id: Option<String>,
+    pub content: String,
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};

@@ -845,6 +845,21 @@ impl ironclaw_loop_contracts::LoopModelPort for MockAgentLoopDriverHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockAgentLoopDriverHost {
+    fn tool_definitions(
+        &self,
+    ) -> Result<Vec<ironclaw_loop_contracts::ProviderToolDefinition>, AgentLoopHostError> {
+        self.visible_capabilities
+            .iter()
+            .map(|descriptor| {
+                ironclaw_loop_contracts::ProviderToolDefinition::from_parts(
+                    descriptor.capability_id.clone(),
+                    descriptor.safe_name.clone(),
+                    descriptor.safe_description.clone(),
+                    descriptor.parameters_schema.clone(),
+                )
+            })
+            .collect()
+    }
     fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }

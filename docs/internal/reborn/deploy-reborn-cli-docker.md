@@ -96,11 +96,14 @@ NEARAI_API_KEY=<nearai-api-key>
 
 The volume-backed sandbox profiles have distinct operator intent:
 
-- `hosted-single-tenant-volume-sandboxed` is the local-Docker profile. It is
-  for exercising the Docker worker boundary. The deployment factory enables
+- `hosted-single-tenant-volume-sandboxed` is the local-Docker profile and the
+  default boot profile for fresh configurations. It runs the agent loop as a
+  worker inside the per-user sandbox (Pi by default, `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust`
+  for the content-blind Rust worker). The deployment factory enables
   the worker's default Docker network; `--network none` is only the ad-hoc
-  transport's fail-closed construction default. Build its Python worker once
-  with `docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .`.
+  transport's fail-closed construction default. Build the sandbox worker image
+  once with `docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .`
+  — it contains both loop-worker binaries.
   On Docker Desktop or Colima, keep `IRONCLAW_REBORN_HOME` under a host path
   shared with the Docker VM (for example `/Users/...` on macOS); otherwise the
   daemon cannot bind the per-user workspace.
@@ -286,7 +289,7 @@ and signing secrets are stored from the WebUI extension setup.
 Migrating an existing config file: a mounted or previously seeded
 `config.toml` that still carries a `[slack]` or `[telegram]` section keeps
 parsing. Outside the one entrypoint-migrated shape above (`enabled = false`
-beside `signing_secret_env`/`bot_token_env`), a leftover Slack *setup* field
+beside `signing_secret_env`/`bot_token_env`), a leftover Slack _setup_ field
 (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`,
 `shared_subject_user_id`, `channel_routes`, `signing_secret_env`,
 `bot_token_env`) fails container startup with a migration pointer rather than

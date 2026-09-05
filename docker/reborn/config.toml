@@ -1,7 +1,7 @@
 api_version = "ironclaw.runtime/v1"
 
 [boot]
-profile = "local-dev"
+profile = "hosted-single-tenant-volume-sandboxed"
 
 [identity]
 default_owner = "reborn-cli"

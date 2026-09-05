@@ -389,6 +389,16 @@ impl GroupCapability {
             }
         }
     }
+    pub(crate) fn sandbox_loop_worker_kind(
+        &self,
+    ) -> Option<ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind> {
+        match self {
+            Self::HostRuntime(harness) => harness.sandbox_loop_worker_kind(),
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
+        }
+    }
 
     /// The durable gate-record store this backend's capability port persists
     /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
@@ -1342,6 +1352,7 @@ impl RebornIntegrationGroupBuilder {
             subagent_spawn_limits: SubagentSpawnLimits::default(),
             loop_exit_evidence,
             sandbox_loop_worker_transport: capability.sandbox_loop_worker_transport(),
+            sandbox_loop_worker_kind: capability.sandbox_loop_worker_kind(),
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
                 lease_recovery_interval: self

@@ -12,14 +12,19 @@ use ironclaw_sandbox::{
 };
 
 use crate::{RebornBuildError, RebornRuntimeProcessBinding};
+use ironclaw_turn_runner::sandboxed_planned_driver::LoopWorkerKind;
 
 /// Connect the existing local Docker transport and return the complete runtime
 /// process binding. Profile boot fails if the daemon is unavailable; no caller
 /// receives an unsandboxed fallback or a provider assembly handle.
+///
+/// `loop_worker` is `None` to keep the canonical loop on the host (the #7908
+/// default), `Some(LoopWorkerKind::Rust)` for the content-blind Rust worker,
+/// or `Some(LoopWorkerKind::Pi)` for the content-resolved Pi worker.
 pub async fn build_local_docker_user_sandbox_binding(
     workspace_root: PathBuf,
     legacy_workspace_root: Option<PathBuf>,
-    enable_loop_worker: bool,
+    loop_worker: Option<LoopWorkerKind>,
 ) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
     let mut config = RebornSandboxConfig::new(workspace_root);
     if let Some(legacy_workspace_root) = legacy_workspace_root {
@@ -40,15 +45,12 @@ pub async fn build_local_docker_user_sandbox_binding(
                 ),
             })?,
     );
-    Ok(assemble_local_user_sandbox_binding(
-        transport,
-        enable_loop_worker,
-    ))
+    Ok(assemble_local_user_sandbox_binding(transport, loop_worker))
 }
 
 fn assemble_local_user_sandbox_binding<T>(
     transport: Arc<T>,
-    enable_loop_worker: bool,
+    loop_worker: Option<LoopWorkerKind>,
 ) -> RebornRuntimeProcessBinding
 where
     T: ironclaw_host_api::process::SandboxCommandTransport
@@ -58,15 +60,18 @@ where
     let command_transport: Arc<dyn ironclaw_host_api::process::SandboxCommandTransport> =
         transport.clone();
     let process_port = Arc::new(UserSandboxProcessPort::new(command_transport));
-    if enable_loop_worker {
-        let loop_worker_transport: Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport> =
-            transport;
-        RebornRuntimeProcessBinding::user_sandbox_with_loop_worker(
-            process_port,
-            loop_worker_transport,
-        )
-    } else {
-        RebornRuntimeProcessBinding::user_sandbox(process_port)
+    match loop_worker {
+        Some(kind) => {
+            let loop_worker_transport: Arc<
+                dyn ironclaw_host_api::process::SandboxLoopWorkerTransport,
+            > = transport;
+            RebornRuntimeProcessBinding::user_sandbox_with_loop_worker_kind(
+                process_port,
+                loop_worker_transport,
+                kind,
+            )
+        }
+        None => RebornRuntimeProcessBinding::user_sandbox(process_port),
     }
 }
 
@@ -148,10 +153,23 @@ mod tests {
     }
 
     #[test]
-    fn loop_worker_switch_controls_the_resulting_process_binding() {
-        for (enabled, expected) in [(false, false), (true, true)] {
-            let binding = assemble_local_user_sandbox_binding(Arc::new(UnusedTransport), enabled);
-            assert_eq!(binding.loop_worker_transport().is_some(), expected);
-        }
+    fn loop_worker_kind_controls_the_resulting_process_binding() {
+        let disabled = assemble_local_user_sandbox_binding(Arc::new(UnusedTransport), None);
+        assert!(disabled.loop_worker_transport().is_none());
+        assert_eq!(disabled.loop_worker_kind(), None);
+
+        let rust = assemble_local_user_sandbox_binding(
+            Arc::new(UnusedTransport),
+            Some(LoopWorkerKind::Rust),
+        );
+        assert!(rust.loop_worker_transport().is_some());
+        assert_eq!(rust.loop_worker_kind(), Some(LoopWorkerKind::Rust));
+
+        let pi = assemble_local_user_sandbox_binding(
+            Arc::new(UnusedTransport),
+            Some(LoopWorkerKind::Pi),
+        );
+        assert!(pi.loop_worker_transport().is_some());
+        assert_eq!(pi.loop_worker_kind(), Some(LoopWorkerKind::Pi));
     }
 }

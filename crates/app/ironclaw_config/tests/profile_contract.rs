@@ -161,8 +161,11 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
 }
 
 #[test]
-fn profile_default_is_standalone_for_explicit_binary_invocations() {
-    assert_eq!(RebornProfile::default(), RebornProfile::Standalone);
+fn profile_default_is_docker_sandboxed_volume_for_unchanged_startup() {
+    assert_eq!(
+        RebornProfile::default(),
+        RebornProfile::HostedSingleTenantVolumeSandboxed
+    );
 }
 
 #[test]
@@ -198,14 +201,17 @@ fn boot_config_resolves_home_and_profile_from_env_parts() {
 }
 
 #[test]
-fn boot_config_defaults_profile_to_standalone() {
+fn boot_config_defaults_profile_to_docker_sandboxed_volume() {
     let temp = tempfile::tempdir().expect("tempdir");
 
     let config =
         RebornBootConfig::resolve_from_env_parts(None, Some(temp.path().into()), None, None)
             .expect("boot config should resolve");
 
-    assert_eq!(config.profile(), RebornProfile::Standalone);
+    assert_eq!(
+        config.profile(),
+        RebornProfile::HostedSingleTenantVolumeSandboxed
+    );
 }
 
 #[test]
