@@ -3502,10 +3502,14 @@ async fn memory_write_treats_null_target_as_omitted() {
     );
 }
 
+/// Reading a path that holds no document reports a domain failure. It used to
+/// report `InputEncode`, which told the model its arguments were malformed
+/// when they were correct, so the model would re-encode a request that could
+/// never succeed instead of concluding the document is absent.
 #[tokio::test]
-async fn memory_read_returns_input_error_for_missing_document() {
+async fn memory_read_returns_operation_failure_for_missing_document() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
-    let failure = invoke_with_context(
+    let failure = invoke_failure_with_context(
         &runtime,
         MEMORY_READ_CAPABILITY_ID,
         json!({"path": "projects/alpha/missing.md"}),
@@ -3514,9 +3518,17 @@ async fn memory_read_returns_input_error_for_missing_document() {
             memory_mounts(MountPermissions::read_write_list_delete()),
         ),
     )
-    .await
-    .unwrap_err();
-    assert_eq!(failure, FailureKind::InputEncode);
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    // The sentence matters as much as the kind here. Asserting the kind alone
+    // would still pass if the mapper dropped the message, which would put every
+    // domain failure back behind one opaque sentinel and undo the point of the
+    // change: absence has to be distinguishable from a broken backend.
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("no memory document at that path"),
+        "the mapper must carry the service's sentence, not a generic sentinel"
+    );
 }
 
 #[tokio::test]
@@ -3748,7 +3760,9 @@ async fn memory_write_rejects_protected_prompt_write_through_runtime() {
     );
 
     // The protected document must not exist — the rejected write must not
-    // persist, so the subsequent read returns the missing-document input error.
+    // persist, so the subsequent read reports the document as absent. That read
+    // used to have to assert `InputEncode` to mean "not there", because the
+    // memory service had no way to say a document is missing.
     let read_failure = invoke_with_context(
         &runtime,
         MEMORY_READ_CAPABILITY_ID,
@@ -3759,7 +3773,7 @@ async fn memory_write_rejects_protected_prompt_write_through_runtime() {
     .unwrap_err();
     assert_eq!(
         read_failure,
-        FailureKind::InputEncode,
+        FailureKind::OperationFailed,
         "rejected protected-prompt write must not persist the document"
     );
 }

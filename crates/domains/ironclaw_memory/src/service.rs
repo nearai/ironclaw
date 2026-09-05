@@ -438,6 +438,21 @@ impl MemoryServiceError {
             source: None,
         }
     }
+    /// No document exists at the requested path.
+    ///
+    /// A domain failure, not a malformed request: the caller asked a
+    /// well-formed question and the answer is that the document is not there.
+    /// Classifying it as `Input` tells the model to re-encode a request that
+    /// was already correct, which is the one thing it must not do here, since
+    /// probing for a document that does not exist yet is how setup-marker
+    /// skills decide whether to run.
+    pub fn not_found() -> Self {
+        Self {
+            kind: MemoryServiceErrorKind::Operation,
+            message: "no memory document at that path",
+            source: None,
+        }
+    }
 
     pub fn unavailable() -> Self {
         Self {
@@ -477,6 +492,12 @@ impl MemoryServiceError {
 
     pub fn kind(&self) -> MemoryServiceErrorKind {
         self.kind
+    }
+
+    /// The sanitized, model-safe description of the failure. Never carries the
+    /// backend cause: that lives on `source`, which stays host-side.
+    pub fn message(&self) -> &'static str {
+        self.message
     }
 }
 
