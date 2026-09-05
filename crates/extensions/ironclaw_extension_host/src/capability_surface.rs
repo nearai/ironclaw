@@ -220,9 +220,18 @@ pub fn extension_network_policy(capability: &ActiveExtensionCapability) -> Netwo
     // declares the `network` effect but no targets is still caught by the
     // effect-based obligation gate and fails as misconfigured.)
     let has_egress_targets = !targets.is_empty();
+    // A capability whose every target is a literal loopback IP is exempt from
+    // the private-range denial — the same on-device boundary the hosted-MCP
+    // egress plan holds. Keeping the deny here would allowlist the loopback
+    // host and then refuse it anyway. `localhost` and non-loopback literals
+    // are not loopback patterns, so they keep the guard.
+    let all_targets_loopback = has_egress_targets
+        && targets.iter().all(|target| {
+            crate::hosted_mcp_admission::is_loopback_host_pattern(&target.host_pattern)
+        });
     NetworkPolicy {
         allowed_targets: targets,
-        deny_private_ip_ranges: has_egress_targets,
+        deny_private_ip_ranges: has_egress_targets && !all_targets_loopback,
         max_egress_bytes: capability.max_egress_bytes.filter(|_| has_egress_targets),
     }
 }
@@ -446,6 +455,54 @@ mod tests {
             "a tool with declared egress keeps the private-IP SSRF guard"
         );
         assert_eq!(policy.max_egress_bytes, None);
+    }
+
+    #[test]
+    fn loopback_only_targets_waive_the_private_range_denial() {
+        // A hosted MCP on a literal loopback IP: allowlisting the host and then
+        // denying private ranges would refuse the very target we just allowed.
+        // Same on-device boundary the hosted-MCP egress plan holds.
+        let loopback = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(5443),
+        };
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("mcp-pantry.search_pantry").unwrap(),
+            provider: ExtensionId::new("mcp-pantry").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: vec![loopback.clone()],
+            max_egress_bytes: None,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy.allowed_targets, vec![loopback.clone()]);
+        assert!(
+            !policy.deny_private_ip_ranges,
+            "a loopback-only allowlist waives the private-range guard"
+        );
+        assert!(
+            !policy.allowed_targets.is_empty(),
+            "the policy stays constrained by its allowlist, so the obligation is still emitted"
+        );
+
+        // One non-loopback target anywhere in the set re-arms the guard, and a
+        // DNS name that merely resolves to loopback never qualifies.
+        for other in [https("news.ycombinator.com"), https("localhost")] {
+            let mixed = ActiveExtensionCapability {
+                network_targets: vec![loopback.clone(), other.clone()],
+                ..capability.clone()
+            };
+            assert!(
+                extension_network_policy(&mixed).deny_private_ip_ranges,
+                "a non-loopback target ({}) must keep the SSRF guard",
+                other.host_pattern
+            );
+        }
     }
 
     #[test]
