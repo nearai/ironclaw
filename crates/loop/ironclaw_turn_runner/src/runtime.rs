@@ -735,12 +735,12 @@ where
             ),
         )
     })?;
+    let sandbox_loop_worker_kind = parts.sandbox_loop_worker_kind.unwrap_or_default();
     if let Some(transport) = parts.sandbox_loop_worker_transport.clone() {
-        let kind = parts.sandbox_loop_worker_kind.unwrap_or_default();
         register_sandboxed_default_planned_driver(
             &mut registry,
             transport,
-            kind,
+            sandbox_loop_worker_kind,
             parts.config.planned_default_iteration_limit,
             parts.config.planned_model_availability_retry_attempts,
         )?;
@@ -759,7 +759,7 @@ where
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
     let run_profile_resolver: Arc<dyn RunProfileResolver> =
         if parts.sandbox_loop_worker_transport.is_some()
-            && parts.sandbox_loop_worker_kind == Some(LoopWorkerKind::Pi)
+            && sandbox_loop_worker_kind == LoopWorkerKind::Pi
         {
             Arc::new(crate::sandboxed_planned_driver::PiRunProfileResolver {
                 inner: run_profile_resolver,

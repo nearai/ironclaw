@@ -175,11 +175,14 @@ api_version = "{api_version}"
 
 [boot]
 # Composition profile. One of: local-dev, local-dev-yolo, hosted-single-tenant,
-# hosted-single-tenant-volume, production, migration-dry-run.
-# Today local-dev, local-dev-yolo, hosted-single-tenant, and
-# hosted-single-tenant-volume are wired end-to-end.
+# hosted-single-tenant-volume, hosted-single-tenant-volume-sandboxed,
+# hosted-single-tenant-volume-sandboxed-railway, production, migration-dry-run.
+# Compiled default (also what an unset IRONCLAW_REBORN_PROFILE selects):
+# hosted-single-tenant-volume-sandboxed — boots the local runtime with the
+# shell/process lane in a per-user Docker sandbox and fails closed when no
+# Docker daemon is reachable; there is no silent in-process fallback.
 # local-dev-yolo also requires --confirm-host-access at runtime.
-profile = "local-dev"
+profile = "hosted-single-tenant-volume-sandboxed"
 
 [identity]
 # Owner-user scope this runtime acts under by default. This field is wired today.
@@ -340,6 +343,17 @@ mod tests {
                 .and_then(|runner| runner.heartbeat_interval_secs),
             Some(15),
             "new configs must ship the conservative 15-second runner heartbeat"
+        );
+        // The generated stub must pin the same compiled default the runtime
+        // selects when IRONCLAW_REBORN_PROFILE is unset, so an unchanged
+        // startup after `config init` boots the Docker sandbox profile.
+        assert_eq!(
+            config_file
+                .boot
+                .as_ref()
+                .and_then(|boot| boot.profile.as_deref()),
+            Some("hosted-single-tenant-volume-sandboxed"),
+            "generated config.toml must select the Docker sandbox default: {config_text}"
         );
 
         // A pre-existing LLM env var in the ambient test environment would make

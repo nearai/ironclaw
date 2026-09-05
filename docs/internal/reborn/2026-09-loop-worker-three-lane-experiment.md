@@ -7,11 +7,11 @@ over ACP, #7648).
 
 ## Lanes
 
-| Lane | Loop implementation | Placement | Wire |
-| --- | --- | --- | --- |
-| A | Canonical Rust loop (`ironclaw_agent_loop`) | In-process host | none (same process) |
-| B | Rust worker (`ironclaw-loop-worker`) | Sandbox container | v2 stdio, content-`Blind` |
-| C | Pi worker (`ironclaw-pi-worker`, `@earendil-works/pi-agent-core`) | Sandbox container | v2 stdio, content-`Resolved` |
+| Lane | Loop implementation                                               | Placement         | Wire                         |
+| ---- | ----------------------------------------------------------------- | ----------------- | ---------------------------- |
+| A    | Canonical Rust loop (`ironclaw_agent_loop`)                       | In-process host   | none (same process)          |
+| B    | Rust worker (`ironclaw-loop-worker`)                              | Sandbox container | v2 stdio, content-`Blind`    |
+| C    | Pi worker (`ironclaw-pi-worker`, `@earendil-works/pi-agent-core`) | Sandbox container | v2 stdio, content-`Resolved` |
 
 B versus A tests sandbox placement with the same Rust loop. C versus B
 compares the complete loop variants, including prompt construction,
@@ -22,7 +22,7 @@ A fourth comparator exists from #7648: Claude Code over ACP
 (`Dockerfile.claude-code-acp`, harness executor, per-profile routing). It is
 not part of this batch's wire surface but is recorded here because the
 experiment should read all three families together: A/B/C differ only in loop
-implementation; the ACP lane differs in *who owns the whole loop*.
+implementation; the ACP lane differs in _who owns the whole loop_.
 
 ## Task set
 
@@ -82,20 +82,25 @@ comparisons stay inconclusive.
 
 ## How to run each lane
 
-Prerequisites for every lane: built sandbox image
-(`docker build -f Dockerfile.sandbox-worker .`), a configured model backend,
-`IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=true`.
+Prerequisites for every sandboxed lane: built sandbox image
+(`docker build -f Dockerfile.sandbox-worker .`, contains both loop-worker
+binaries) and a configured model backend. The sandbox loop worker is enabled
+by default under the default `hosted-single-tenant-volume-sandboxed` boot
+profile, so the defaults now select lane C; lanes A and B must be selected
+explicitly.
 
-- **Lane A** (canonical in-process loop): unset
-  `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER`.
-- **Lane B** (Rust worker in sandbox):
-  `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=true` (worker kind defaults to
-  `rust`), or explicitly
-  `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust`.
-- **Lane C** (Pi worker in sandbox):
-  `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=true` plus
-  `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=pi` (accepted values `rust`|`pi`,
-  case-insensitive; invalid values fail startup).
+- **Lane A** (canonical in-process loop): explicitly disable the sandbox
+  loop worker with `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=false`. Keep the
+  sandboxed boot profile so `builtin.shell` stays in the sandbox; only the
+  loop placement changes. The `local-dev` profile also runs the loop
+  in-process, but changes tool placement and is not the controlled lane A.
+- **Lane B** (Rust worker in sandbox): keep the sandbox loop worker enabled
+  (default) and explicitly set `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust`
+  (the worker kind defaults to `pi`).
+- **Lane C** (Pi worker in sandbox): the default on a fresh, unset
+  configuration — no overrides needed. `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=pi`
+  makes the choice explicit (accepted values `rust`|`pi`, case-insensitive;
+  invalid values fail startup).
 - **ACP comparator**: `[harness]` configuration + per-profile routing from
   #7648 (see `2026-08-harness-v0-findings.md` for the exact pins).
 

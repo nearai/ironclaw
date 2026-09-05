@@ -248,7 +248,7 @@ fn sandbox_shell_turn_runs_the_pi_loop_worker_in_a_real_container() {
             InvocationId::new()
         ))
         .with_sandbox_shell_tools()
-        .with_sandbox_loop_worker_kind(ironclaw_composition::LoopWorkerKind::Pi)
+        .with_sandbox_loop_worker_kind(Default::default())
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.shell",

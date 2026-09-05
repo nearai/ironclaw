@@ -293,7 +293,7 @@ if [ -z "$effective_profile" ]; then
   effective_profile="$(sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_path" | sed -n '1p')"
 fi
 if [ -z "$effective_profile" ]; then
-  effective_profile="local-dev"
+  effective_profile="hosted-single-tenant-volume-sandboxed"
 fi
 
 case "$effective_profile" in

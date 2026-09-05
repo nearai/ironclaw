@@ -900,7 +900,7 @@ fn sandbox_loop_worker_enabled() -> anyhow::Result<bool> {
             "0" | "false" => Ok(false),
             _ => anyhow::bail!("{SANDBOX_LOOP_WORKER_ENV} must be one of 1, true, 0, false"),
         },
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(true),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("{SANDBOX_LOOP_WORKER_ENV} must contain valid UTF-8")
         }
@@ -908,7 +908,7 @@ fn sandbox_loop_worker_enabled() -> anyhow::Result<bool> {
 }
 
 /// Which loop-worker binary the sandboxed driver launches. Unset selects the
-/// #7908 Rust worker; `rust`/`pi` (case-insensitive) select the kind; any
+/// Pi worker; `rust`/`pi` (case-insensitive) select the kind; any
 /// other value fails startup like [`sandbox_loop_worker_enabled`]. The kind
 /// only takes effect when `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER` is enabled.
 fn sandbox_loop_worker_kind() -> anyhow::Result<ironclaw_composition::LoopWorkerKind> {
@@ -2182,7 +2182,7 @@ mod tests {
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2205,7 +2205,7 @@ mod tests {
                 Some(reborn_home.into_os_string()),
                 None,
                 None,
-                None,
+                Some("local-dev".into()),
             )
             .expect("boot config");
 
@@ -2229,7 +2229,7 @@ mod tests {
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2250,7 +2250,7 @@ mod tests {
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2282,7 +2282,7 @@ mod tests {
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2314,7 +2314,7 @@ mod tests {
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2368,7 +2368,7 @@ api_key_env = "NEARAI_API_KEY"
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2624,7 +2624,7 @@ default_owner = "custom-owner"
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -2657,7 +2657,7 @@ regex_activation_enabled = false
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -3041,10 +3041,10 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn sandbox_loop_worker_is_default_off_and_explicitly_enabled() {
+    fn sandbox_loop_worker_is_default_on_and_can_be_disabled() {
         let _lock = lock_runtime_env();
         let unset = EnvGuard::clear(SANDBOX_LOOP_WORKER_ENV);
-        assert!(!sandbox_loop_worker_enabled().expect("unset defaults off"));
+        assert!(sandbox_loop_worker_enabled().expect("unset enables the sandbox loop"));
         drop(unset);
 
         for value in ["1", "true", "TRUE"] {
@@ -3060,14 +3060,14 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn sandbox_loop_worker_kind_defaults_to_rust_and_accepts_rust_pi() {
+    fn sandbox_loop_worker_kind_defaults_to_pi_and_accepts_rust_pi() {
         use ironclaw_composition::LoopWorkerKind;
 
         let _lock = lock_runtime_env();
         let unset = EnvGuard::clear(SANDBOX_LOOP_WORKER_KIND_ENV);
         assert_eq!(
-            sandbox_loop_worker_kind().expect("unset defaults to Rust"),
-            LoopWorkerKind::Rust
+            sandbox_loop_worker_kind().expect("unset defaults to Pi"),
+            LoopWorkerKind::Pi
         );
         drop(unset);
 
@@ -3979,7 +3979,7 @@ default_project = "project-alpha"
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4015,7 +4015,7 @@ enabled = true
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4054,7 +4054,7 @@ enabled = true
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
         let runtime_input =
@@ -4103,7 +4103,7 @@ default_project = "project-alpha"
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4124,7 +4124,7 @@ default_project = "project-alpha"
             Some(reborn_home.clone().into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4155,7 +4155,7 @@ default_project = "project-alpha"
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4191,7 +4191,7 @@ default_project = "project-alpha"
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4228,7 +4228,7 @@ poll_interval_secs = 42
             Some(reborn_home.into_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4261,7 +4261,7 @@ poll_interval_secs = 42
             Some(reborn_home.to_string_lossy().to_string().into()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4297,7 +4297,7 @@ poll_interval_secs = 15
             Some(reborn_home.to_string_lossy().to_string().into()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4327,7 +4327,7 @@ poll_interval_secs = 15
             Some(reborn_home.to_string_lossy().to_string().into()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4791,7 +4791,7 @@ poll_interval_secs = 15
             Some(temp.path().as_os_str().to_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 
@@ -4842,7 +4842,7 @@ poll_interval_secs = 15
             Some(reborn_home.as_os_str().to_os_string()),
             None,
             None,
-            None,
+            Some("local-dev".into()),
         )
         .expect("boot config");
 

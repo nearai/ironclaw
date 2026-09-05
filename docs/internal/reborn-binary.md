@@ -88,10 +88,10 @@ Known limitations of this 1.0 release:
   local-runtime substrate profile (`local-dev`, `local-dev-yolo`,
   `hosted-single-tenant`, `hosted-single-tenant-volume`); `production` and
   `migration-dry-run` fail with `extension lifecycle is available only for
-  local-dev Reborn services`. In a default source build (no `postgres`
+local-dev Reborn services`. In a default source build (no `postgres`
   feature), `hosted-single-tenant`, `production`, and `migration-dry-run`
-  bail even earlier with `` requires a binary built with the `postgres`
-  feature ``, so only `local-dev`, `local-dev-yolo`, and
+  bail even earlier with ``requires a binary built with the `postgres`
+feature``, so only `local-dev`, `local-dev-yolo`, and
   `hosted-single-tenant-volume` work out of the box from source.
 
 The WebChat v2 web UI **is** supported through `serve`. It is an early beta
@@ -161,12 +161,12 @@ API-key providers it records that provider's credential env-var name in
 `config.toml` for you; for keyless providers (e.g. `ollama`) it writes no
 `api_key_env`. The common single-API-key providers:
 
-| Provider | `set-provider` id | Key env var | Default model |
-| --- | --- | --- | --- |
-| NEAR AI | `nearai` | `NEARAI_API_KEY` | `deepseek-ai/DeepSeek-V4-Flash` |
-| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-5-mini` |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
-| Ollama (local) | `ollama` | _(none — runs locally)_ | `llama3` |
+| Provider       | `set-provider` id | Key env var             | Default model                   |
+| -------------- | ----------------- | ----------------------- | ------------------------------- |
+| NEAR AI        | `nearai`          | `NEARAI_API_KEY`        | `deepseek-ai/DeepSeek-V4-Flash` |
+| OpenAI         | `openai`          | `OPENAI_API_KEY`        | `gpt-5-mini`                    |
+| Anthropic      | `anthropic`       | `ANTHROPIC_API_KEY`     | `claude-sonnet-4-20250514`      |
+| Ollama (local) | `ollama`          | _(none — runs locally)_ | `llama3`                        |
 
 So to use Anthropic instead of the quick-start example, swap step 2 for:
 
@@ -197,11 +197,11 @@ key before launching `serve`.
 These are validation failures that abort `serve` before it binds; each prints a
 single-line `Error:` and exits.
 
-| Error message contains | Cause | Fix |
-| --- | --- | --- |
-| `must be set to the WebChat v2 bearer token` | `IRONCLAW_REBORN_WEBUI_TOKEN` unset | Export the token env var (step 3). |
+| Error message contains                                           | Cause                                                        | Fix                                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `must be set to the WebChat v2 bearer token`                     | `IRONCLAW_REBORN_WEBUI_TOKEN` unset                          | Export the token env var (step 3).                                                                       |
 | `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
-| `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
+| `workspace root must not overlap default skill root /skills`     | Reborn home is **inside** the current working directory      | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd.                                            |
 
 The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
 **current working directory** as the local-dev workspace root, and boot is
@@ -484,7 +484,7 @@ cargo run -q -p ironclaw --bin ironclaw -- models set-provider nearai --model de
 
 The secret value still lives in the environment under the catalog's
 `api_key_env` (e.g. `OPENAI_API_KEY`, `NEARAI_API_KEY`); `set-provider` only
-records the variable *name*, never the value. Once `[llm.default]` exists it
+records the variable _name_, never the value. Once `[llm.default]` exists it
 selects the provider; `LLM_BACKEND` is only an env fallback when no default slot
 is configured.
 
@@ -503,7 +503,9 @@ cargo run -q -p ironclaw --bin ironclaw -- profile list --json
 
 Supported profiles:
 
-- `local-dev` (default)
+- `hosted-single-tenant-volume-sandboxed` (default; preview — needs a local
+  Docker daemon and a sandbox image built from `Dockerfile.sandbox-worker`)
+- `local-dev`
 - `local-dev-yolo`
 - `hosted-single-tenant`
 - `hosted-single-tenant-volume`
@@ -531,7 +533,10 @@ cargo run -q -p ironclaw --bin ironclaw -- run --dry-run
 
 When `$IRONCLAW_REBORN_HOME/config.toml` is missing, the first stateful
 runtime start through `run`, `repl`, or `serve` seeds a sparse
-`config.toml` containing `api_version` and the safe `local-dev` boot profile.
+`config.toml` containing `api_version` and the default
+`hosted-single-tenant-volume-sandboxed` boot profile. An existing config file
+keeps the profile it names: an explicit `[boot].profile` (for example the
+older default `local-dev`) is never silently rewritten by an upgrade.
 It intentionally does not seed `[llm.default]`, so env-only model selection
 continues to work. `run --dry-run`, diagnostics, and read-only commands remain
 side-effect-free. One-off environment selections such as
@@ -653,14 +658,30 @@ Use `IRONCLAW_REBORN_PROFILE` to select the boot profile.
 
 Supported values:
 
-- `local-dev` (default)
-- `local-dev-yolo`
-- `hosted-single-tenant`
-- `hosted-single-tenant-volume`
-- `hosted-single-tenant-volume-sandboxed` (preview; local Docker)
+- `hosted-single-tenant-volume-sandboxed` (default; preview — needs a local
+  Docker daemon and a sandbox image built from `Dockerfile.sandbox-worker`)
 - `hosted-single-tenant-volume-sandboxed-railway` (preview; Railway Sandboxes)
 - `production`
 - `migration-dry-run`
+
+On the default profile the agent loop runs as a worker inside the persistent
+per-user sandbox (the sandbox loop worker is on by default) and the worker is
+the Pi worker (`ironclaw-pi-worker`), launched content-resolved: it may
+resolve its own run's transcript text through the host. This is a deliberate
+trust choice — secrets, authorization, other tenants, and stores stay
+host-side, and the worker only ever sees the user's own thread inside the
+user's own container. Overrides:
+
+- `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=false` keeps the canonical loop
+  in-process; `builtin.shell` still runs in the user sandbox with sandboxed
+  tools either way.
+- `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust` selects the content-blind
+  Rust worker (`ironclaw-loop-worker`) in the same sandbox; `pi` (default,
+  case-insensitive) selects the Pi worker; any other value fails startup.
+- An explicit `local-dev` profile keeps the in-process loop.
+- Rust and Pi checkpoint payloads are not interchangeable (Pi runs use the
+  `pi_worker_session` checkpoint schema); do not switch worker kind while
+  runs are paused.
 
 Example:
 

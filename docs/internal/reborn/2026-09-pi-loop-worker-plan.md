@@ -15,8 +15,13 @@ Two things #7908 does not have and this PR adds:
 
 1. **Worker selection by kind.** The sandboxed driver launches
    `ironclaw-loop-worker` (Rust) or `ironclaw-pi-worker` (Pi) per deployment
-   setting. Default stays Rust; the whole feature stays behind
-   `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=true`.
+   setting. This PR also flips the defaults: the boot profile defaults to
+   `hosted-single-tenant-volume-sandboxed` (Docker sandbox), the sandbox loop
+   worker is enabled by default under it, and the worker kind defaults to
+   `Pi`. Explicit overrides keep working: `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=false`
+   runs the loop in-process, `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust`
+   selects the #7908 content-blind Rust worker, and an explicit `local-dev`
+   profile keeps the in-process loop.
 2. **A profile-gated content-visible wire mode.** #7908's worker is
    content-blind: `LoopModelRequest.messages` are `LoopMessageRef`s, context
    bundles carry `safe_summary` only, and capability results return by ref. Pi
@@ -30,15 +35,15 @@ Two things #7908 does not have and this PR adds:
 
 ## Trust boundary delta (record for reviewers)
 
-| Invariant | #7908 | This PR |
-|---|---|---|
-| Worker holds credentials, DB, authorizer, Docker | No | No |
-| Model call crosses the host (`StreamModel`) | Yes | Yes, unchanged |
-| Every capability call crosses host authorization | Yes | Yes, unchanged |
-| Worker sees transcript text | No | Only when bootstrapped `Resolved`; only refs the host already issued to this run; denied otherwise with `PolicyDenied` |
-| Worker can author prompt text | Via `BuildPrompt.inline_messages` (already) | Same mechanism; no new write path |
-| Host validates `LoopExit` | Yes | Yes |
-| Wire is private, same-build | Yes | Frame types are `pub`, documented, `wire_version` 2; still not a public API |
+| Invariant                                        | #7908                                       | This PR                                                                                                                |
+| ------------------------------------------------ | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Worker holds credentials, DB, authorizer, Docker | No                                          | No                                                                                                                     |
+| Model call crosses the host (`StreamModel`)      | Yes                                         | Yes, unchanged                                                                                                         |
+| Every capability call crosses host authorization | Yes                                         | Yes, unchanged                                                                                                         |
+| Worker sees transcript text                      | No                                          | Only when bootstrapped `Resolved`; only refs the host already issued to this run; denied otherwise with `PolicyDenied` |
+| Worker can author prompt text                    | Via `BuildPrompt.inline_messages` (already) | Same mechanism; no new write path                                                                                      |
+| Host validates `LoopExit`                        | Yes                                         | Yes                                                                                                                    |
+| Wire is private, same-build                      | Yes                                         | Frame types are `pub`, documented, `wire_version` 2; still not a public API                                            |
 
 ## Wire changes (v2)
 
@@ -96,12 +101,12 @@ quality result is claimed without running the three-lane experiment.
 
 ## Work packages (one PR, parallel agents)
 
-| Package | Owner | Files |
-|---|---|---|
-| A. Wire v2 + content port | Rust contracts/loop_host | `crates/contracts/ironclaw_loop_contracts/src/host/model.rs` (port), `crates/loop/ironclaw_loop_host/src/remote_host/{protocol,server,client,tests}.rs`, `crates/loop/ironclaw_loop_host/src/lib.rs` (impl on `ThreadBackedLoopModelPort`), `docs/internal/reborn/contracts/loop-worker-wire.md` |
-| B. Worker kind selection | turn_runner/composition/cli | `crates/loop/ironclaw_turn_runner/src/sandboxed_planned_driver.rs`, `runtime.rs`, `crates/app/ironclaw_composition/src/{input,sandbox,runtime}.rs`, `crates/app/ironclaw_cli/src/runtime/mod.rs`, `.env.example`, READMEs |
-| C. Pi worker | TypeScript, Bun | `docker/sandbox/pi-worker/**`, `Dockerfile.sandbox-worker` |
-| D. Conformance + experiment | tests/docs | `crates/loop/ironclaw_turn_runner/tests/loop_worker_conformance.rs`, `tests/integration/reborn_sandbox_shell_turn.rs` (Pi lane), `docs/internal/reborn/2026-09-loop-worker-three-lane-experiment.md` |
+| Package                     | Owner                       | Files                                                                                                                                                                                                                                                                                            |
+| --------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A. Wire v2 + content port   | Rust contracts/loop_host    | `crates/contracts/ironclaw_loop_contracts/src/host/model.rs` (port), `crates/loop/ironclaw_loop_host/src/remote_host/{protocol,server,client,tests}.rs`, `crates/loop/ironclaw_loop_host/src/lib.rs` (impl on `ThreadBackedLoopModelPort`), `docs/internal/reborn/contracts/loop-worker-wire.md` |
+| B. Worker kind selection    | turn_runner/composition/cli | `crates/loop/ironclaw_turn_runner/src/sandboxed_planned_driver.rs`, `runtime.rs`, `crates/app/ironclaw_composition/src/{input,sandbox,runtime}.rs`, `crates/app/ironclaw_cli/src/runtime/mod.rs`, `.env.example`, READMEs                                                                        |
+| C. Pi worker                | TypeScript, Bun             | `docker/sandbox/pi-worker/**`, `Dockerfile.sandbox-worker`                                                                                                                                                                                                                                       |
+| D. Conformance + experiment | tests/docs                  | `crates/loop/ironclaw_turn_runner/tests/loop_worker_conformance.rs`, `tests/integration/reborn_sandbox_shell_turn.rs` (Pi lane), `docs/internal/reborn/2026-09-loop-worker-three-lane-experiment.md`                                                                                             |
 
 ## Acceptance
 
@@ -112,7 +117,9 @@ quality result is claimed without running the three-lane experiment.
    `/usr/local/bin/ironclaw-loop-worker` with `Blind`; `LoopWorkerKind::Pi`
    launches `/usr/local/bin/ironclaw-pi-worker` with `Resolved`.
 3. `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND` accepts `rust|pi`, defaults
-   `rust`, invalid fails startup (same shape as the existing switch).
+   `pi`, invalid fails startup (same shape as the existing switch). Unset
+   `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER` defaults the sandbox loop worker on
+   under the sandboxed default profile.
 4. Conformance harness drives both worker binaries through a scripted host over
    local stdio (no Docker): bootstrap, one model call, one capability call,
    one checkpoint, cancel, outcome ack. Pi lane skips when `bun` is absent.
@@ -125,9 +132,13 @@ quality result is claimed without running the three-lane experiment.
 
 ## Rollback
 
-Unset `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND` (or set `rust`) to return to
-the #7908 behavior. Unset `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER` to return to
-the in-process driver. Pi runs use the `pi_worker_session` checkpoint schema.
+Set `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER_KIND=rust` to return to the #7908
+worker behavior; set `IRONCLAW_REBORN_SANDBOX_LOOP_WORKER=false` (or boot the
+explicit `local-dev` profile) to return to the in-process driver, where
+`builtin.shell` still runs in the sandbox with sandboxed tools. An existing
+`config.toml` that names its profile explicitly (for example the previous
+default `local-dev`) is never silently rewritten. Pi runs use the
+`pi_worker_session` checkpoint schema.
 Do not switch worker kind while runs are paused: Rust and Pi checkpoint
 payloads are not interchangeable. There is no new database migration.
 The workspace path migration and pinned iron-proxy HTTP/HTTPS limitation

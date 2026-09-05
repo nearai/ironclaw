@@ -150,7 +150,7 @@ mod tests {
             "seeded config should stamp api_version: {text}"
         );
         assert!(
-            text.contains("profile = \"local-dev\""),
+            text.contains("profile = \"hosted-single-tenant-volume-sandboxed\""),
             "seeded config should record profile: {text}"
         );
         assert!(

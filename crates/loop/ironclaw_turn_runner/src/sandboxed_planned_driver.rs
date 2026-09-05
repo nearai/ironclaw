@@ -63,13 +63,13 @@ impl ironclaw_loop_contracts::RunProfileResolver for PiRunProfileResolver {
 }
 
 /// Which loop-worker binary the sandboxed driver launches, and how much of
-/// the run's own transcript the worker may see. Default stays the #7908 Rust
-/// worker (content-blind); the Pi worker is launched content-resolved. See
+/// the run's own transcript the worker may see. Pi is the default and runs
+/// content-resolved; the explicit Rust worker remains content-blind. See
 /// `docs/internal/reborn/2026-09-pi-loop-worker-plan.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoopWorkerKind {
-    #[default]
     Rust,
+    #[default]
     Pi,
 }
 
@@ -448,7 +448,10 @@ mod tests {
 
     #[test]
     fn worker_kind_selects_executable_and_visibility() {
-        assert_eq!(LoopWorkerKind::default(), LoopWorkerKind::Rust);
+        assert_eq!(
+            LoopWorkerKind::default().executable(),
+            PI_LOOP_WORKER_EXECUTABLE
+        );
         assert_eq!(
             LoopWorkerKind::Rust.executable(),
             "/usr/local/bin/ironclaw-loop-worker"

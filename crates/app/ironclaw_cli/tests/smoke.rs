@@ -13,15 +13,23 @@ fn reborn_bin() -> &'static str {
 }
 
 /// Shared builder for every real-binary spawn in this file: `Command::new(reborn_bin())`
-/// with `env_clear()` and `IRONCLAW_DISABLE_OS_KEYCHAIN=1` already applied — the
-/// suppression a spawned real binary needs the same way `cfg!(test)` suppresses
-/// keychain access for in-process unit tests (see
-/// `ironclaw_secrets::keychain::os_keychain_suppressed`). Callers chain further
-/// `.env(...)`/`.arg(...)` calls on top; this only centralizes the two lines every
-/// site needs regardless of what else it sets up.
+/// with `env_clear()`, `IRONCLAW_DISABLE_OS_KEYCHAIN=1`, and an explicit
+/// standalone profile applied — the suppression and profile a spawned real
+/// binary needs the same way `cfg!(test)` suppresses keychain access for
+/// in-process unit tests (see `ironclaw_secrets::keychain::os_keychain_suppressed`).
+/// The profile pin keeps every non-Docker smoke scenario off the compiled
+/// default (`hosted-single-tenant-volume-sandboxed`), which requires a reachable
+/// Docker daemon and fails closed without one. Tests that exercise the
+/// compiled-default startup chain `.env_remove("IRONCLAW_REBORN_PROFILE")` to
+/// drop this pin deliberately. Callers chain further `.env(...)`/`.arg(...)`
+/// calls on top; this only centralizes the lines every site needs regardless
+/// of what else it sets up.
 fn reborn_command() -> Command {
     let mut command = Command::new(reborn_bin());
-    command.env_clear().env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    command
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev");
     command
 }
 
@@ -669,7 +677,7 @@ fn run_reborn_webui_builds_frontend_before_cargo() {
 }
 
 #[test]
-fn docker_reborn_config_defaults_to_standalone() {
+fn docker_reborn_config_defaults_to_docker_sandboxed() {
     let config = std::fs::read_to_string(workspace_root().join("docker/reborn/config.toml"))
         .expect("docker reborn config");
     let parsed = ironclaw_config::RebornConfigFile::parse_text(
@@ -679,7 +687,10 @@ fn docker_reborn_config_defaults_to_standalone() {
     .expect("docker reborn config parses");
 
     let boot = parsed.boot.expect("docker config must have [boot]");
-    assert_eq!(boot.profile.as_deref(), Some("local-dev"));
+    assert_eq!(
+        boot.profile.as_deref(),
+        Some("hosted-single-tenant-volume-sandboxed")
+    );
     assert!(
         parsed.storage.is_none(),
         "local Docker config must not require production storage"
@@ -823,7 +834,7 @@ fn docker_reborn_entrypoint_rejects_ephemeral_railway_without_volume() {
 
 #[cfg(unix)]
 #[test]
-fn docker_reborn_entrypoint_rejects_sparse_config_as_standalone_on_railway() {
+fn docker_reborn_entrypoint_rejects_sparse_configuration_on_railway() {
     let temp = tempfile::tempdir().expect("tempdir");
     let bin_dir = temp.path().join("bin");
     fake_reborn_bin(&bin_dir);
@@ -842,10 +853,9 @@ fn docker_reborn_entrypoint_rejects_sparse_config_as_standalone_on_railway() {
         .expect("entrypoint should run");
 
     assert!(!output.status.success(), "entrypoint should fail closed");
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Railway deployment using profile=local-dev requires a persistent volume"),
-        "stderr: {stderr}"
+        !String::from_utf8_lossy(&output.stdout).contains("args="),
+        "the runtime must not start without the required persistent volume"
     );
 }
 
@@ -1363,7 +1373,10 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         stdout.contains("IronClaw Reborn profiles"),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed (default)"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
     assert!(stdout.contains("hosted-single-tenant"), "stdout: {stdout}");
     assert!(
@@ -1402,13 +1415,11 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
-    let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 8);
+    let profiles = json["profiles"].as_array().expect("profile list");
     assert!(
         profiles
             .iter()
-            .any(|profile| profile["name"] == "local-dev" && profile["default"] == true)
+            .any(|profile| profile["name"] == "local-dev" && profile["default"] == false)
     );
     assert!(
         profiles
@@ -1429,7 +1440,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     );
     assert!(profiles.iter().any(|profile| profile["name"]
         == "hosted-single-tenant-volume-sandboxed"
-        && profile["default"] == false));
+        && profile["default"] == true));
     assert!(profiles.iter().any(|profile| profile["name"]
         == "hosted-single-tenant-volume-sandboxed-railway"
         && profile["default"] == false));
@@ -1977,7 +1988,10 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("home_source: default"), "stdout: {stdout}");
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("profile: hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
     assert!(
         !temp.path().join(".ironclaw").exists(),
         "config path should not create default Reborn or v1 state directories"
@@ -2225,7 +2239,9 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
         .arg("--port")
         .arg("0")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
-        .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Non-Docker contract (bearer-token gate): pin standalone; the
+        // compiled default now requires Docker and fails before the gate.
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
@@ -2239,6 +2255,60 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
     assert!(
         stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
         "stderr should explain which env var is missing: {stderr}"
+    );
+}
+
+#[test]
+fn default_startup_fails_closed_when_the_docker_daemon_is_unreachable() {
+    // The compiled default profile is `hosted-single-tenant-volume-sandboxed`
+    // (no IRONCLAW_REBORN_PROFILE set). An unchanged startup must connect to
+    // the local Docker daemon for the per-user sandbox process lane and must
+    // fail closed — never silently fall back to an unsandboxed in-process
+    // runtime — when the daemon is unreachable.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            temp.path().join("missing-docker.sock"),
+        )
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-default-boot-token-0123456789abcdef",
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while child.try_wait().expect("serve child status").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("default startup did not fail closed without Docker within 15 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("read startup failure");
+
+    assert!(
+        !output.status.success(),
+        "default sandbox startup must fail closed without Docker, not silently \
+         fall back in-process: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires a reachable Docker daemon")
+            && stderr.contains("hosted-single-tenant-volume-sandboxed"),
+        "stderr must name the sandbox profile and the Docker fail-closed \
+         reason: {stderr}"
     );
 }
 
@@ -2261,7 +2331,9 @@ fn serve_boots_without_user_id_env_var() {
         .arg(port.to_string())
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Non-Docker contract (user-id fallback): pin standalone; the
+        // compiled default now requires Docker.
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         // Token must be >=32 bytes so it clears its own entropy floor before
         // the user-id fallback under test is reached.
         .env(
@@ -2304,7 +2376,9 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
         .current_dir(&working_directory)
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Non-Docker contract (boot-from-workspace cwd): pin standalone;
+        // the compiled default now requires Docker.
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env(
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             "reborn-smoke-test-cwd-workspace-token-0123456789abcdef",
@@ -2342,7 +2416,9 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
         .current_dir(&reborn_home)
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Non-Docker contract (standalone skill-root overlap): pin
+        // standalone; the compiled default now requires Docker.
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env(
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             "reborn-smoke-test-cwd-reborn-home-token-0123456789abcdef",
@@ -2520,8 +2596,8 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         "seeded config should stamp api_version: {config}"
     );
     assert!(
-        config.contains("profile = \"local-dev\""),
-        "seeded config should preserve the safe default profile: {config}"
+        config.contains("profile = \"hosted-single-tenant-volume-sandboxed\""),
+        "seeded config should record the compiled default profile: {config}"
     );
     assert!(
         !config.contains("[llm.default]"),
@@ -3302,7 +3378,10 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("profile: hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
     assert!(
         stdout.contains("runtime_driver: planned-agent-loop"),
@@ -3335,7 +3414,9 @@ fn no_subcommand_defaults_to_serve_command() {
     let output = reborn_command()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
-        .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Non-Docker auth-gate contract: pin standalone; the compiled
+        // default now requires Docker and fails before the token gate.
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
@@ -3379,7 +3460,10 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("text_only_driver"), "stdout: {stdout}");
     assert!(
         !stdout.contains("v1_state"),
@@ -3470,7 +3554,7 @@ fn repl_exit_command_seeds_reborn_config() {
         "seeded config should stamp api_version: {config}"
     );
     assert!(
-        config.contains("profile = \"local-dev\""),
+        config.contains("profile = \"hosted-single-tenant-volume-sandboxed\""),
         "seeded config should record default profile: {config}"
     );
     assert!(
@@ -3741,7 +3825,7 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
         "seeded config should stamp api_version: {config}"
     );
     assert!(
-        config.contains("profile = \"local-dev\""),
+        config.contains("profile = \"hosted-single-tenant-volume-sandboxed\""),
         "seeded config should record default profile: {config}"
     );
     assert!(
@@ -3788,7 +3872,7 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
         "seeded config should stamp api_version: {config}"
     );
     assert!(
-        config.contains("profile = \"local-dev\""),
+        config.contains("profile = \"hosted-single-tenant-volume-sandboxed\""),
         "seeded config should record default profile: {config}"
     );
     assert!(
@@ -3858,7 +3942,10 @@ fn doctor_default_home_is_reborn_scoped_and_dry_run() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("(default)"), "stdout: {stdout}");
-    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
     assert!(
         !temp.path().join(".ironclaw").exists(),
         "doctor should not create default Reborn or v1 state directories"
@@ -6228,7 +6315,10 @@ fn status_reports_reborn_home_without_touching_v1_state() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("text_only"), "stdout: {stdout}");
     assert!(
         !stdout.contains("v1_state"),
@@ -6264,7 +6354,7 @@ fn status_json_reports_reborn_home_without_touching_v1_state() {
         json["reborn_home"],
         reborn_home.to_str().expect("utf8 path")
     );
-    assert_eq!(json["profile"], "local-dev");
+    assert_eq!(json["profile"], "hosted-single-tenant-volume-sandboxed");
     assert!(json["drivers"]["text_only"].is_object());
     assert!(
         json.get("v1_state").is_none(),
@@ -6567,7 +6657,7 @@ fn run_confirm_host_access_flag_gates_standalone_yolo() {
     let config = std::fs::read_to_string(reborn_home.join("config.toml"))
         .expect("confirmed first runtime start should seed config");
     assert!(
-        config.contains("profile = \"local-dev\""),
+        config.contains("profile = \"hosted-single-tenant-volume-sandboxed\""),
         "env-selected standalone-unrestricted must not become the persistent default: {config}"
     );
 }
@@ -6760,7 +6850,9 @@ fn serve_standalone_allows_non_loopback_without_trusted_laptop_access() {
     let output = Command::new(reborn_bin())
         .args(["serve", "--host", "0.0.0.0", "--port", "0"])
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
-        .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Unrelated non-Docker contract (token gate + non-loopback warning):
+        // pin the standalone profile; the compiled default now needs Docker.
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
@@ -6905,6 +6997,7 @@ default_project = "project-alpha"
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -6938,6 +7031,7 @@ default_approval_policy = "ask_always"
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -6967,6 +7061,7 @@ provider_id = "openai"
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -7011,6 +7106,7 @@ provider_id = "empty-key-provider"
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("REBORN_TEST_EMPTY_KEY", "")
         .output()
@@ -7040,6 +7136,7 @@ heartbeat_interval_secs = 0
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -7071,6 +7168,7 @@ heartbeat_interval_secs = 60
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -7102,6 +7200,7 @@ poll_interval_ms = 0
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -7129,6 +7228,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
     let output = Command::new(reborn_bin())
         .args(["run", "-m", "ping"])
         .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env_remove("OPENAI_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OLLAMA_BASE_URL")

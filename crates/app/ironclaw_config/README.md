@@ -24,6 +24,16 @@ reason to be its own compilation unit.
 
 - `RebornHome` / `REBORN_HOME_ENV` (`home.rs`), `RebornProfile` /
   `REBORN_PROFILE_ENV` (`profile.rs`), `RebornBootConfig` (`boot.rs`).
+  The default `RebornProfile` is `HostedSingleTenantVolumeSandboxed`
+  (`hosted-single-tenant-volume-sandboxed`): fresh, unset configurations boot
+  with the per-user sandbox on a local Docker daemon. An explicit
+  `IRONCLAW_REBORN_PROFILE` value or `[boot].profile` in the seeded
+  `config.toml` always wins — existing saved configuration keeps the profile
+  it names, and `Standalone` (`local-dev`) keeps the in-process loop.
+  The sandboxed profile also uses its existing storage namespace and
+  `<reborn-home>/workspaces` instead of the current directory. Existing data
+  is not moved or deleted; `IRONCLAW_REBORN_WORKSPACE_ROOT` remains the
+  explicit workspace-root override.
 - `RebornConfigFile` + the `config.toml` schema (`config_file.rs`,
   `deny_unknown_fields`), seeding (`config_seed.rs`), `RebornDoctorReport`
   (`doctor.rs`), budget env defaults (`budget.rs`).
@@ -31,7 +41,7 @@ reason to be its own compilation unit.
   fail-closed refusal of raw secret values typed into the file, at any depth.
 - `RetiredSections` / `retired_config_key_guidance` (`retired_sections.rs`) —
   the compatibility window for sections this crate used to define: an
-  existing file still parses, a retired *setup* key still fails `serve`
+  existing file still parses, a retired _setup_ key still fails `serve`
   closed, an inert section boots and says so.
 - `capability_remediation.rs` — remediation text helpers (not dead: consumers
   in four crates).
