@@ -13,6 +13,7 @@ use futures::{Stream, StreamExt};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -21,7 +22,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    ToolCompletionResponse, ToolDefinition, prompt_cache_key_from_metadata,
 };
 
 /// OpenAI Codex Responses API provider.
@@ -40,6 +41,7 @@ pub struct OpenAiCodexProvider {
     model: String,
     api_base_url: String,
     auth: RwLock<AuthState>,
+    unsupported_params: HashSet<String>,
 }
 
 impl OpenAiCodexProvider {
@@ -70,7 +72,13 @@ impl OpenAiCodexProvider {
                 token: token.to_string(),
                 account_id,
             }),
+            unsupported_params: HashSet::new(),
         })
+    }
+
+    pub(crate) fn with_unsupported_params(mut self, unsupported_params: Vec<String>) -> Self {
+        self.unsupported_params = unsupported_params.into_iter().collect();
+        self
     }
 
     /// Update the access token after a refresh.
@@ -134,6 +142,7 @@ impl OpenAiCodexProvider {
         tools: Option<&[ToolDefinition]>,
         tool_choice: Option<&str>,
         response_format: Option<&crate::provider::CompletionResponseFormat>,
+        metadata: &std::collections::HashMap<String, String>,
     ) -> serde_json::Value {
         // Separate system messages into `instructions`
         let instructions: String = messages
@@ -189,6 +198,15 @@ impl OpenAiCodexProvider {
                 }),
             };
             body["parallel_tool_calls"] = serde_json::Value::Bool(true);
+        }
+
+        // Stable per-conversation routing key for OpenAI's prompt cache. Only
+        // the thread id qualifies: a per-run key would fragment the cache
+        // across a conversation's turns instead of reusing it.
+        if let Some(prompt_cache_key) =
+            prompt_cache_key_from_metadata(&self.unsupported_params, metadata)
+        {
+            body["prompt_cache_key"] = serde_json::Value::String(prompt_cache_key);
         }
 
         body
@@ -288,7 +306,13 @@ impl OpenAiCodexProvider {
         )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None, None, request.response_format.as_ref());
+        let body = self.build_request_body(
+            &messages,
+            None,
+            None,
+            request.response_format.as_ref(),
+            &request.metadata,
+        );
         let parsed = self.send_request_with_sink(body, sink).await?;
 
         Ok(CompletionResponse {
@@ -326,6 +350,7 @@ impl OpenAiCodexProvider {
             Some(&request.tools),
             request.tool_choice.as_deref(),
             request.response_format.as_ref(),
+            &request.metadata,
         );
         let mut parsed = self.send_request_with_sink(body, sink).await?;
 
@@ -1551,7 +1576,13 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             ChatMessage::user("Hello"),
         ];
 
-        let body = provider.build_request_body(&messages, None, None, None);
+        let body = provider.build_request_body(
+            &messages,
+            None,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
 
         assert_eq!(body["model"], "gpt-5.3-codex");
         assert_eq!(body["store"], false);
@@ -1563,6 +1594,169 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
         assert_eq!(input[0]["role"], "user");
         // No tools
         assert!(body.get("tools").is_none());
+        // No thread_id in metadata -> no prompt_cache_key on the wire.
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_includes_prompt_cache_key_from_thread_id_metadata() {
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new(
+            "gpt-5.3-codex",
+            "https://chatgpt.com/backend-api/codex",
+            &jwt,
+            300,
+        )
+        .unwrap();
+
+        let messages = vec![ChatMessage::user("Hello")];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-abc-123".to_string(),
+        );
+
+        let body = provider.build_request_body(&messages, None, None, None, &metadata);
+
+        assert_eq!(body["prompt_cache_key"], "thread-abc-123");
+    }
+
+    /// One-shot loopback capture server: returns the base URL and a handle
+    /// resolving to the captured request body. Replies 400 — these tests
+    /// assert the request wire shape, not response handling. Mirrors
+    /// `anthropic_oauth::tests::capture_one_request`.
+    async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                tx.send(
+                    String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                        .expect("request body is UTF-8"),
+                )
+                .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (base_url, rx)
+    }
+
+    async fn captured_json(rx: tokio::sync::oneshot::Receiver<String>) -> serde_json::Value {
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("request capture timed out")
+            .expect("captured request body");
+        serde_json::from_str(&body).expect("captured body is JSON")
+    }
+
+    /// Wire-level pin: the public `complete()` path must carry the
+    /// `prompt_cache_key` metadata all the way onto the wire, not just
+    /// through `build_request_body` called directly.
+    #[tokio::test]
+    async fn complete_public_path_sends_prompt_cache_key_metadata_on_the_wire() {
+        let (base_url, captured) = capture_one_request().await;
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new("gpt-5.3-codex", &base_url, &jwt, 5).unwrap();
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        let _ = provider.complete(request).await;
+        let body = captured_json(captured).await;
+
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-abc");
+    }
+
+    /// Same wire-level pin for the tool-use entry point: `complete_with_tools`
+    /// builds its request body through a different call site than `complete`,
+    /// so it needs its own coverage.
+    #[tokio::test]
+    async fn complete_with_tools_public_path_sends_prompt_cache_key_metadata_on_the_wire() {
+        let (base_url, captured) = capture_one_request().await;
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new("gpt-5.3-codex", &base_url, &jwt, 5).unwrap();
+
+        let mut request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search for x")],
+            vec![ToolDefinition {
+                name: "search".to_string(),
+                description: "Search for things".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        );
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-xyz".to_string(),
+        );
+
+        let _ = provider.complete_with_tools(request).await;
+        let body = captured_json(captured).await;
+
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
+    }
+
+    #[tokio::test]
+    async fn complete_public_path_omits_prompt_cache_key_when_unsupported() {
+        let (base_url, captured) = capture_one_request().await;
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new("gpt-5.3-codex", &base_url, &jwt, 5)
+            .unwrap()
+            .with_unsupported_params(vec!["prompt_cache_key".to_string()]);
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        let _ = provider.complete(request).await;
+        let body = captured_json(captured).await;
+
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]
@@ -1583,7 +1777,13 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        let body = provider.build_request_body(&messages, Some(&tools), None, None);
+        let body = provider.build_request_body(
+            &messages,
+            Some(&tools),
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
 
         assert!(body.get("tools").is_some());
         let tools_arr = body["tools"].as_array().unwrap();
@@ -1614,6 +1814,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             None,
             None,
             Some(&format),
+            &std::collections::HashMap::new(),
         );
 
         assert_eq!(
@@ -1790,7 +1991,13 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         )
         .unwrap();
 
-        let body = provider.build_request_body(&messages, None, None, None);
+        let body = provider.build_request_body(
+            &messages,
+            None,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         let input = body["input"].as_array().unwrap();
 
         // Should have 3 non-system items: user, assistant, rewritten-user

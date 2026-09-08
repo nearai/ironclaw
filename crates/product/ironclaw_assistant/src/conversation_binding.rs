@@ -248,6 +248,13 @@ impl ProductBindingResolver for SessionLaneRejectingBindingResolver {
         Err(ProductOperationFailure::UnknownInstallation)
     }
 
+    async fn ensure_actor_bound(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        Err(ProductOperationFailure::UnknownInstallation)
+    }
+
     async fn reset_binding(
         &self,
         _request: ResetBindingRequest,
@@ -596,6 +603,25 @@ impl ProductBindingResolver for ProductConversationBindingService {
         ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &resolution)?;
 
         resolved_binding_from_resolution(resolution)
+    }
+
+    async fn ensure_actor_bound(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        let installation_scope = self
+            .installations
+            .resolve(&request.adapter_id, &request.installation_id)?;
+        let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
+        // The freshness recheck bypasses any positive resolver cache, so a
+        // just-revoked actor fails the pre-check instead of reaching command
+        // admission on a stale read.
+        self.ensure_resolved_actor_binding_still_current(
+            &installation_scope,
+            &request,
+            expected_actor.as_ref(),
+        )
+        .await
     }
 
     async fn reset_binding(

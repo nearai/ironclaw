@@ -296,12 +296,11 @@ impl SetupHint {
 
 /// Validates unsupported_params during deserialization.
 ///
-/// Only allows: "temperature", "max_tokens", "stop_sequences".
+/// Only allows: "temperature", "max_tokens", "stop_sequences", "prompt_cache_key".
 /// Invalid parameter names cause a deserialization error.
 mod unsupported_params_de {
+    use crate::provider::UnsupportedParam;
     use serde::{Deserialize, Deserializer};
-
-    const VALID_PARAMS: &[&str] = &["temperature", "max_tokens", "stop_sequences"];
 
     pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
     where
@@ -309,11 +308,11 @@ mod unsupported_params_de {
     {
         let params: Vec<String> = Deserialize::deserialize(deserializer)?;
         for param in &params {
-            if !VALID_PARAMS.contains(&param.as_str()) {
+            if !UnsupportedParam::is_valid_name(param) {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported parameter name '{}': must be one of: {}",
                     param,
-                    VALID_PARAMS.join(", ")
+                    UnsupportedParam::VALID_NAMES.join(", ")
                 )));
             }
         }
@@ -362,7 +361,7 @@ pub struct ProviderDefinition {
     #[serde(default)]
     pub setup: Option<SetupHint>,
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
-    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
+    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`, `"prompt_cache_key"`.
     /// Listed parameters are stripped from requests before sending to avoid 400 errors.
     /// Invalid parameter names cause a deserialization error.
     #[serde(default, deserialize_with = "unsupported_params_de::deserialize")]
@@ -1144,11 +1143,13 @@ mod tests {
             "openai should have 'temperature' in unsupported_params"
         );
 
-        // Providers without the field in JSON should deserialize to empty vec
+        // Groq caching is automatic; its Chat Completions schema does not
+        // accept OpenAI's explicit prompt_cache_key extension.
         let groq = providers.iter().find(|p| p.id == "groq").unwrap();
         assert!(
-            groq.unsupported_params.is_empty(),
-            "groq should have empty unsupported_params (field absent in JSON)"
+            groq.unsupported_params
+                .contains(&"prompt_cache_key".to_string()),
+            "groq should disable the unsupported prompt_cache_key extension"
         );
 
         // All entries should only contain valid param names
@@ -1161,10 +1162,7 @@ mod tests {
                     def.id
                 );
                 assert!(
-                    matches!(
-                        param.as_str(),
-                        "temperature" | "max_tokens" | "stop_sequences"
-                    ),
+                    crate::provider::UnsupportedParam::is_valid_name(param),
                     "{}: unsupported_params contains invalid parameter '{}'",
                     def.id,
                     param
@@ -1264,6 +1262,43 @@ mod tests {
                 "{id} must appear in selectable() after Layer C"
             );
         }
+    }
+
+    /// `"prompt_cache_key"` is the kill switch for the OpenAI-compatible
+    /// prompt-cache-key extension (chat-completions rig adapter, NEAR AI,
+    /// GitHub Copilot) — it must deserialize as a valid `unsupported_params`
+    /// entry, and an unrelated bogus name must still be rejected.
+    #[test]
+    fn test_unsupported_params_accepts_prompt_cache_key() {
+        let valid_json = r#"[{
+            "id": "test",
+            "protocol": "open_ai_completions",
+            "model_env": "TEST_MODEL",
+            "default_model": "test-model",
+            "description": "Test provider",
+            "unsupported_params": ["prompt_cache_key"]
+        }]"#;
+
+        let providers: Vec<ProviderDefinition> =
+            serde_json::from_str(valid_json).expect("prompt_cache_key must deserialize");
+        assert_eq!(
+            providers[0].unsupported_params,
+            vec!["prompt_cache_key".to_string()]
+        );
+
+        let invalid_json = r#"[{
+            "id": "test",
+            "protocol": "open_ai_completions",
+            "model_env": "TEST_MODEL",
+            "default_model": "test-model",
+            "description": "Test provider",
+            "unsupported_params": ["prompt_cache_keyyy"]
+        }]"#;
+        let result: Result<Vec<ProviderDefinition>, _> = serde_json::from_str(invalid_json);
+        assert!(
+            result.is_err(),
+            "a bogus parameter name must still be rejected"
+        );
     }
 
     #[test]

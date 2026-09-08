@@ -217,11 +217,24 @@ struct ScriptedDeviceLinkState {
 pub(crate) struct ScriptedDeviceLinkAdapter {
     state: Mutex<ScriptedDeviceLinkState>,
     custody: Mutex<Vec<String>>,
+    /// When set, the next `begin` fails with this error instead of minting a
+    /// payload — how a scenario stands in for the real adapter's fail-closed
+    /// paths (a deployment with no application identity) without a socket.
+    next_begin_failure: Mutex<Option<DeviceLinkError>>,
 }
 
 impl ScriptedDeviceLinkAdapter {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Fail the next `begin` with `error`, exactly as the Telegram adapter does
+    /// when the deployment never supplied `telegram_api_id` / `telegram_api_hash`.
+    pub(crate) fn fail_next_begin(&self, error: DeviceLinkError) {
+        *self
+            .next_begin_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
     }
 
     /// Every call served, in order.
@@ -284,6 +297,15 @@ impl DeviceLinkAdapter for ScriptedDeviceLinkAdapter {
         mode: DeviceLinkMode,
     ) -> Result<DeviceLinkStep, DeviceLinkError> {
         let flow = ctx.flow_id.to_string();
+        if let Some(error) = self
+            .next_begin_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            self.record(ScriptedDeviceLinkCall::Begin(flow, mode));
+            return Err(error);
+        }
         let payload = {
             let mut state = self.lock_state();
             state

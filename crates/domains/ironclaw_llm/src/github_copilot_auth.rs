@@ -528,8 +528,22 @@ fn format_reqwest_error(e: &reqwest::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn token_manager_with_cached_token(
+        client: reqwest::Client,
+        token: String,
+    ) -> CopilotTokenManager {
+        CopilotTokenManager {
+            client,
+            oauth_token: SecretString::from("unused-test-oauth-token".to_string()),
+            cached: RwLock::new(Some(CachedCopilotToken {
+                token: SecretString::from(token),
+                expires_at: u64::MAX,
+            })),
+        }
+    }
 
     #[test]
     fn default_headers_include_required_identity_headers() {

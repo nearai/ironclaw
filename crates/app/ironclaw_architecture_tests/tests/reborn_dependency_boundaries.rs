@@ -849,15 +849,24 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ReplySinkOutcome::retry_after` and `ReplyPhase::as_str` helpers,
         // were deleted after a workspace-wide consumer sweep. Count read
         // from this test's own failure message.
-        // 12_867 -> 12_930 (2026-09-03/04, channel command-menu registration):
-        // the `activation_calls`/`deactivation_calls` recipe lists on
-        // `ChannelIngressDescriptor`, the per-list cap in
-        // `ChannelDescriptor::validate` (`TooManyIngressVendorCalls`) so a
-        // manifest cannot declare an unbounded activation-time call sequence,
-        // and the cap's inline test. Declaration and shape validation only;
-        // execution stays in ironclaw_extension_host's lifecycle. Count read
+        // 12_867 -> 13_026 (2026-09-04, #7955 not_configured device-link
+        // failure): +13 lines for the `DeviceLinkErrorCode::NotConfigured`
+        // variant and the `DeviceLinkError::NotConfigured` carrier (docs +
+        // code/restartable arms) — closed-vocabulary growth only; the audit
+        // classification lives in ironclaw_auth's driver and the rendering
+        // in the WebUI panel. The rest of the delta is growth main had
+        // already banked inside the +150 window since the 2026-08-31 pin;
+        // per the capture rule the pin re-captures the measured count, read
         // from this test's own failure message.
-        ("ironclaw_extension_contracts", 12_930),
+                // Command-menu registration (2026-09-03/08, PR #8072) rides inside
+        // the +150 working window on top of the 13_026 pin: the
+        // `activation_calls`/`deactivation_calls` recipe lists on
+        // `ChannelIngressDescriptor`, the per-list cap in
+        // `ChannelDescriptor::validate` (`TooManyIngressVendorCalls`), and
+        // the cap's inline test (~63 lines). Declaration and shape
+        // validation only; execution stays in ironclaw_extension_host's
+        // lifecycle.
+                ("ironclaw_extension_contracts", 13_026),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

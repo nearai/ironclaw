@@ -110,6 +110,17 @@ impl ProductBindingResolver for FakeConversationBindingService {
     ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.resolve_programmed_or_default(request)
     }
+
+    async fn ensure_actor_bound(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        let state = self.state.lock().expect("fake binding state lock poisoned"); // safety: test-support fake
+        match state.fail_with.clone() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 }
 
 impl FakeConversationBindingService {

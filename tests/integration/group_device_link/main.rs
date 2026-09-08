@@ -28,6 +28,7 @@ mod scenario_actor_isolation;
 mod scenario_handshake_mints_and_serves;
 mod scenario_link_call_unlink;
 mod scenario_revoked_session_reauth;
+mod scenario_unconfigured_deployment_fails_closed;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -51,6 +52,10 @@ async fn device_link_linked_account_group() {
     report.record(
         "revoked_session_reauth",
         scenario_revoked_session_reauth::run(&group, &handles).await,
+    );
+    report.record(
+        "unconfigured_deployment_fails_closed",
+        scenario_unconfigured_deployment_fails_closed::run(&group, &handles).await,
     );
     // Runs last because it proves the real extension-removal path, which
     // intentionally removes Telegram from the shared group runtime.

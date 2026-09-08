@@ -203,6 +203,7 @@
     "model_env": "GROQ_MODEL",
     "default_model": "llama-3.3-70b-versatile",
     "description": "Groq LPU inference (ultra-fast)",
+    "unsupported_params": ["prompt_cache_key"],
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_groq_api_key",

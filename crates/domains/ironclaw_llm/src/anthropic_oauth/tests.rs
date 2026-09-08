@@ -340,6 +340,11 @@ async fn oauth_unsupported_model_downgrades_to_no_caching() {
     );
 }
 
+// The denylist-gate cache-retention regression test lives in its own file
+// so this one stays inside the file-size budget:
+// `src/anthropic_oauth/tests/prompt_cache_tests.rs`.
+mod prompt_cache_tests;
+
 fn request_with_messages(messages: Vec<AnthropicMessage>) -> AnthropicRequest {
     AnthropicRequest {
         stream: false,

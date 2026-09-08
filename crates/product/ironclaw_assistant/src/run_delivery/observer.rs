@@ -317,7 +317,7 @@ impl RunDeliveryObserver {
     /// Observe one workflow ack for an inbound envelope. This is the
     /// entry point the composition's post-admission observer seam calls.
     pub async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.close_connect_nudge_epoch_after_accepted_user_message(&envelope, &ack);
+        self.close_connect_nudge_epoch_after_accepted_message(&envelope, &ack);
         // Product commands settle synchronously; their result or
         // user-correctable rejection is the only reply this event will see.
         if self.post_command_feedback(&envelope, &ack).await {
@@ -1637,14 +1637,24 @@ impl RunDeliveryObserver {
         }
     }
 
-    fn close_connect_nudge_epoch_after_accepted_user_message(
+    fn close_connect_nudge_epoch_after_accepted_message(
         &self,
         envelope: &ProductInboundEnvelope,
         ack: &ProductInboundAck,
     ) {
-        if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
-            || !matches!(ack, ProductInboundAck::Accepted { .. })
-        {
+        // A successful command closes the epoch too: the sender is paired, so
+        // a later disconnect must re-nudge instead of hitting a stale
+        // reservation.
+        let closes_epoch = match envelope.payload() {
+            ProductInboundPayload::UserMessage(_) => {
+                matches!(ack, ProductInboundAck::Accepted { .. })
+            }
+            ProductInboundPayload::Command(_) => {
+                matches!(ack, ProductInboundAck::CommandResult { .. })
+            }
+            _ => false,
+        };
+        if !closes_epoch {
             return;
         }
         let conversation_key = envelope
@@ -2093,11 +2103,17 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 /// originating user message as `DirectChat`. This is the same signal that
 /// gates OAuth setup-link privacy.
 pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool {
-    matches!(
-        envelope.payload(),
-        ProductInboundPayload::UserMessage(payload)
-            if payload.trigger == ProductTriggerReason::DirectChat
-    )
+    envelope_trigger(envelope) == Some(ProductTriggerReason::DirectChat)
+}
+
+/// Why the adapter forwarded this envelope — for the payload kinds a human
+/// sender authors directly (a message or a slash command).
+fn envelope_trigger(envelope: &ProductInboundEnvelope) -> Option<ProductTriggerReason> {
+    match envelope.payload() {
+        ProductInboundPayload::UserMessage(payload) => Some(payload.trigger),
+        ProductInboundPayload::Command(payload) => Some(payload.trigger),
+        _ => None,
+    }
 }
 
 /// Does this message ADDRESS the bot — a DM, a mention, or a slash command —
@@ -2112,14 +2128,12 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
 /// paired" case on every surface.
 fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
     matches!(
-        envelope.payload(),
-        ProductInboundPayload::UserMessage(payload)
-            if matches!(
-                payload.trigger,
-                ProductTriggerReason::DirectChat
-                    | ProductTriggerReason::BotMention
-                    | ProductTriggerReason::BotCommand
-            )
+        envelope_trigger(envelope),
+        Some(
+            ProductTriggerReason::DirectChat
+                | ProductTriggerReason::BotMention
+                | ProductTriggerReason::BotCommand
+        )
     )
 }
 

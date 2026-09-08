@@ -127,11 +127,17 @@ impl TelegramDeviceLinkAdapter {
     /// The configured application identity, or the explicit not-configured
     /// failure the manifest promises ("fails closed with an explicit error
     /// rather than making every existing install invalid").
+    ///
+    /// `NotConfigured`, not `Internal`: the card renders `Internal` as
+    /// "something went wrong … for this account", which sends the user to fix
+    /// an account that was never the problem. Only an administrator can act.
     fn identity(&self) -> Result<&MtprotoAppIdentity, DeviceLinkError> {
-        self.identity.as_ref().ok_or(DeviceLinkError::Internal {
-            reason: "the deployment has not configured its MTProto application identity \
+        self.identity
+            .as_ref()
+            .ok_or(DeviceLinkError::NotConfigured {
+                reason: "the deployment has not configured its MTProto application identity \
                      (telegram_api_id / telegram_api_hash)",
-        })
+            })
     }
 
     /// Abort every parked link, logging out any that Telegram already

@@ -27,7 +27,7 @@ use crate::models::{DiscoveredModel, ModelModality};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    openai_json_schema_response_format,
+    openai_json_schema_response_format, prompt_cache_key_from_metadata,
 };
 use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
@@ -385,6 +385,14 @@ impl NearAiChatProvider {
     /// Returns true if using API key auth, false if session token auth.
     fn uses_api_key(&self) -> bool {
         self.config.api_key.is_some()
+    }
+
+    /// Resolve the derived prompt-cache-key value for this request's
+    /// metadata, unless an operator listed `"prompt_cache_key"` in
+    /// `config.unsupported_params` to suppress it (e.g. a NEAR AI-compatible
+    /// deployment that 400s on unknown fields).
+    fn prompt_cache_key(&self, metadata: &HashMap<String, String>) -> Option<String> {
+        prompt_cache_key_from_metadata(&self.config.unsupported_params, metadata)
     }
 
     /// Resolve the Bearer token for the current auth mode.
@@ -903,6 +911,7 @@ impl LlmProvider for NearAiChatProvider {
             tool_choice: None,
             stream: false,
             stream_options: None,
+            prompt_cache_key: self.prompt_cache_key(&req.metadata),
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -983,6 +992,7 @@ impl LlmProvider for NearAiChatProvider {
             stream_options: Some(ChatCompletionStreamOptions {
                 include_usage: true,
             }),
+            prompt_cache_key: self.prompt_cache_key(&req.metadata),
         };
 
         let response = self.send_streaming_request(&request, sink).await?;
@@ -1032,7 +1042,7 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
-        let request = build_chat_completion_request(
+        let mut request = build_chat_completion_request(
             model,
             messages,
             req.tools,
@@ -1044,6 +1054,7 @@ impl LlmProvider for NearAiChatProvider {
                 tool_choice: req.tool_choice,
             },
         );
+        request.prompt_cache_key = self.prompt_cache_key(&req.metadata);
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
@@ -1163,6 +1174,7 @@ impl LlmProvider for NearAiChatProvider {
         request.stream_options = Some(ChatCompletionStreamOptions {
             include_usage: true,
         });
+        request.prompt_cache_key = self.prompt_cache_key(&req.metadata);
 
         let response = self.send_streaming_request(&request, sink).await?;
         let provider_reasoning =
@@ -1281,6 +1293,10 @@ struct ChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<ChatCompletionStreamOptions>,
+    /// Stable per-conversation routing key for NEAR AI's OpenAI-compatible
+    /// prompt cache (`crate::provider::PROMPT_CACHE_KEY_METADATA`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1623,6 +1639,9 @@ fn build_chat_completion_request(
         tool_choice,
         stream: false,
         stream_options: None,
+        // Set by the caller (`complete_with_tools`/`complete_with_tools_streaming`)
+        // from request metadata — this helper has no metadata/gate access.
+        prompt_cache_key: None,
     }
 }
 
@@ -2082,6 +2101,13 @@ mod tests {
     }
 
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
+        test_nearai_config_with_unsupported_params(base_url, Vec::new())
+    }
+
+    fn test_nearai_config_with_unsupported_params(
+        base_url: &str,
+        unsupported_params: Vec<String>,
+    ) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
             base_url: base_url.to_string(),
@@ -2097,6 +2123,7 @@ mod tests {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            unsupported_params,
         }
     }
 
@@ -3600,6 +3627,167 @@ data: [DONE]
         );
     }
 
+    /// Spawn a capture server for a single `/v1/chat/completions` POST and
+    /// return a provider pointed at it plus the captured raw request body,
+    /// mirroring `complete_with_tools_sends_standard_tool_results_by_default`'s
+    /// capture-server pattern above.
+    async fn nearai_completion_capture_provider(
+        unsupported_params: Vec<String>,
+    ) -> (NearAiChatProvider, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut tx = Some(tx);
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let (headers, body) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("POST /v1/chat/completions ") {
+                    if let Some(tx) = tx.take() {
+                        tx.send(body).expect("send captured request");
+                    }
+                    write_http_json_response(
+                        &mut socket,
+                        serde_json::json!({
+                            "id": "chatcmpl-test",
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "observed"
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+                        }),
+                    )
+                    .await;
+                    break;
+                }
+                write_http_json_response(&mut socket, serde_json::json!({ "models": [] })).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(
+            test_nearai_config_with_unsupported_params(&base_url, unsupported_params),
+            test_session(),
+        )
+        .expect("provider");
+        (provider, rx)
+    }
+
+    /// With `PROMPT_CACHE_KEY_METADATA` present in the request metadata, the
+    /// serialized body carries a top-level `prompt_cache_key` with that
+    /// exact value.
+    #[tokio::test]
+    async fn complete_sends_prompt_cache_key_when_metadata_present() {
+        let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        provider.complete(request).await.expect("completion");
+
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        assert_eq!(body["prompt_cache_key"], "thread-cache-key-abc");
+    }
+
+    /// The four public completion entry points build distinct request values;
+    /// keep the shared cache key pinned across plain/tool and buffered/native
+    /// streaming calls so a future builder cannot silently omit it.
+    #[tokio::test]
+    async fn every_completion_method_sends_prompt_cache_key() {
+        for method in 0..4 {
+            let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+            let mut completion = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+            completion.metadata.insert(
+                crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+                "thread-cache-key-all-methods".to_string(),
+            );
+            let mut tool_completion = ToolCompletionRequest::new(
+                vec![ChatMessage::user("search")],
+                vec![search_tool_definition()],
+            );
+            tool_completion.metadata = completion.metadata.clone();
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let sink = Arc::new(RecordingCompletionStreamSink { sender });
+
+            match method {
+                0 => {
+                    provider.complete(completion).await.expect("completion");
+                }
+                1 => {
+                    provider
+                        .complete_with_tools(tool_completion)
+                        .await
+                        .expect("tool completion");
+                }
+                2 => {
+                    let _ = provider.complete_streaming(completion, sink).await;
+                }
+                3 => {
+                    let _ = provider
+                        .complete_with_tools_streaming(tool_completion, sink)
+                        .await;
+                }
+                _ => unreachable!("four completion methods"),
+            }
+
+            let body: serde_json::Value =
+                serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+            assert_eq!(
+                body["prompt_cache_key"], "thread-cache-key-all-methods",
+                "completion method {method} must carry the shared cache key",
+            );
+        }
+    }
+
+    /// Absent metadata must not synthesize the field.
+    #[tokio::test]
+    async fn complete_omits_prompt_cache_key_when_metadata_absent() {
+        let (provider, rx) = nearai_completion_capture_provider(Vec::new()).await;
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        provider.complete(request).await.expect("completion");
+
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "no prompt_cache_key may be emitted when no metadata was supplied: {body}"
+        );
+    }
+
+    /// The kill switch: listing `"prompt_cache_key"` in the config's
+    /// `unsupported_params` suppresses the field even though metadata
+    /// carries a value.
+    #[tokio::test]
+    async fn complete_omits_prompt_cache_key_when_in_unsupported_params() {
+        let (provider, rx) =
+            nearai_completion_capture_provider(vec!["prompt_cache_key".to_string()]).await;
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-cache-key-abc".to_string(),
+        );
+        provider.complete(request).await.expect("completion");
+
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "unsupported_params must suppress prompt_cache_key: {body}"
+        );
+    }
+
     #[test]
     fn test_assistant_with_tool_calls_conversion() {
         use crate::ToolCall;
@@ -4483,6 +4671,7 @@ data: [DONE]
             tool_choice: None,
             stream: false,
             stream_options: None,
+            prompt_cache_key: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "gpt-4o");
@@ -4520,6 +4709,7 @@ data: [DONE]
             tool_choice: Some(serde_json::Value::String("auto".to_string())),
             stream: false,
             stream_options: None,
+            prompt_cache_key: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         // f32 precision: 0.7f32 serializes as 0.699999988... in JSON

@@ -51,5 +51,6 @@ registerPack("en", {
   "deviceLink.error.identity_conflict": "This account is already linked. Unlink it from the IronClaw account where it is connected, then try again.",
   "deviceLink.error.vendor_unavailable": "The service is temporarily unavailable.",
   "deviceLink.error.custody_failed": "The link could not be saved securely.",
+  "deviceLink.error.not_configured": "An administrator can enable it under Admin → Configuration → {name}.",
   "deviceLink.error.internal": "Something went wrong while linking.",
 });

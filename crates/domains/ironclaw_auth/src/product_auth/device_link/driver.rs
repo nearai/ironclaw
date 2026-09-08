@@ -808,6 +808,10 @@ fn auth_error_for(code: DeviceLinkErrorCode) -> AuthErrorCode {
         DeviceLinkErrorCode::AccountUnavailable | DeviceLinkErrorCode::IdentityConflict => {
             AuthErrorCode::CredentialMissing
         }
+        // An operator omission, recorded as such: filing it under
+        // `BackendUnavailable` told the audit trail a backend was down when
+        // nothing was called.
+        DeviceLinkErrorCode::NotConfigured => AuthErrorCode::MalformedConfig,
         DeviceLinkErrorCode::RateLimited
         | DeviceLinkErrorCode::HostThrottled
         | DeviceLinkErrorCode::LimitReached

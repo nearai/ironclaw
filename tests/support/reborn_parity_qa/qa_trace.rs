@@ -1795,6 +1795,7 @@ fn anthropic_llm_config(api_key: String, model: &str) -> LlmConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: Some(RegistryProviderConfig::generic(
             ProviderProtocol::Anthropic,
@@ -1842,6 +1843,7 @@ fn nearai_llm_config(api_key: String, model: &str) -> LlmConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            unsupported_params: Vec::new(),
         },
         provider: None,
         bedrock: None,

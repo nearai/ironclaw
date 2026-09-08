@@ -113,7 +113,7 @@ pub struct RegistryProviderConfig {
     /// Prompt cache retention (Anthropic-specific).
     pub cache_retention: CacheRetention,
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
-    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
+    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`, `"prompt_cache_key"`.
     /// Listed parameters are stripped from requests before sending to avoid 400 errors.
     pub unsupported_params: Vec<String>,
 }
@@ -173,6 +173,8 @@ pub struct OpenAiCodexConfig {
     pub session_path: PathBuf,
     /// Seconds before expiry to proactively refresh (default: 300).
     pub token_refresh_margin_secs: u64,
+    /// Parameter names suppressed from outbound Responses API requests.
+    pub unsupported_params: Vec<String>,
 }
 
 impl Default for OpenAiCodexConfig {
@@ -184,6 +186,7 @@ impl Default for OpenAiCodexConfig {
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
             session_path: ironclaw_base_dir().join("openai_codex_session.json"),
             token_refresh_margin_secs: 300,
+            unsupported_params: Vec::new(),
         }
     }
 }
@@ -210,6 +213,7 @@ impl OpenAiCodexConfig {
             session_path: session_path.unwrap_or(defaults.session_path),
             token_refresh_margin_secs: token_refresh_margin_secs
                 .unwrap_or(defaults.token_refresh_margin_secs),
+            unsupported_params: defaults.unsupported_params,
         }
     }
 }
@@ -538,6 +542,10 @@ pub struct NearAiConfig {
     pub failover_cooldown_threshold: u32,
     /// Enable cascade mode for smart routing. Default: true.
     pub smart_routing_cascade: bool,
+    /// Parameter names that NEAR AI does not support (currently only
+    /// `"prompt_cache_key"` is honored here — see `nearai_chat.rs`).
+    /// Listed parameters are stripped from requests before sending.
+    pub unsupported_params: Vec<String>,
 }
 
 impl NearAiConfig {
@@ -574,6 +582,7 @@ impl NearAiConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            unsupported_params: Vec::new(),
         }
     }
 }
@@ -763,6 +772,7 @@ mod tests {
                 failover_cooldown_secs: 300,
                 failover_cooldown_threshold: 3,
                 smart_routing_cascade: true,
+                unsupported_params: Vec::new(),
             },
             provider: None,
             bedrock: None,
