@@ -57,7 +57,13 @@ pub fn package_with_discovered_hosted_mcp_tools(
         .collect();
 
     match package.manifest.source {
-        ManifestSource::HostBundled => {
+        // An operator-installed volume package is materialized exactly like a
+        // compiled-in one and its catalog is discovered at runtime just the
+        // same, so it takes the same inline-dynamic reconstruction. Sending it
+        // to the fallback instead made discovery fail for every
+        // installed-local provider — the eligibility allowlist admitted a
+        // source this match then refused.
+        ManifestSource::HostBundled | ManifestSource::InstalledLocal => {
             ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
                 manifest,
                 package
@@ -80,9 +86,15 @@ pub fn package_with_discovered_hosted_mcp_tools(
 }
 
 fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
+    // An operator-installed package is reviewed by whoever installed it, the
+    // same trust story a compiled-in one has, so it gets the same discovery
+    // treatment. Discovery still runs under the caller's scope and leases the
+    // caller's credential.
     if !matches!(
         package.manifest.source,
-        ManifestSource::HostBundled | ManifestSource::UserRegistered
+        ManifestSource::HostBundled
+            | ManifestSource::InstalledLocal
+            | ManifestSource::UserRegistered
     ) {
         return None;
     }
@@ -430,6 +442,51 @@ runtime_credentials = [
             ))
             .expect("register capability provider contract");
         contracts
+    }
+
+    /// The eligibility allowlist admits `InstalledLocal`, so the reconstruction
+    /// match must too. Before the fix these disagreed and discovery returned
+    /// the fallback error for every operator-installed provider.
+    #[test]
+    fn installed_local_discovery_rebuilds_a_materialized_package() {
+        let manifest = ExtensionManifest::parse(
+            NOTION_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::default(),
+            &capability_provider_contracts(),
+        )
+        .expect("valid Notion manifest");
+        let root = VirtualPath::new("/system/extensions/notion").expect("valid root");
+        let package = ExtensionPackage::from_manifest(manifest, root.clone())
+            .expect("valid installed-local package");
+
+        let discovered = package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[HostedMcpDiscoveredTool {
+                name: "notion-search".to_string(),
+                description: "Search live Notion tools".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }),
+                annotations: HostedMcpDiscoveredToolAnnotations {
+                    read_only_hint: true,
+                    ..Default::default()
+                },
+            }],
+        )
+        .expect("installed-local discovery rebuilds a package");
+
+        assert_eq!(
+            discovered.materialized_root().expect("materialized root"),
+            &root,
+            "the operator-installed root must survive discovery"
+        );
+        assert_eq!(
+            discovered.descriptor_schema_mode,
+            crate::CapabilityDescriptorSchemaMode::InlineDynamic
+        );
     }
 
     fn notion_package() -> ExtensionPackage {

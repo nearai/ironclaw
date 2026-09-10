@@ -114,11 +114,14 @@ impl ExtensionPackage {
         manifest_digest: Option<String>,
         capabilities: Vec<CapabilityDescriptor>,
     ) -> Result<Self, ExtensionError> {
-        if manifest.source != ManifestSource::HostBundled {
+        if !matches!(
+            manifest.source,
+            ManifestSource::HostBundled | ManifestSource::InstalledLocal
+        ) {
             return Err(ExtensionError::InvalidManifest {
-                reason:
-                    "inline dynamic descriptor schemas are only supported for host-bundled packages"
-                        .to_string(),
+                reason: "inline dynamic descriptor schemas are only supported for host-bundled \
+                     and operator-installed packages"
+                    .to_string(),
             });
         }
         ensure_extension_root_matches(&manifest.id, &root)?;
@@ -208,8 +211,14 @@ impl ExtensionPackage {
         let consistent = match self.descriptor_schema_mode {
             CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
             CapabilityDescriptorSchemaMode::InlineDynamic => {
-                (self.manifest.source == ManifestSource::HostBundled
-                    || matches!(self.root_binding, PackageRootBinding::Virtual))
+                // Must mirror the sources
+                // `from_host_bundled_manifest_with_inline_dynamic_schemas`
+                // accepts, or a package constructs fine and then fails
+                // validation.
+                (matches!(
+                    self.manifest.source,
+                    ManifestSource::HostBundled | ManifestSource::InstalledLocal
+                ) || matches!(self.root_binding, PackageRootBinding::Virtual))
                     && descriptors_match_except_schema(&self.capabilities, &expected)
             }
         };
