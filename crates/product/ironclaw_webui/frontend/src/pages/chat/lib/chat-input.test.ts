@@ -376,6 +376,63 @@ test("ChatInput sends the latest text when Enter follows input before rerender",
   assert.deepEqual(sentContents, ["follow-up right away"]);
 });
 
+for (const draft of ["変換中", "/mo", "/status"]) {
+  test.each([
+    { key: "Enter", isComposing: true, keyCode: 13 },
+    // Safari can deliver the confirming keydown after compositionend.
+    { key: "Enter", isComposing: false, keyCode: 229 },
+    { key: "ArrowDown", isComposing: true, keyCode: 40 },
+    { key: "ArrowUp", isComposing: true, keyCode: 38 },
+    { key: "Tab", isComposing: true, keyCode: 9 },
+    { key: "Escape", isComposing: true, keyCode: 27 },
+  ])(`ChatInput leaves IME $key ($isComposing/$keyCode) untouched for ${draft}`, async (nativeEvent) => {
+    const sentContents = [];
+    const setCalls = [];
+    const setDraftCalls = [];
+    const { tree } = renderChatInput({
+      disabled: false,
+      sendDisabled: false,
+      canCancel: false,
+      draft,
+      commands: MENU_COMMANDS,
+      setCalls,
+      setDraftCalls,
+      onSend: async (content) => { sentContents.push(content); },
+    });
+    const textareaProps = templateProps(findTextarea(tree));
+    let prevented = false;
+    textareaProps.onKeyDown({
+      key: nativeEvent.key,
+      shiftKey: false,
+      nativeEvent,
+      preventDefault: () => { prevented = true; },
+    });
+    await flushAsyncHandlers();
+
+    assert.deepEqual(sentContents, [], "composition must not send a message");
+    assert.deepEqual(setCalls, [], "composition must not rewrite the draft or navigate/dismiss the command menu");
+    assert.deepEqual(setDraftCalls, [], "composition must not persist a command completion");
+    assert.equal(prevented, false, "the IME must retain the key's default action");
+
+    // The next ordinary Enter must still work; no timing window or sticky latch.
+    textareaProps.onKeyDown({
+      key: "Enter",
+      shiftKey: false,
+      nativeEvent: { isComposing: false, keyCode: 13 },
+      preventDefault: () => {},
+    });
+    await flushAsyncHandlers();
+    if (draft === "/mo") {
+      assert.deepEqual(sentContents, []);
+      assert.deepEqual(setCalls.filter((call) => call.index === 0), [
+        { index: 0, value: "/model " },
+      ]);
+    } else {
+      assert.deepEqual(sentContents, [draft]);
+    }
+  });
+}
+
 test("ChatInput preserves draft when caller refuses send", async () => {
   const setCalls = [];
   let sendCalls = 0;
