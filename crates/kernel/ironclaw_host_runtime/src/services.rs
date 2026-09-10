@@ -27,7 +27,9 @@ use ironclaw_event_store::{
     RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{
+    ExtensionRegistry, ScopedPackageOverlay, SharedExtensionRegistry,
+};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
@@ -133,6 +135,7 @@ where
     G: ResourceGovernor + 'static,
 {
     registry: Arc<SharedExtensionRegistry>,
+    scoped_overlay: Arc<ScopedPackageOverlay>,
     trust_policy: Arc<dyn TrustPolicy>,
     trust_policy_configured: bool,
     filesystem: Arc<F>,
@@ -298,6 +301,49 @@ impl ProductAuthProviderRuntimePorts {
             .await
     }
 
+    /// Resolve the owning scope for `handle` (caller's own secret first, then
+    /// the tenant-shared admin-managed secret — the same rule the dispatch-time
+    /// obligation preflight uses) and stage it. `AuthRequired` when no owner
+    /// scope holds the handle. Used by turn-start hosted-MCP discovery (P2b),
+    /// whose run scope is not the canonical scope user secrets are stored under.
+    pub async fn stage_owner_resolved_secret_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
+        let owner = crate::obligations::secret_owner_scope(self.secret_store.as_ref(), scope, handle)
+            .await
+            .map_err(stage_secret_error)?;
+        let Some(source_scope) = owner else {
+            return Err(ProductAuthCredentialStageError::AuthRequired);
+        };
+        self.stage_secret_from_scope_once(&source_scope, scope, capability_id, handle)
+            .await
+    }
+
+    /// Discard staged discovery state (network policy + secret material) for
+    /// (scope, capability) after a host-driven egress call completes (P2b
+    /// turn-start discovery).
+    pub fn discard_staged_discovery_state(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
+        self.network_policy_store
+            .discard_for_capability(scope, capability_id);
+        if let Err(error) = self
+            .secret_injection_store
+            .discard_for_capability(scope, capability_id)
+        {
+            tracing::debug!(
+                error = ?error,
+                capability_id = %capability_id,
+                "failed to discard staged discovery secret material"
+            );
+        }
+    }
+
     /// Stage one declared credential requirement for a host-driven call that
     /// bypasses the dispatch obligation pipeline (hosted-MCP discovery runs
     /// at activation, not through a capability invocation, so nothing else
@@ -447,6 +493,7 @@ where
         let credential_session_store: Arc<dyn CredentialSessionStore> = credential_broker;
         Self {
             registry: Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            scoped_overlay: Arc::new(ScopedPackageOverlay::new()),
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             trust_policy_configured: false,
             filesystem,
@@ -643,7 +690,10 @@ where
         });
         let mcp = self.mcp_runtime.as_ref().map(|runtime| {
             ServiceResolvedRuntimeAdapter::new(
-                Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::new(
+                    McpRuntimeAdapter::from_executor(Arc::clone(runtime))
+                        .with_scoped_overlay(Arc::clone(&self.scoped_overlay)),
+                ),
                 Arc::clone(&invocation_services),
             )
         });
@@ -665,6 +715,12 @@ where
     /// Builds the upper service without production validation.
     pub fn shared_extension_registry(&self) -> Arc<SharedExtensionRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    /// The per-user discovered-package overlay shared by every scoped
+    /// capability-resolution path (P2b).
+    pub fn scoped_package_overlay(&self) -> Arc<ScopedPackageOverlay> {
+        Arc::clone(&self.scoped_overlay)
     }
 
     /// Returns the canonical host-runtime HTTP egress port when configured.
@@ -782,6 +838,7 @@ where
             self.surface_version.clone(),
             runtime_policy,
         )
+        .with_scoped_overlay(Arc::clone(&self.scoped_overlay))
         .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)

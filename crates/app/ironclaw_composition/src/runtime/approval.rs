@@ -112,8 +112,14 @@ impl PolicyApprovalLeaseTermsProvider {
         // owner filter in `grants` then behaves exactly like dispatch did
         // (#5459 P1): their own private capability resolves, anyone else's
         // yields no grant and the lease stays unavailable.
+        let scope = gate.resource_scope();
+        let overlay_owner = ironclaw_extension_registry::OverlayScope::new(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.thread_id.clone(),
+        );
         let Some(grant) = surface
-            .grants(extension_id, &gate.resource_scope().user_id)
+            .grants(extension_id, &overlay_owner)
             .into_iter()
             .find(|grant| grant.capability == *capability)
         else {

@@ -35,6 +35,7 @@ where
     {
         let Self {
             registry,
+            scoped_overlay,
             trust_policy,
             trust_policy_configured,
             filesystem: _,
@@ -79,6 +80,7 @@ where
         component_types.filesystem = ProductionComponentType::of::<T>();
         HostRuntimeServices {
             registry,
+            scoped_overlay,
             trust_policy,
             trust_policy_configured,
             filesystem,
@@ -142,6 +144,7 @@ where
     {
         let Self {
             registry,
+            scoped_overlay,
             trust_policy,
             trust_policy_configured,
             filesystem,
@@ -188,6 +191,7 @@ where
         component_types.resource_governor = ProductionComponentType::of::<T>();
         HostRuntimeServices {
             registry,
+            scoped_overlay,
             trust_policy,
             trust_policy_configured,
             filesystem,

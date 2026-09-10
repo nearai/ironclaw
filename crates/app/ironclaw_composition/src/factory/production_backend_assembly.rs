@@ -1391,6 +1391,8 @@ pub(super) async fn build_backend_production(
         }
     }
     let shared_extension_registry = services.shared_extension_registry();
+    let scoped_overlay = services.scoped_package_overlay();
+    let product_auth_runtime_ports = services.product_auth_provider_runtime_ports();
 
     #[cfg(test)]
     let standalone_wasm_runtime_credential_provider_captured =
@@ -1457,6 +1459,8 @@ pub(super) async fn build_backend_production(
         in_memory_budget_event_sink,
         extension_registry: Arc::clone(&extension_registry),
         shared_extension_registry,
+        scoped_overlay,
+        product_auth_runtime_ports,
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         processes,
         thread_service,

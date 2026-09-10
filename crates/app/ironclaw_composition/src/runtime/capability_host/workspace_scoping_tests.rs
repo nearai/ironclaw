@@ -79,6 +79,7 @@ async fn invoke_workspace_tool_as(
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
         runtime: services.host_runtime.clone(),
         fallback_user_id: UserId::new("workspace-scoping-fallback").expect("user id"), // safety: test-only literal id.
         policy: Arc::new(

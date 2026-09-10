@@ -1063,13 +1063,13 @@ impl RebornHostBindings {
     }
 }
 
-struct ResolvedPostgresStorage {
-    connection: PostgresConnectionConfig,
+pub(crate) struct ResolvedPostgresStorage {
+    pub(crate) connection: PostgresConnectionConfig,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 }
 
-fn resolve_postgres_storage_from_config_and_env(
+pub(crate) fn resolve_postgres_storage_from_config_and_env(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> Result<ResolvedPostgresStorage, RebornBuildError> {

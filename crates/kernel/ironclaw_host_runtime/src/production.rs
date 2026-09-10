@@ -27,7 +27,9 @@ use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityObligationHandler, CapabilitySpawnRequest,
     CapabilitySpawnResult,
 };
-use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{
+    ExtensionRegistry, OverlayScope, ScopedPackageOverlay, SharedExtensionRegistry,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::capability::{CapabilityDescriptor, PROCESS_SANDBOX_CAPABILITY_ID};
 use ironclaw_host_api::{
@@ -115,6 +117,7 @@ use crate::{
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
     registry: Arc<SharedExtensionRegistry>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -184,6 +187,29 @@ impl DefaultHostRuntime {
         )
     }
 
+    /// Attach the per-user discovered-package overlay (P2b): per-invocation
+    /// capability resolution then merges the request user's discovered
+    /// hosted-MCP surface over the global registry.
+    pub fn with_scoped_overlay(mut self, overlay: Arc<ScopedPackageOverlay>) -> Self {
+        self.scoped_overlay = Some(overlay);
+        self
+    }
+
+    fn scoped_snapshot(
+        &self,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
+        user_id: &ironclaw_host_api::ids::UserId,
+        thread_id: Option<&ironclaw_host_api::ids::ThreadId>,
+    ) -> Arc<ExtensionRegistry> {
+        match &self.scoped_overlay {
+            Some(overlay) => overlay.merged_snapshot(
+                &OverlayScope::new(tenant_id.clone(), user_id.clone(), thread_id.cloned()),
+                self.registry.snapshot(),
+            ),
+            None => self.registry.snapshot(),
+        }
+    }
+
     pub fn from_shared_registry(
         registry: Arc<SharedExtensionRegistry>,
         dispatcher: Arc<dyn CapabilityDispatcher>,
@@ -193,6 +219,7 @@ impl DefaultHostRuntime {
     ) -> Self {
         Self {
             registry,
+            scoped_overlay: None,
             dispatcher,
             authorizer,
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
@@ -393,7 +420,11 @@ impl HostRuntime for DefaultHostRuntime {
         let invocation_id = context.invocation_id;
         let total_started_at = live_latency_started_at();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(
+            &context.resource_scope.tenant_id,
+            &context.resource_scope.user_id,
+            context.resource_scope.thread_id.as_ref(),
+        );
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
@@ -492,7 +523,11 @@ impl HostRuntime for DefaultHostRuntime {
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(
+            &context.resource_scope.tenant_id,
+            &context.resource_scope.user_id,
+            context.resource_scope.thread_id.as_ref(),
+        );
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
@@ -560,7 +595,14 @@ impl HostRuntime for DefaultHostRuntime {
         // Trust classification runs inside the kernel's `authorize_resumed` fold,
         // which fails the blocked run on a trust rejection (replacing the former
         // host_runtime pre-authorization + `context.trust` stamp).
-        let registry = self.registry.snapshot();
+        // Per-(tenant, user, thread) discovered-package view, so a resumed
+        // invocation resolves against the caller's own hosted-MCP catalog
+        // rather than a globally clobbered one (P2b, #6778).
+        let registry = self.scoped_snapshot(
+            &context.resource_scope.tenant_id,
+            &context.resource_scope.user_id,
+            context.resource_scope.thread_id.as_ref(),
+        );
         // `context` is moved into `resume_json` below, so `resource_scope` must be
         // cloned out first. The response processor uses it if a dispatch failure
         // also needs to transition this resumed invocation to a terminal state.
@@ -617,7 +659,14 @@ impl HostRuntime for DefaultHostRuntime {
         // credential gate, and a trust rejection fails the blocked run there —
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
-        let registry = self.registry.snapshot();
+        // Per-(tenant, user, thread) discovered-package view, so a resumed
+        // invocation resolves against the caller's own hosted-MCP catalog
+        // rather than a globally clobbered one (P2b, #6778).
+        let registry = self.scoped_snapshot(
+            &context.resource_scope.tenant_id,
+            &context.resource_scope.user_id,
+            context.resource_scope.thread_id.as_ref(),
+        );
         // Same clone-before-move as `resume_capability` above: `context` is
         // consumed by `auth_resume_json`, while the response processor uses the
         // scope if a dispatch failure must transition this resumed invocation.
@@ -713,7 +762,14 @@ impl HostRuntime for DefaultHostRuntime {
         // `resume_spawn_json` fold, which fails the blocked run on rejection —
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
-        let registry = self.registry.snapshot();
+        // Per-(tenant, user, thread) discovered-package view, so a resumed
+        // invocation resolves against the caller's own hosted-MCP catalog
+        // rather than a globally clobbered one (P2b, #6778).
+        let registry = self.scoped_snapshot(
+            &context.resource_scope.tenant_id,
+            &context.resource_scope.user_id,
+            context.resource_scope.thread_id.as_ref(),
+        );
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -756,7 +812,11 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(
+            &request.context.tenant_id,
+            &request.context.user_id,
+            request.context.thread_id.as_ref(),
+        );
         let catalog = CapabilityCatalog::new(
             &registry,
             self.authorizer.as_ref(),

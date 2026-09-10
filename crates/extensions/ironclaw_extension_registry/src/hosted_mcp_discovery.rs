@@ -1,4 +1,5 @@
 use ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredTool;
+use crate::resolved::PackageRootBinding;
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     action::{NetworkScheme, NetworkTargetPattern},
@@ -76,6 +77,74 @@ pub fn package_with_discovered_hosted_mcp_tools(
         _ => Err(invalid_hosted_mcp_manifest(
             "hosted MCP discovery requires bundled or user-registered provenance".to_string(),
         )),
+    }
+}
+
+/// Merge a freshly discovered hosted-MCP package with the currently published
+/// package for the same extension.
+///
+/// The marketplace serves a different `tools/list` catalog per authenticated
+/// principal, but the active registry keys one package per extension id
+/// (#6778): publishing one principal's discovery verbatim evicts every other
+/// principal's tools — a worker activation would remove the concierge's
+/// catalog and strand its in-flight tool calls. Until catalogs are keyed
+/// per user, publication keeps a superset: fresh discovery wins per
+/// capability id, and published capabilities the fresh catalog did not
+/// return are carried over (both the manifest declaration and its
+/// descriptor, so package consistency validation still holds).
+pub fn merge_discovered_hosted_mcp_package(
+    discovered: &ExtensionPackage,
+    published: &ExtensionPackage,
+) -> Result<ExtensionPackage, ExtensionError> {
+    if published.id != discovered.id {
+        return Err(invalid_hosted_mcp_manifest(format!(
+            "cannot merge discovered package {} with published package {}",
+            discovered.id, published.id
+        )));
+    }
+    let mut manifest = discovered.manifest.clone();
+    let mut capabilities = discovered.capabilities.clone();
+    for declared in &published.manifest.capabilities {
+        if manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id == declared.id)
+        {
+            continue;
+        }
+        let Some(descriptor) = published
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id == declared.id)
+        else {
+            // A published package always carries a descriptor per manifest
+            // declaration; a missing one means the published record is not a
+            // validated package, so skip the row rather than fail activation.
+            continue;
+        };
+        manifest.capabilities.push(declared.clone());
+        capabilities.push(descriptor.clone());
+    }
+    // The merged package keeps the discovered package's root binding; a
+    // remote-only (virtual-rooted) catalog has no materialized root to carry.
+    match &discovered.root_binding {
+        PackageRootBinding::Materialized(root) => {
+            ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+                manifest,
+                root.clone(),
+                discovered.manifest_digest(),
+                capabilities,
+            )
+        }
+        // A remote-only (or not-yet-materialized) catalog has no package tree
+        // to carry into the merge.
+        PackageRootBinding::Virtual | PackageRootBinding::FabricateOnLoad => {
+            ExtensionPackage::from_virtual_manifest(
+                manifest,
+                discovered.manifest_digest(),
+                capabilities,
+            )
+        }
     }
 }
 
@@ -196,6 +265,39 @@ fn discovered_capability_manifest(
         effects.push(EffectKind::ExternalWrite);
     }
 
+    // A HOST-BUNDLED manifest may pre-declare known tools of its server (the
+    // static fallback catalog). Those declarations went through the same
+    // review as the rest of the manifest, so a discovered tool with a
+    // matching capability id ADOPTS its declared effects and permission —
+    // e.g. a marketplace hire tool keeps its `financial` marking (and the
+    // hard approval floor keyed on it) when the live catalog replaces the
+    // static one, and an `allow` declared for autonomous read tools survives
+    // discovery. Unknown discovered tools keep the conservative derived
+    // effects + Ask. Only MODEL-visible declarations participate: a
+    // host-internal row (the synthesized `<id>.mcp_server` connection
+    // template) is host plumbing, and a server returning a tool named after
+    // it must not inherit that row's permissions.
+    let declared = package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .find(|capability| capability.id == capability_id);
+    let (effects, default_permission) = match declared {
+        Some(capability) => {
+            // Union with the derived set: the manifest may add (financial),
+            // never hide what the connection mechanically does.
+            let mut merged = effects;
+            for effect in &capability.effects {
+                if !merged.contains(effect) {
+                    merged.push(*effect);
+                }
+            }
+            (merged, capability.default_permission)
+        }
+        None => (effects, PermissionMode::Ask),
+    };
+
     Ok(CapabilityManifest {
         id: capability_id,
         description: if tool.description.trim().is_empty() {
@@ -204,7 +306,7 @@ fn discovered_capability_manifest(
             tool.description.clone()
         },
         effects,
-        default_permission: PermissionMode::Ask,
+        default_permission,
         visibility: CapabilityVisibility::Model,
         // Discovered MCP tools are never a `standard_op` binding — that is
         // static `[[tools]]` vocabulary validated at manifest parse time;
@@ -395,6 +497,201 @@ runtime_credentials = [
                 port: None,
             }]
         );
+    }
+
+    /// A discovered tool whose id matches a manifest-declared static tool
+    /// adopts that declaration's effects (unioned with the derived set) and
+    /// default_permission — the reviewed manifest keeps authority over known
+    /// tools across discovery. Unknown discovered tools stay conservative
+    /// (derived effects + Ask).
+    #[test]
+    fn discovered_tool_adopts_matching_manifest_declaration() {
+        let mut package = notion_package();
+        // Declare notion.notion-buy as a known static tool with financial +
+        // allow — the shape a marketplace hire tool ships with.
+        let mut declared = package.manifest.capabilities[0].clone();
+        declared.id = ironclaw_host_api::ids::CapabilityId::new("notion.notion-buy").unwrap();
+        declared.effects = vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+            EffectKind::Financial,
+        ];
+        declared.default_permission = ironclaw_host_api::capability::PermissionMode::Allow;
+        package.manifest.capabilities.push(declared);
+
+        let tools = vec![
+            HostedMcpDiscoveredTool {
+                name: "notion-buy".to_string(),
+                description: "Spends money".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: HostedMcpDiscoveredToolAnnotations::default(),
+            },
+            HostedMcpDiscoveredTool {
+                name: "notion-unknown".to_string(),
+                description: "Not declared anywhere".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: HostedMcpDiscoveredToolAnnotations::default(),
+            },
+        ];
+        let discovered = package_with_discovered_hosted_mcp_tools(&package, &tools)
+            .expect("build discovered package");
+
+        let buy = discovered
+            .capabilities
+            .iter()
+            .find(|c| c.id.as_str() == "notion.notion-buy")
+            .expect("declared tool discovered");
+        assert!(buy.effects.contains(&EffectKind::Financial), "declared financial survives discovery");
+        assert_eq!(buy.default_permission, ironclaw_host_api::capability::PermissionMode::Allow);
+
+        let unknown = discovered
+            .capabilities
+            .iter()
+            .find(|c| c.id.as_str() == "notion.notion-unknown")
+            .expect("unknown tool discovered");
+        assert!(!unknown.effects.contains(&EffectKind::Financial));
+        assert_eq!(unknown.default_permission, ironclaw_host_api::capability::PermissionMode::Ask, "unknown discovered tools stay Ask");
+    }
+
+    /// A host-internal manifest row (the synthesized `<id>.mcp_server`
+    /// connection template) is host plumbing, not a reviewed tool grant: a
+    /// server returning a tool with the matching name must NOT adopt its
+    /// declaration — it stays on derived effects + Ask.
+    #[test]
+    fn discovered_tool_does_not_adopt_host_internal_declarations() {
+        let template_id = "notion.mcp_server";
+        let mut package = notion_package();
+        let mut template = package.manifest.capabilities[0].clone();
+        template.id = ironclaw_host_api::ids::CapabilityId::new(template_id).unwrap();
+        template.visibility = CapabilityVisibility::HostInternal;
+        template.default_permission = ironclaw_host_api::capability::PermissionMode::Allow;
+        package.manifest.capabilities.push(template);
+
+        let tools = vec![HostedMcpDiscoveredTool {
+            // Derived from the template so the collision cannot drift.
+            name: template_id
+                .rsplit('.')
+                .next()
+                .expect("template id has a suffix")
+                .to_string(),
+            description: "Tool named after the connection template".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: HostedMcpDiscoveredToolAnnotations::default(),
+        }];
+        let discovered = package_with_discovered_hosted_mcp_tools(&package, &tools)
+            .expect("build discovered package");
+
+        let shadowed = discovered
+            .capabilities
+            .iter()
+            .find(|c| c.id.as_str() == template_id)
+            .expect("tool discovered");
+        assert_eq!(
+            shadowed.default_permission,
+            ironclaw_host_api::capability::PermissionMode::Ask,
+            "a host-internal declaration must not hand its permission to a discovered tool"
+        );
+    }
+
+    fn discovered_tool(name: &str, description: &str) -> HostedMcpDiscoveredTool {
+        HostedMcpDiscoveredTool {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: HostedMcpDiscoveredToolAnnotations::default(),
+        }
+    }
+
+    /// One principal's discovery must not evict another principal's published
+    /// tools (#6778): the merged package is fresh-wins-per-id superset.
+    #[test]
+    fn merged_discovery_keeps_other_principals_catalog() {
+        let package = notion_package();
+        let concierge = package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[discovered_tool("notion-hire", "Hire an agent")],
+        )
+        .expect("concierge discovery");
+        let worker = package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[discovered_tool("notion-deliver", "Submit a deliverable")],
+        )
+        .expect("worker discovery");
+
+        let merged =
+            merge_discovered_hosted_mcp_package(&worker, &concierge).expect("merged package");
+
+        for id in ["notion.notion-deliver", "notion.notion-hire"] {
+            assert!(
+                merged
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id.as_str() == id),
+                "merged package must keep {id}"
+            );
+        }
+        assert_eq!(merged.manifest.capabilities.len(), 2);
+        assert_eq!(merged.capabilities.len(), 2);
+    }
+
+    #[test]
+    fn merged_discovery_prefers_fresh_tool_over_published() {
+        let package = notion_package();
+        let stale = package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[discovered_tool("notion-search", "Stale description")],
+        )
+        .expect("stale discovery");
+        let fresh = package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[discovered_tool("notion-search", "Fresh description")],
+        )
+        .expect("fresh discovery");
+
+        let merged = merge_discovered_hosted_mcp_package(&fresh, &stale).expect("merged package");
+
+        assert_eq!(merged.capabilities.len(), 1);
+        assert_eq!(merged.capabilities[0].description, "Fresh description");
+    }
+
+    /// Merging against the published static-fallback package (pre-discovery
+    /// state after a restart) keeps the reviewed static catalog alive for the
+    /// principals that still rely on it.
+    #[test]
+    fn merged_discovery_keeps_static_fallback_from_published_base() {
+        let base = notion_package();
+        let worker = package_with_discovered_hosted_mcp_tools(
+            &base,
+            &[discovered_tool("notion-deliver", "Submit a deliverable")],
+        )
+        .expect("worker discovery");
+
+        let merged = merge_discovered_hosted_mcp_package(&worker, &base).expect("merged package");
+
+        for id in ["notion.notion-deliver", "notion.notion-fetch"] {
+            assert!(
+                merged
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id.as_str() == id),
+                "merged package must keep {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_discovery_rejects_mismatched_extension_ids() {
+        let package = notion_package();
+        let discovered = package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[discovered_tool("notion-search", "Search")],
+        )
+        .expect("discovery");
+        let mut foreign = package.clone();
+        foreign.id = ironclaw_host_api::ids::ExtensionId::new("other").expect("valid id");
+
+        assert!(merge_discovered_hosted_mcp_package(&discovered, &foreign).is_err());
     }
 
     #[test]

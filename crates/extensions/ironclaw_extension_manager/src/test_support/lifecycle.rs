@@ -496,6 +496,7 @@ async fn build_lifecycle_test_services_over_backing(
         host_services = host_services.with_mcp_runtime(Arc::new(hosted_http_mcp_runtime(
             shared_registry,
             runtime_http_egress,
+            None,
         )));
     }
     let runtime_ports = host_services.product_auth_provider_runtime_ports();

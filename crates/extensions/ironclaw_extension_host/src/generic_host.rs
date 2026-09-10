@@ -37,8 +37,8 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
 use ironclaw_extension_registry::{
-    ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
-    ExtensionPackage, ResolvedExtensionManifest,
+    CapabilityVisibility, ExtensionInstallationError, ExtensionInstallationStorePort,
+    ExtensionManifest, ExtensionPackage, ResolvedExtensionManifest,
 };
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_host_api::{dispatch::RuntimeDispatchErrorKind, ids::ExtensionId};
@@ -267,17 +267,24 @@ pub async fn build_generic_extension_host(
 }
 
 /// The effective contract an activation publishes: the persisted declaration
-/// with the tool set replaced by the package actually being published
+/// with the tool set taken from the package actually being published
 /// (identical for static manifests; the ceiling-validated discovered set for
 /// hosted MCP).
+///
+/// A hosted-MCP catalog is per-principal upstream while this record is the
+/// installation's ONE persisted catalog (#6778). Replacing the declared set
+/// with what a single caller happened to see therefore deletes every tool that
+/// caller is not entitled to — permanently, for every other member of the
+/// installation. So a discovery that runs against a manifest which DECLARES
+/// its tools merges instead: discovered entries win per capability id (they
+/// carry the live schema), declared-but-undiscovered entries survive, and
+/// discovered-only entries are appended. A manifest with no declared tools —
+/// the user-registered/virtual shape, whose catalog only ever comes from
+/// discovery — keeps the plain replace.
 pub fn effective_resolved_for_package(
     base: &ResolvedExtensionManifest,
     package: &ExtensionPackage,
 ) -> ResolvedExtensionManifest {
-    let mut resolved = ResolvedExtensionManifest {
-        tools: package.manifest.capabilities.clone(),
-        ..base.clone()
-    };
     // Discovered per-tool schemas must be persisted for both the virtual
     // (user-registered, remote-only) package shape and the materialized
     // host-bundled shape whose descriptors are inline-dynamic (hosted MCP
@@ -292,8 +299,20 @@ pub fn effective_resolved_for_package(
             ironclaw_extension_registry::PackageRootBinding::Materialized(_)
         ) && package.descriptor_schema_mode
             == ironclaw_extension_registry::CapabilityDescriptorSchemaMode::InlineDynamic);
+    let mut resolved = ResolvedExtensionManifest {
+        tools: merged_effective_tools(base, package, captures_dynamic_schemas),
+        ..base.clone()
+    };
+    let kept: std::collections::BTreeSet<String> = resolved
+        .tools
+        .iter()
+        .map(|tool| tool.id.as_str().to_string())
+        .collect();
     if captures_dynamic_schemas && let Some(mcp) = resolved.mcp.as_mut() {
-        mcp.dynamic_input_schemas = package
+        // Overlay onto the stored map rather than replacing it: a tool carried
+        // over from an earlier discovery keeps the schema that made carrying it
+        // safe. Entries for tools no longer in the catalog are pruned below.
+        let fresh: std::collections::BTreeMap<String, serde_json::Value> = package
             .capabilities
             .iter()
             .map(|descriptor| {
@@ -303,8 +322,74 @@ pub fn effective_resolved_for_package(
                 )
             })
             .collect();
+        mcp.dynamic_input_schemas.extend(fresh);
+        mcp.dynamic_input_schemas.retain(|id, _| kept.contains(id));
     }
     resolved
+}
+
+/// Tool set for [`effective_resolved_for_package`]: the published package's
+/// capabilities, widened by any capability the base declaration carries that
+/// this publication did not observe. Order follows the base declaration so a
+/// persisted catalog stays stable across discoveries.
+fn merged_effective_tools(
+    base: &ResolvedExtensionManifest,
+    package: &ExtensionPackage,
+    captures_dynamic_schemas: bool,
+) -> Vec<ironclaw_extension_registry::CapabilityDeclV2> {
+    let published = &package.manifest.capabilities;
+    if base.tools.is_empty() {
+        return published.clone();
+    }
+    // A carried-over tool must still have a schema, or rebuilding the package
+    // from this record fails closed and the extension stops activating at all.
+    // Where schemas are dynamic, that means the base already recorded one for
+    // it from an earlier discovery; a tool that has never been discovered is
+    // not invented here. Where they are not, the manifest's own `$ref`
+    // resolves and every declared tool is safe to carry.
+    let has_schema = |id: &ironclaw_host_api::ids::CapabilityId| {
+        !captures_dynamic_schemas
+            || base
+                .mcp
+                .as_ref()
+                .is_some_and(|mcp| mcp.dynamic_input_schemas.contains_key(id.as_str()))
+    };
+    let mut merged: Vec<_> = base
+        .tools
+        .iter()
+        .filter_map(|declared| {
+            match published.iter().find(|fresh| fresh.id == declared.id) {
+                // Discovered this time: the fresh entry carries the live
+                // schema and wins.
+                Some(fresh) => Some(fresh.clone()),
+                // Not discovered by this caller. Carry a real tool over, but
+                // never the `[mcp]` discovery template: it is HostInternal,
+                // it is not a callable tool, and the published package
+                // legitimately drops it once discovery has run.
+                None => (declared.visibility == CapabilityVisibility::Model
+                    && has_schema(&declared.id))
+                .then(|| declared.clone()),
+            }
+        })
+        .collect();
+    // `max_tools` bounds what a REMOTE server may inject into the surface, so
+    // it is spent on discovered-only entries. Declared tools are manifest
+    // authored and already counted against the ceiling at parse time, so they
+    // are never dropped to make room — the alternative silently deletes a
+    // capability the operator wrote down.
+    let room = base
+        .mcp
+        .as_ref()
+        .map(|mcp| (mcp.max_tools as usize).saturating_sub(merged.len()))
+        .unwrap_or(usize::MAX);
+    merged.extend(
+        published
+            .iter()
+            .filter(|fresh| !base.tools.iter().any(|declared| declared.id == fresh.id))
+            .take(room)
+            .cloned(),
+    );
+    merged
 }
 
 /// Loader over the host-runtime lanes and the binary-assembled native
@@ -1265,6 +1350,84 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
 "#,
             id = id,
         )
+    }
+
+    /// A hosted-MCP catalog is per-principal upstream, but the installation
+    /// persists ONE catalog (#6778). A discovery run by a caller who is only
+    /// entitled to a subset must therefore not delete the rest: the stand hit
+    /// exactly this, and an installation that declared nine marketplace tools
+    /// was permanently reduced to the single tool a worker credential could
+    /// see, for every user of that installation.
+    #[test]
+    fn a_partial_discovery_does_not_delete_the_declared_catalog() {
+        let id = "hosted-mcp-partial";
+        let toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "{id}"
+name = "Hosted MCP partial fixture"
+version = "0.1.0"
+description = "declares two tools; one caller only ever discovers one of them"
+trust = "first_party_requested"
+
+[mcp]
+server = "https://mcp.example.test/mcp"
+namespace = "{id}"
+max_tools = 8
+default_permission = "ask"
+effects = ["network"]
+
+[[tools]]
+id = "{id}.search"
+description = "Only some principals may call this"
+default_permission = "ask"
+input_schema_ref = "schemas/{id}/search.input.v1.json"
+
+[[tools]]
+id = "{id}.submit"
+description = "Every principal may call this"
+default_permission = "ask"
+input_schema_ref = "schemas/{id}/submit.input.v1.json"
+"#
+        );
+        let root = VirtualPath::new(format!("/system/extensions/{id}")).expect("test root");
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
+            toml,
+            ManifestSource::HostBundled,
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+            None,
+            &crate::product_extension_host_api_contract_registry().expect("test contracts"),
+            ironclaw_extension_registry::PackageRootBinding::Materialized(root.clone()),
+        )
+        .expect("fixture manifest resolves");
+        let base_resolved = record.resolved().clone();
+        // Plus the `[mcp]` template capability the v3 parser synthesizes.
+        assert_eq!(base_resolved.tools.len(), 3);
+
+        // The package this caller's discovery produced: only `submit`.
+        let mut narrowed = record.manifest().clone();
+        narrowed
+            .capabilities
+            .retain(|tool| tool.id.as_str().ends_with(".submit"));
+        let manifest = ironclaw_extension_registry::ExtensionManifest::try_from(narrowed)
+            .expect("narrowed manifest rebuilds");
+        let partial =
+            ExtensionPackage::from_manifest(manifest, root).expect("narrowed package constructs");
+        assert_eq!(partial.manifest.capabilities.len(), 1);
+
+        let effective = effective_resolved_for_package(&base_resolved, &partial);
+        let ids: Vec<_> = effective
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str().to_string())
+            .collect();
+        assert!(
+            ids.contains(&format!("{id}.search")) && ids.contains(&format!("{id}.submit")),
+            "a caller who cannot see `search` must not delete it from the installation: {ids:?}"
+        );
+        // The `[mcp]` template capability is HostInternal and is dropped once
+        // discovery has run, exactly as before this change.
+        assert_eq!(ids.len(), 2, "{ids:?}");
     }
 
     /// Regression test for the production incident: "The run failed while

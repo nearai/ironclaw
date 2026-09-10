@@ -1803,6 +1803,7 @@ mod tests {
         // `result_read` capability and confirm the two chunks concatenate
         // with no gap or overlap.
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -2179,6 +2180,7 @@ mod tests {
             .expect("finalized reference exists");
 
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -2822,6 +2824,7 @@ mod tests {
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
@@ -3104,6 +3107,7 @@ mod tests {
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
@@ -3188,6 +3192,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -3392,6 +3397,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -3788,6 +3794,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -4271,6 +4278,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -4427,6 +4435,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             ));
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
@@ -5127,6 +5136,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
@@ -5241,6 +5251,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -5490,6 +5501,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("standalone-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -5625,6 +5637,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            hosted_mcp_overlay_refresher: None,
             runtime,
             fallback_user_id: UserId::new("standalone-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,

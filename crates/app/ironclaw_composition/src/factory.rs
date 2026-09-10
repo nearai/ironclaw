@@ -359,6 +359,13 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
+    /// Per-user discovered hosted-MCP overlay (P2b), shared with the host
+    /// runtime's scoped capability-resolution paths.
+    pub(crate) scoped_overlay: Arc<ironclaw_extension_registry::ScopedPackageOverlay>,
+    /// Product-auth runtime ports (egress + one-shot secret/policy staging) for
+    /// turn-start hosted-MCP discovery (P2b). None when host egress is absent.
+    pub(crate) product_auth_runtime_ports:
+        Option<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,

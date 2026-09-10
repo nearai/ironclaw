@@ -111,6 +111,11 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     // avoid a same-name/different-concept collision, type-placement.md).
     // Same Bucket-3 domain-name class as its siblings.
     "HostedMcpEgressEndpoint",
+    // Turn-start refresher for per-caller hosted-MCP catalogs: it discovers a
+    // hosted MCP server's tools under the caller's own credential. Same
+    // Bucket-3 domain-name class as its siblings — "hosted MCP" names the
+    // server, not a deployment tier.
+    "HostedMcpOverlayRefresher",
     "HostedMcpPreparationDependencies",
     "HostedMcpPreparationService",
     "RegisterHostedMcpBody",

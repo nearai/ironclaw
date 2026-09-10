@@ -230,6 +230,34 @@ impl ActiveSnapshot {
         })
     }
 
+    /// Resolve a per-user DISCOVERED hosted-MCP tool id whose exact id is not
+    /// in the static `capability_owner` map. A hosted-MCP extension's
+    /// capability adapter is per-extension and derives the wire tool name from
+    /// the request's capability id, so any `<provider>.<tool>` of an active
+    /// hosted-MCP provider dispatches through that provider's one adapter.
+    /// Authorization (per-user grants) still gates which discovered ids are
+    /// allowed, and the server rejects tools the caller may not use, so
+    /// resolving broadly by provider is safe.
+    pub fn resolve_hosted_mcp_tool(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<ResolvedToolBinding> {
+        if self.capability_owner.contains_key(capability_id) {
+            return None;
+        }
+        let (provider, _tool) = capability_id.as_str().split_once('.')?;
+        let extension = self.extensions.get(provider)?;
+        if extension.resolved.runtime.kind() != ironclaw_host_api::runtime::RuntimeKind::Mcp {
+            return None;
+        }
+        let adapter = extension.extension.capability_adapter()?;
+        Some(ResolvedToolBinding {
+            adapter,
+            declaration: Arc::clone(&extension.resolved),
+            generation: self.generation,
+        })
+    }
+
     /// Resolve a prebound device-link adapter by extension id.
     ///
     /// Keyed on the extension rather than a capability id because a device-link
