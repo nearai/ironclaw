@@ -383,6 +383,144 @@ jobs:
         working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
         run: pnpm build-storybook
 
+  # The design-system reskin (#7781 WS3) restyles primitives and composites for
+  # reasons that are purely visual, and a diff of Tailwind class strings tells a
+  # reviewer nothing about what the screen now looks like. `build-storybook`
+  # above proves the catalog still COMPILES; nothing yet proves it still LOOKS
+  # right. This job publishes the built catalog to Chromatic from `main`, so the
+  # design system accumulates an accepted visual baseline and a rendered history
+  # of what each merge changed. It does NOT diff pull requests — see the
+  # SECURITY note below for why, and what it would take to add that back.
+  #
+  # Deliberately absent from the `code-style` roll-up `needs:` list below: this
+  # is the optional, non-blocking lane #7782 WS6 asks for, promoted to a
+  # required gate only once the baseline is proven stable. Keep it out of the
+  # roll-up until that decision is taken.
+  # SECURITY: this lane handles `CHROMATIC_PROJECT_TOKEN`, so it runs ONLY on
+  # trusted pushes to `main` — never on `pull_request`.
+  #
+  # The earlier shape gated on the secret being present and ran on PRs. That is
+  # unsafe: same-repository PR branches DO receive repository secrets, and the
+  # publish executes the PR's own `build-storybook` script. A contributor could
+  # edit that script, `.storybook/`, or any build-time module to read the token
+  # out of the environment and exfiltrate it. Skipping forks does not help,
+  # because the dangerous case is the same-repo branch. (#7831 review)
+  #
+  # The cost is that PRs get no visual diff — only `main` publishes baselines.
+  # Restoring per-PR diffing needs the untrusted-build/trusted-publish split:
+  # build the catalog in a secretless PR job, upload it as an artifact, and
+  # publish from a `workflow_run` job that never checks out PR code. That is
+  # follow-up work, deliberately not smuggled into this PR.
+  webui-v2-chromatic:
+    name: WebUI v2 Chromatic (visual baseline)
+    needs: changes
+    if: >-
+      needs.changes.outputs.has_code == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The probe runs FIRST, before checkout, so an unprovisioned repository
+      # pays nothing for this lane. It needs no working tree — it only asks
+      # whether the secret exists. Everything below is gated on its output.
+      # A `secrets` context is not available to a job-level `if:`, which is why
+      # this is a step-level probe rather than a condition on the job.
+      - name: Detect Chromatic project token
+        id: token
+        env:
+          CHROMATIC_PROJECT_TOKEN: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${CHROMATIC_PROJECT_TOKEN}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMATIC_PROJECT_TOKEN is unset — skipping the visual baseline publish."
+          fi
+      # Chromatic diffs each build against an ancestor build, so it needs real
+      # git history: under the depth-1 checkout every other job uses it cannot
+      # find a baseline commit and re-reports every story as new on every run.
+      - name: Checkout repository
+        if: steps.token.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Same crate-inventory resolution as webui-v2-js-lint above — the flat
+      # literal must not appear outside a comment (ws12_workflow_contracts.py
+      # ::validate_webui_frontend_sites), so the path is resolved once here and
+      # read back through ${{ env.* }} by every later step.
+      - name: Resolve WebUI frontend directory
+        if: steps.token.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          echo "WEBUI_FRONTEND_DIR=${webui_dir}/frontend" >> "$GITHUB_ENV"
+      - name: Enable pnpm
+        if: steps.token.outputs.enabled == 'true'
+        run: corepack enable pnpm
+      - name: Install Node.js
+        if: steps.token.outputs.enabled == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          # Twinned flat + nested lockfile lines, in the one shape
+          # ws12_workflow_contracts.py sanctions — see the same block in
+          # webui-v2-js-lint for why the pair must stay adjacent.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
+      - name: Install WebUI v2 frontend deps
+        if: steps.token.outputs.enabled == 'true'
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
+        run: pnpm install --frozen-lockfile
+      # The CLI rather than `chromaui/action`, for two reasons. GitHub resolves
+      # every `uses:` during "Set up job", BEFORE any step-level `if:` runs, so
+      # a third-party action here would have to be pinned and reachable even on
+      # the runs where the publish is skipped — an unresolvable pin would fail
+      # the job on every PR rather than skipping quietly. And `chromatic` cannot
+      # go in `package.json` without a lockfile entry, which would put a service
+      # dependency in the `--frozen-lockfile` install every other frontend job
+      # performs. A `pnpm dlx` inside a gated `run:` is genuinely inert when the
+      # gate is closed.
+      #
+      # The version is a repository VARIABLE, not a floating `@latest`: this
+      # repo pins its supply chain, and a visual-baseline tool that silently
+      # changes version changes the baseline with it.
+      - name: Publish Storybook to Chromatic
+        if: steps.token.outputs.enabled == 'true'
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
+        env:
+          CHROMATIC_PROJECT_TOKEN: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+          CHROMATIC_CLI_VERSION: ${{ vars.CHROMATIC_CLI_VERSION }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CHROMATIC_CLI_VERSION}" ]]; then
+            echo "::error::CHROMATIC_PROJECT_TOKEN is set but the CHROMATIC_CLI_VERSION repository variable is not. Pin an exact chromatic CLI version (for example 13.1.2) rather than floating on @latest — see the WebUI frontend README, Visual regression (Chromatic)."
+            exit 1
+          fi
+          # An EXACT version only. `latest`, `^13`, `~13.1`, `13.x` and ranges
+          # are all rejected: each would let the baseline tool change underneath
+          # the baseline, which is the failure this pin exists to prevent.
+          if [[ ! "${CHROMATIC_CLI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::CHROMATIC_CLI_VERSION must be an exact version like 13.1.2 — got '${CHROMATIC_CLI_VERSION}'. Ranges, tags and wildcards are rejected on purpose."
+            exit 1
+          fi
+          # --exit-zero-on-changes: a visual change is information, not a
+          #   failure. Showing the diff during a reskin is the whole point;
+          #   only a Chromatic error (broken build, unreachable service) fails.
+          # --auto-accept-changes main: `main` carries the accepted baseline.
+          # TurboSnap (--only-changed) deliberately left off for the initial
+          #   rollout: it needs a settled baseline and a trusted dependency
+          #   graph before it can be allowed to skip stories. Revisit once the
+          #   lane is promoted to a required gate.
+          pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}" \
+            --build-script-name build-storybook \
+            --exit-zero-on-changes \
+            --auto-accept-changes main
+
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: changes

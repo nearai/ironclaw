@@ -51,6 +51,7 @@ from ws12_workflow_contracts import (  # noqa: E402
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_production_lint_targets,
+    validate_chromatic_visual_lane,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -1898,8 +1899,12 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
 
     def test_every_site_was_actually_converted(self) -> None:
         """Sanity floor: the checked-in tree must contain the expected number
-        of sanctioned cache-dependency-path pairings (12) — a pin that passes
-        vacuously because nobody scanned anything is the defect being fixed."""
+        of sanctioned cache-dependency-path pairings (13) — a pin that passes
+        vacuously because nobody scanned anything is the defect being fixed.
+
+        Bumped 12 -> 13 when code_style.yml gained the `webui-v2-chromatic`
+        lane: it installs the frontend to publish the Storybook catalog, so it
+        carries its own twinned lockfile cache line."""
         flat_lockfile = f"{self.webui_dir}/frontend/pnpm-lock.yaml"
         pairs = 0
         for text in self.workflows.values():
@@ -1912,7 +1917,7 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
                 )
                 if following == WEBUI_NESTED_LOCKFILE_PATTERN:
                     pairs += 1
-        self.assertEqual(pairs, 12, "expected exactly 12 cache-dependency-path sites")
+        self.assertEqual(pairs, 13, "expected exactly 13 cache-dependency-path sites")
 
     def test_reintroducing_a_bare_cd_site_fails_loudly(self) -> None:
         """The exact pre-#7155 regression: a `cd` back to the flat literal."""
@@ -3207,6 +3212,222 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         )
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("fixed sequential loop" in error for error in errors), errors)
+
+
+class ChromaticVisualLane(unittest.TestCase):
+    """The Chromatic lane carries a repository secret, and its publish path has
+    never executed in CI — the only recorded evidence is the unset-secret skip.
+    A static contract is therefore the only thing standing between a future
+    edit and a leaked token, so each property is pinned by sabotaging the
+    checked-in workflow and proving the validator notices."""
+
+    def setUp(self) -> None:
+        self.workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.workflow = self.workflows[CODE_STYLE_WORKFLOW]
+
+    def sabotage(self, old: str, new: str) -> dict[str, str]:
+        self.assertIn(old, self.workflow)
+        mutated = dict(self.workflows)
+        mutated[CODE_STYLE_WORKFLOW] = self.workflow.replace(old, new, 1)
+        self.assertNotEqual(mutated[CODE_STYLE_WORKFLOW], self.workflow)
+        return mutated
+
+    def test_checked_in_lane_satisfies_the_contract(self) -> None:
+        self.assertEqual(validate_chromatic_visual_lane(self.workflow), [])
+
+    def test_running_on_pull_request_is_rejected(self) -> None:
+        """The core security property. Same-repository PR branches DO receive
+        repository secrets, and the publish runs the checked-out tree's own
+        `build-storybook` script — so a lane that triggers on `pull_request`
+        hands the token to PR-authored code."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n", ""
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("PR-authored build scripts" in error for error in errors), errors)
+
+    def test_an_alternate_pull_request_disjunct_is_rejected(self) -> None:
+        """`(push && main) || pull_request` contains every marker the gate looks
+        for and still hands the token to PR-authored build code. Substring
+        presence is not the contract; the absence of an alternate branch is."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main'",
+            "      (github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main') ||\n"
+            "      github.event_name == 'pull_request'",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("must not admit" in error for error in errors), errors)
+        self.assertTrue(any("pure conjunction" in error for error in errors), errors)
+
+    def test_dropping_the_main_branch_gate_is_rejected(self) -> None:
+        mutated = self.sabotage(
+            "      github.ref == 'refs/heads/main'", "      true"
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("refs/heads/main" in error for error in errors), errors)
+
+    def test_probing_the_token_after_checkout_is_rejected(self) -> None:
+        """Ordering is the whole point of the probe: a disabled lane must not
+        pay for a `fetch-depth: 0` clone before discovering it has nothing to
+        do."""
+        mutated = self.sabotage("        id: token\n", "        id: renamed-probe\n")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("token probe" in error for error in errors), errors)
+
+    def test_ungated_checkout_is_rejected(self) -> None:
+        mutated = self.sabotage(
+            "      - name: Checkout repository\n        if: steps.token.outputs.enabled == 'true'\n"
+            "        uses: actions/checkout",
+            "      - name: Checkout repository\n        uses: actions/checkout",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("not gated on the token probe" in error for error in errors), errors)
+
+    def test_floating_cli_version_is_rejected(self) -> None:
+        """A visual-baseline tool that silently changes version changes the
+        baseline with it, so the exact-version guard must stay."""
+        mutated = self.sabotage(
+            '          if [[ ! "${CHROMATIC_CLI_VERSION}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
+            '          if false; then',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exact-version regex" in error for error in errors), errors)
+
+    def test_failing_the_build_on_visual_changes_is_rejected(self) -> None:
+        mutated = self.sabotage("            --exit-zero-on-changes \\\n", "")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exit-zero-on-changes" in error for error in errors), errors)
+
+    def test_promoting_the_lane_into_the_rollup_is_rejected(self) -> None:
+        """Absence from the roll-up `needs:` list is the only thing making this
+        lane non-blocking; #7782 WS6 asks for it to stay that way until the
+        baseline is proven stable."""
+        mutated = self.sabotage(
+            "      - webui-v2-js-lint\n      - docs-publication-boundary\n",
+            "      - webui-v2-js-lint\n      - webui-v2-chromatic\n      - docs-publication-boundary\n",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("non-blocking" in error for error in errors), errors)
+
+    # The decoy family. Every check in this validator reads workflow text, so
+    # each one has to prove it reads the EXECUTABLE field rather than any
+    # comment or neighbouring command that happens to contain the marker.
+    # Two earlier versions of this validator failed exactly here.
+
+    def test_a_comment_naming_the_push_gate_cannot_satisfy_it(self) -> None:
+        """Swap the real trigger gate for a PR-friendly one while leaving a
+        comment that still mentions `github.event_name == 'push'`."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main'",
+            "      github.event_name == 'pull_request'",
+        )
+        # The surrounding block comment still says `pull_request` and `push`.
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("PR-authored build scripts" in error for error in errors), errors)
+
+    def test_an_inline_comment_decoy_in_the_condition_cannot_satisfy_the_gate(self) -> None:
+        """A trailing `#` comment carrying every required marker, on a condition
+        that actually runs on pull_request. Whole-line comment stripping alone
+        would have let this through with the token exposed."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main'",
+            "      github.event_name == 'pull_request'  "
+            "# github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("must not admit" in error for error in errors), errors)
+        self.assertTrue(
+            any("github.event_name == 'push'" in error for error in errors), errors
+        )
+
+    def test_a_comment_naming_the_exact_version_regex_cannot_satisfy_it(self) -> None:
+        mutated = self.sabotage(
+            '          if [[ ! "${CHROMATIC_CLI_VERSION}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
+            '          # was: =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$\n          if false; then',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exact-version regex" in error for error in errors), errors)
+
+    def test_shell_comments_after_operators_cannot_satisfy_the_contract(self) -> None:
+        """Bash starts a comment right after a control operator, so
+        `true;# --exit-zero-on-changes` never executes. A stripper that only
+        honours whitespace-preceded `#` would accept it as evidence."""
+        for decoy in ("true;# --exit-zero-on-changes", "true&&# --exit-zero-on-changes"):
+            with self.subTest(decoy=decoy):
+                mutated = self.sabotage(
+                    "            --exit-zero-on-changes \\\n", f"            {decoy}\n"
+                )
+                errors = validate_workflow_texts(mutated, ROOT)
+                self.assertTrue(
+                    any("exit-zero-on-changes" in error for error in errors), errors
+                )
+
+    def test_an_echo_decoy_cannot_stand_in_for_the_real_command(self) -> None:
+        """An `echo` carrying a perfect command satisfies a text search while the
+        line that actually runs floats the version and drops the flags."""
+        mutated = self.sabotage(
+            '          pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}" \\\n',
+            "          echo 'pnpm dlx \"chromatic@${CHROMATIC_CLI_VERSION}\" "
+            "--exit-zero-on-changes --auto-accept-changes main'\n"
+            '          pnpm dlx "chromatic@^13.1.2" \\\n',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("the validated variable" in error for error in errors), errors)
+
+    def test_a_literal_chromatic_spec_is_rejected(self) -> None:
+        """The runtime guard validates the VARIABLE. If `pnpm dlx` is then handed
+        a literal range the guard protects nothing, so the invocation has to
+        interpolate the validated variable."""
+        mutated = self.sabotage(
+            'pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}"',
+            'pnpm dlx "chromatic@^13.1.2"',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("the validated variable" in error for error in errors), errors)
+
+    def test_a_comment_naming_exit_zero_cannot_satisfy_it(self) -> None:
+        """The flag is named in the comment that explains it, one line above the
+        command — so a comment-inclusive scan passes on a lane that stopped
+        passing the flag. This is a real bug this suite already caught once."""
+        mutated = self.sabotage("            --exit-zero-on-changes \\\n", "")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exit-zero-on-changes" in error for error in errors), errors)
+
+    def test_dropping_the_accepted_baseline_flag_is_rejected(self) -> None:
+        """`main` is now the only branch that publishes, so it is the only place
+        the accepted baseline can advance. Without this flag every later build
+        diffs against a baseline frozen at the last manual acceptance."""
+        mutated = self.sabotage("            --auto-accept-changes main\n", "")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(
+            any("advances the accepted Chromatic baseline" in error for error in errors), errors
+        )
+
+    def test_a_decoy_in_another_step_cannot_satisfy_the_publish_step(self) -> None:
+        """Publish-step contracts must read the publish step. Deleting it while
+        another step carries the same markers must still fail."""
+        publish = ws12_workflow_contracts._step_slice(
+            job_body(self.workflow, "webui-v2-chromatic") or "", "Publish Storybook to Chromatic"
+        )
+        self.assertIsNotNone(publish)
+        decoy = (
+            "      - name: Decoy\n"
+            "        run: |\n"
+            "          echo CHROMATIC_CLI_VERSION ^[0-9]+\\.[0-9]+\\.[0-9]+$ --exit-zero-on-changes\n"
+        )
+        mutated = self.sabotage(publish or "", decoy)
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("lost its publish step" in error for error in errors), errors)
+
+    def test_removing_the_lane_entirely_is_rejected(self) -> None:
+        self.assertEqual(
+            validate_chromatic_visual_lane("jobs:\n  other:\n    name: x\n"),
+            [f"{CODE_STYLE_WORKFLOW}: missing the webui-v2-chromatic job"],
+        )
 
 
 if __name__ == "__main__":
