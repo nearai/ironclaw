@@ -136,6 +136,9 @@ pub struct ExtensionManifest {
     /// capability declarations on demand — see
     /// [`Self::capability_surfaces`].
     pub host_api_surfaces: Vec<CapabilitySurfaceDeclV2>,
+    /// Hosted-MCP caller attribution the provider opted into (v3 `[mcp]
+    /// attribution`); `None` = the host stamps nothing.
+    pub mcp_attribution: Option<McpAttribution>,
     /// Declarative hook entries the extension declared. Structurally
     /// validated by the v2 parser; projected into typed hook entries by the
     /// composition loader. Empty for the common no-hooks case.
@@ -182,6 +185,7 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
             capabilities: manifest.capabilities,
             host_api_surfaces: manifest.host_api_surfaces,
             hooks: manifest.hooks,
+            mcp_attribution: manifest.mcp_attribution,
         })
     }
 }
@@ -228,7 +232,8 @@ pub use v2::{
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
     HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
     MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
-    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX, RESERVED_MCP_ID_PREFIX,
+    ManifestSource, ManifestV2Error, McpAttribution, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    RESERVED_MCP_ID_PREFIX,
 };
 pub use v3::{MANIFEST_SCHEMA_VERSION_V3, ManifestV3Error};
 

@@ -2632,6 +2632,7 @@ fn host_http_plan() -> McpHostHttpEgressPlan {
         }],
         response_body_limit: Some(4096),
         timeout_ms: Some(2_500),
+        sep414_attribution: false,
     }
 }
 

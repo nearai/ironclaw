@@ -708,6 +708,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 origin_gate_matrix: None,
             }],
             hooks: Vec::new(),
+            mcp_attribution: None,
         },
         VirtualPath::new("/system/extensions/host").unwrap(),
     )

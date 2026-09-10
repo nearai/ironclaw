@@ -767,6 +767,36 @@ fn mcp_is_mutually_exclusive_with_runtime_and_channel() {
 /// template's credential/effect/host-port shape — a static tool declaring
 /// its own credentials, effects, or resource_profile is rejected.
 #[test]
+fn mcp_static_tool_network_effect_carries_the_http_egress_port() {
+    // A static tool may ADD effects on top of the connection template. Host
+    // ports were derived from the template, so a tool that adds `network` to a
+    // template without it got `EffectKind::Network` and no HTTP-egress port —
+    // network use that is not host-mediated.
+    let template_without_network = mcp_manifest().replace(
+        r#"effects = ["network", "use_secret"]"#,
+        r#"effects = ["use_secret"]"#,
+    );
+    let manifest = format!(
+        "{template_without_network}\n[[tools]]\nid = \"zeta.fetch\"\ndescription = \"Fetch over the network.\"\ndefault_permission = \"ask\"\neffects = [\"use_secret\", \"network\"]\ninput_schema_ref = \"schemas/zeta/fetch.input.v1.json\"\n"
+    );
+    let record = parse_v3(&manifest).expect("additive-network manifest parses");
+    let tool = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "zeta.fetch")
+        .expect("the static tool is emitted");
+    assert!(tool.effects.contains(&EffectKind::Network));
+    assert!(
+        tool.required_host_ports
+            .iter()
+            .any(|port| port.as_str() == HOST_RUNTIME_HTTP_EGRESS_PORT_ID),
+        "a tool declaring `network` must require host-mediated egress: {:?}",
+        tool.required_host_ports
+    );
+}
+
+#[test]
 fn mcp_static_tools_parse_and_inherit_the_connection_template() {
     let with_static_tool = format!(
         "{}\n[[tools]]\nid = \"zeta.search\"\ndescription = \"Search through Zeta.\"\ndefault_permission = \"ask\"\ninput_schema_ref = \"schemas/zeta/search.input.v1.json\"\n",
@@ -1777,4 +1807,48 @@ fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
         .expect("a descriptor without a standard_op key must still deserialize");
     assert_eq!(rehydrated_descriptor.standard_op, None);
     assert_eq!(rehydrated_descriptor.id, descriptor.id);
+}
+
+#[test]
+fn mcp_attribution_defaults_to_none() {
+    // A manifest that says nothing about attribution must never be stamped —
+    // the privacy default for every existing provider.
+    let record = parse_v3(&mcp_manifest()).expect("mcp manifest parses");
+    assert_eq!(record.manifest().mcp_attribution, None);
+}
+
+#[test]
+fn mcp_attribution_sep414_parses() {
+    let manifest = mcp_manifest().replace("[mcp]\n", "[mcp]\nattribution = \"sep414\"\n");
+    let record = parse_v3(&manifest).expect("attributed mcp manifest parses");
+    assert_eq!(
+        record.manifest().mcp_attribution,
+        Some(ironclaw_extension_registry::McpAttribution::Sep414)
+    );
+}
+
+#[test]
+fn mcp_attribution_survives_rehydration_from_the_persisted_record() {
+    // An installed extension is rebuilt from its persisted resolved record on
+    // every load, never by reparsing its TOML. If that path drops the opt-in,
+    // attribution works until the first restart and then silently stops.
+    let manifest = mcp_manifest().replace("[mcp]\n", "[mcp]\nattribution = \"sep414\"\n");
+    let record = parse_v3(&manifest).expect("attributed mcp manifest parses");
+    let rehydrated = ExtensionManifestRecord::from_resolved(
+        record.raw_toml(),
+        ManifestSource::HostBundled,
+        record.resolved().clone(),
+        None,
+    )
+    .expect("persisted record rehydrates");
+    assert_eq!(
+        rehydrated.manifest().mcp_attribution,
+        Some(ironclaw_extension_registry::McpAttribution::Sep414)
+    );
+}
+
+#[test]
+fn mcp_attribution_unknown_value_is_rejected() {
+    let manifest = mcp_manifest().replace("[mcp]\n", "[mcp]\nattribution = \"telemetry-v9\"\n");
+    parse_v3(&manifest).expect_err("unknown attribution value must not parse");
 }

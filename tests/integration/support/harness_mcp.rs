@@ -136,6 +136,7 @@ pub(super) fn mock_mcp_extension_package(
         host_apis: Vec::new(),
         host_api_surfaces: Vec::new(),
         hooks: Vec::new(),
+        mcp_attribution: None,
         capabilities: vec![CapabilityManifest {
             id: CapabilityId::new(capability_id)?,
             description: "Mock MCP capability".to_string(),

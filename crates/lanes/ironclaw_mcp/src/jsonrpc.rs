@@ -11,6 +11,7 @@ use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
 use ironclaw_host_api::{
     http::{RuntimeCredentialInjection, RuntimeCredentialSource},
     resource::ResourceUsage,
+    resource::ResourceScope,
 };
 use serde_json::Value;
 
@@ -195,6 +196,63 @@ pub(crate) fn protocol_version_from_initialize_response(
         ));
     }
     Ok(protocol_version.to_string())
+}
+
+/// Builds the SEP-414 `_meta` attribution block the host stamps on outbound
+/// MCP `tools/list` / `tools/call` — ONLY for providers whose manifest opted
+/// in via `[mcp] attribution = "sep414"` (the egress planner sets
+/// [`McpHostHttpEgressPlan::sep414_attribution`]); every other provider's
+/// wire shape is unchanged.
+///
+/// "SEP-414" refers to the Model Context Protocol spec-enhancement proposal
+/// for propagating caller context through the reserved `_meta` request field
+/// (modelcontextprotocol/modelcontextprotocol#414); the `io.ironclaw/*` keys
+/// follow `_meta`'s reverse-DNS naming rule, so servers that don't know them
+/// ignore the block entirely.
+///
+/// It is derived from the trusted turn [`ResourceScope`] and merged into
+/// `params` *after* argument serialization, so extension and model code can
+/// neither read nor forge it. Hosted providers (the marketplace connector
+/// endpoint) resolve the caller's dispatch/hire from `io.ironclaw/threadId` —
+/// never from tool arguments — which is what lets one stable per-user token
+/// serve concurrent jobs without cross-job data bleed. Absent a thread scope
+/// (non-threaded runtime) the key is omitted rather than sent empty.
+pub(crate) fn sep414_meta(scope: &ResourceScope) -> Value {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "io.ironclaw/userId".to_string(),
+        Value::String(scope.user_id.as_str().to_string()),
+    );
+    meta.insert(
+        "io.ironclaw/invocationId".to_string(),
+        Value::String(scope.invocation_id.to_string()),
+    );
+    if let Some(thread_id) = scope.thread_id.as_ref() {
+        meta.insert(
+            "io.ironclaw/threadId".to_string(),
+            Value::String(thread_id.as_str().to_string()),
+        );
+    }
+    Value::Object(meta)
+}
+
+/// Merge [`sep414_meta`] into an outbound `params` object, creating the object
+/// when the method carries no other params (e.g. `tools/list`, whose params are
+/// `None`). Both call sites (`call_tool`, `discover_tools`) pass either an
+/// object or `None`; a non-object value is preserved under `"params"` so a
+/// future caller cannot silently drop it.
+pub(crate) fn params_with_sep414_meta(params: Option<Value>, scope: &ResourceScope) -> Value {
+    let mut object = match params {
+        Some(Value::Object(map)) => map,
+        None => serde_json::Map::new(),
+        Some(other) => {
+            let mut map = serde_json::Map::new();
+            map.insert("params".to_string(), other);
+            map
+        }
+    };
+    object.insert("_meta".to_string(), sep414_meta(scope));
+    Value::Object(object)
 }
 
 pub(crate) fn encode_json_rpc_request(

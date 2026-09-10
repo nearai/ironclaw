@@ -312,6 +312,7 @@ mod tests {
                 ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::OAuth {
                     client_profile_id: None,
                 },
+            attribution: None,
         });
         let legacy_wire = serde_json::to_value(&manifest).expect("legacy manifest serializes");
         assert!(

@@ -113,6 +113,10 @@ pub struct McpHostHttpEgressPlan {
     pub credential_injections: Vec<RuntimeCredentialInjection>,
     pub response_body_limit: Option<u64>,
     pub timeout_ms: Option<u32>,
+    /// `true` only when the provider's manifest opted into SEP-414 caller
+    /// attribution (`[mcp] attribution = "sep414"`); the default plan stamps
+    /// nothing.
+    pub sep414_attribution: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

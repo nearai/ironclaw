@@ -47,7 +47,7 @@ use crate::resolved::{
 };
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
-    MAX_MANIFEST_BYTES, ManifestSource, RawCapabilityV2, RawRuntimeCredentialV2,
+    MAX_MANIFEST_BYTES, ManifestSource, McpAttribution, RawCapabilityV2, RawRuntimeCredentialV2,
     requested_trust_to_descriptor_trust,
 };
 
@@ -233,10 +233,21 @@ struct RawMcpV3 {
     effects: Vec<EffectKind>,
     #[serde(default)]
     credentials: Vec<RawMcpCredentialV3>,
+    /// Opt-in caller attribution on outbound tools/list + tools/call. Absent
+    /// (the default) means the host stamps nothing for this provider.
+    #[serde(default)]
+    attribution: Option<RawMcpAttributionV3>,
 }
 
 fn default_mcp_permission() -> PermissionMode {
     PermissionMode::Ask
+}
+
+/// Raw `[mcp] attribution` value.
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum RawMcpAttributionV3 {
+    #[serde(rename = "sep414")]
+    Sep414,
 }
 
 #[derive(Debug, Deserialize)]
@@ -600,7 +611,6 @@ pub(crate) fn parse_v3(
         let raw_capability = match (&mcp, &mcp_template_credentials) {
             (Some(mcp), Some(template_credentials)) => {
                 if !tool.credentials.is_empty()
-                    || !tool.effects.is_empty()
                     || tool.resource_profile.is_some()
                     || !tool.network_targets.is_empty()
                     || tool.max_egress_bytes.is_some()
@@ -609,19 +619,47 @@ pub(crate) fn parse_v3(
                     return Err(ManifestV3Error::Invalid {
                         reason: format!(
                             "static tool `{}` on an [mcp] manifest inherits the server \
-                             connection template; remove its credentials, effects, \
+                             connection template; remove its credentials, \
                              network_targets, max_egress_bytes, output_schema_ref, and \
                              resource_profile",
                             tool.id
                         ),
                     });
                 }
+                // A static tool may declare ADDITIVE effects on top of the
+                // connection template — e.g. a marketplace hire tool marks
+                // itself `financial` so the host's hard approval floor gates
+                // it, while sibling read tools stay at the template set. It
+                // must be a strict superset: dropping a template effect here
+                // would understate what every call through the shared
+                // connection can do.
+                if !tool.effects.is_empty() {
+                    if let Some(missing) = mcp
+                        .effects
+                        .iter()
+                        .find(|effect| !tool.effects.contains(effect))
+                    {
+                        return Err(ManifestV3Error::Invalid {
+                            reason: format!(
+                                "static tool `{}` narrows the [mcp] template effects \
+                                 (missing {missing:?}); per-tool effects may only ADD \
+                                 to the template",
+                                tool.id
+                            ),
+                        });
+                    }
+                }
+                let tool_effects = if tool.effects.is_empty() {
+                    mcp.effects.clone()
+                } else {
+                    tool.effects.clone()
+                };
                 RawCapabilityV2 {
                     id: tool.id,
                     network_targets: Vec::new(),
                     max_egress_bytes: None,
                     description: tool.description,
-                    effects: with_dispatch_effect(mcp.effects.clone()),
+                    effects: with_dispatch_effect(tool_effects.clone()),
                     default_permission: tool.default_permission,
                     visibility: tool.visibility,
                     // The guard above rejects standard operations on MCP
@@ -631,7 +669,12 @@ pub(crate) fn parse_v3(
                     input_schema_ref,
                     output_schema_ref: None,
                     prompt_doc_ref: tool.prompt_doc_ref,
-                    required_host_ports: derived_host_ports(&mcp.effects, true),
+                    // From the tool's EFFECTIVE effects, not the connection
+                    // template's: a tool that adds `network` on top of a
+                    // template without it would otherwise carry
+                    // `EffectKind::Network` and no HTTP-egress port, so its
+                    // egress would not be host-mediated.
+                    required_host_ports: derived_host_ports(&tool_effects, true),
                     runtime_credentials: template_credentials.clone(),
                     resource_profile: None,
                     origin_gate_matrix: mcp.origin_gate_matrix.clone(),
@@ -728,6 +771,9 @@ pub(crate) fn parse_v3(
         capabilities,
         host_api_surfaces,
         hooks: Vec::new(),
+        mcp_attribution: mcp.as_ref().and_then(|m| m.attribution).map(|a| match a {
+            RawMcpAttributionV3::Sep414 => McpAttribution::Sep414,
+        }),
     };
 
     let auth = recipes
@@ -774,6 +820,7 @@ pub(crate) fn parse_v3(
             dynamic_input_schemas: std::collections::BTreeMap::new(),
             registration_auth:
                 ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
+            attribution: manifest.mcp_attribution,
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,

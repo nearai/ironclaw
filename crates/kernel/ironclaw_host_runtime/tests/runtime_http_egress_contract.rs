@@ -2648,6 +2648,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
             credential_injections: vec![],
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
+            sep414_attribution: false,
         }),
     );
 
@@ -2719,6 +2720,7 @@ async fn mcp_http_client_reuses_staged_credential_for_json_rpc_session() {
             }],
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
+            sep414_attribution: false,
         }),
     );
 
@@ -2903,6 +2905,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
             }],
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
+            sep414_attribution: false,
         }),
     );
 
@@ -2977,6 +2980,7 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
             }],
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
+            sep414_attribution: false,
         }),
     );
 
