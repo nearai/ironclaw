@@ -453,6 +453,13 @@ export function ChatInput({
 
   const onKeyDown = React.useCallback(
     (e) => {
+      // Let the IME own its keys before command completion or Enter-to-send.
+      // Safari may clear isComposing before the confirming Enter keydown.
+      if (
+        e.nativeEvent?.isComposing ||
+        (e.key === "Enter" && e.nativeEvent?.keyCode === 229)
+      ) return;
+
       // Layer the command-menu's own keyboard handling before the
       // Enter-to-send path below, but only while the menu actually has
       // matches to navigate — read live refs (not the `menuVisible`/
