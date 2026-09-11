@@ -551,7 +551,9 @@ impl OpenAiResponsesWorkflow {
                     client_action_id: Some(format!("{}:cancel", response_id.as_str())),
                     thread_id: Some(thread_id.as_str().to_string()),
                     run_id: Some(run_ref.as_str().to_string()),
-                    reason: Some("cancelled by OpenAI-compatible Responses API".to_string()),
+                    // Must be a `ProductCancelReason` value: the product surface parses this
+                    // field and rejects anything outside that set, so free text 400s the route.
+                    reason: Some("user_requested".to_string()),
                 },
                 openai_product_activity_id(
                     "responses",
