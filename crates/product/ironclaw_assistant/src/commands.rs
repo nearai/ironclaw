@@ -368,6 +368,24 @@ fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseRe
             action: ProductModelCommand::Default,
         });
     }
+    if first == "set" {
+        let Some(model) = args.next() else {
+            return invalid_lifecycle_command("model set requires a model name");
+        };
+        if model.starts_with('-') {
+            return invalid_lifecycle_command(
+                "model set requires a model name; flags are only valid after `set-provider`",
+            );
+        }
+        if args.next().is_some() {
+            return invalid_lifecycle_command("model set accepts only a model name");
+        }
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::Set {
+                model: model.to_string(),
+            },
+        });
+    }
     match ModelCommandHead::parse(first)? {
         ModelCommandHead::SetProvider => {
             let Some(provider) = args.next() else {
