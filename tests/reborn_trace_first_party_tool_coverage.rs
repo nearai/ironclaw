@@ -114,6 +114,35 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
 
+const TRACE_COMMONS_TEST_CHILD: &str = "IRONCLAW_TRACE_COMMONS_TEST_CHILD";
+
+fn isolated_trace_commons_base_dir(test_name: &str) -> Option<std::path::PathBuf> {
+    if let (Some(marker), Some(base_dir)) = (
+        std::env::var_os(TRACE_COMMONS_TEST_CHILD),
+        std::env::var_os("IRONCLAW_BASE_DIR"),
+    ) && marker == base_dir
+    {
+        return Some(base_dir.into());
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(TRACE_COMMONS_TEST_CHILD, dir.path())
+        .env("IRONCLAW_BASE_DIR", dir.path())
+        .output()
+        .expect("run isolated Trace Commons test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated Trace Commons test did not run exactly one test\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // ponytail: a child process isolates the existing env-based API; inject a
+    // base path into the capability harness if production gains that seam.
+    None
+}
+
 fn host_runtime_tool_wait() -> HarnessWaitConfig {
     HarnessWaitConfig {
         timeout: Duration::from_secs(10),
@@ -592,6 +621,16 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_trace_commons_first_party_tools_parity() {
+    let Some(base_dir) =
+        isolated_trace_commons_base_dir("reborn_trace_trace_commons_first_party_tools_parity")
+    else {
+        return;
+    };
+    assert_eq!(
+        ironclaw_common::paths::ironclaw_base_dir(),
+        base_dir,
+        "Trace Commons coverage must not read developer state"
+    );
     let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
     let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
     let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
@@ -765,6 +804,11 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_trace_commons_pilot_tools_are_model_visible() {
+    if isolated_trace_commons_base_dir("reborn_trace_trace_commons_pilot_tools_are_model_visible")
+        .is_none()
+    {
+        return;
+    }
     let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
     let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
     let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
