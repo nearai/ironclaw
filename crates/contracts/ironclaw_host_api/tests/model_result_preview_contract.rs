@@ -9,15 +9,21 @@ fn redacts_nested_and_malformed_structured_credentials() {
         "content": format!(r#"1| {{"password":"{canary}"}}]"#),
     })
     .to_string();
+    let reversed_delimiters = json!({
+        "marker": "safe-context",
+        "content": "] api key {",
+    })
+    .to_string();
     let mut deeply_nested = json!({"password": canary});
     for _ in 0..20 {
         deeply_nested = json!([deeply_nested]);
     }
     let deep = json!({"marker": "safe-context", "content": deeply_nested.to_string()}).to_string();
 
-    for input in [malformed, deep] {
+    for input in [malformed, reversed_delimiters, deep] {
         let preview = ModelResultPreview::redacted(input).expect("preview is redacted");
         assert!(preview.as_str().contains("safe-context"));
+        assert!(preview.as_str().contains("[redacted]"));
         assert!(!preview.as_str().contains(canary));
     }
 }
