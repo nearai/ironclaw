@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture Explorer</title>
+<!--
+  DATA-DRIVEN ARCHITECTURE EXPLORER TEMPLATE
+  ==========================================
+  You only edit the JS data blocks near the bottom (marked ── FILL IN ──).
+  The engine renders the stack, inspector, status dots, progress cards, and
+  demolition ledger from that data — so there is NO HTML to hand-edit and no
+  tag-balance risk. Delete the sections you don't need by leaving their array
+  empty (SLICES = [] hides the progress section; DEMOLITION = [] hides the
+  ledger; if a design doc / PRs aren't in scope, an empty STATUS hides the
+  status dots and the diagram is a plain interactive map).
+
+  Self-contained: no external fonts, scripts, or network calls. Works offline.
+  Theme-aware: follows the OS theme; the ◐ button toggles and overrides it.
+-->
+<style>
+  :root {
+    --bg:#f4f5f7; --surface:#fff; --surface-2:#eceef2;
+    --ink:#16191f; --ink-soft:#4a515c; --ink-faint:#7c8590;
+    --line:#d9dde3; --line-strong:#c4cad2;
+    --accent:#a9631a; --accent-soft:#f3e6d4; --accent-line:#e0b783;   /* the ONE accent — the "core/kernel" hue */
+    --sub:#3a6ea5; --sub-soft:#e2ebf4;                                 /* secondary, for ports/interfaces (information, not decoration) */
+    --kept:#2f7d5b; --kept-soft:#dcefe5; --gone:#a03d3d; --gone-soft:#f2e0e0;  /* semantic: added/preserved vs removed */
+    --shadow:0 1px 2px rgba(20,25,31,.05),0 8px 28px rgba(20,25,31,.06);
+    --radius:10px;
+    --mono:ui-monospace,"SF Mono","SFMono-Regular","JetBrains Mono",Menlo,"Cascadia Mono",monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0e1116;--surface:#161a21;--surface-2:#1d222b;--ink:#e6e9ee;--ink-soft:#a8b0bc;--ink-faint:#6b7480;
+    --line:#262c36;--line-strong:#333b47;--accent:#d99a4e;--accent-soft:#2c2114;--accent-line:#5a441f;
+    --sub:#6ea3d8;--sub-soft:#16212e;--kept:#57b088;--kept-soft:#14261e;--gone:#cf6f6f;--gone-soft:#2a1717;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);}}
+  :root[data-theme="light"]{--bg:#f4f5f7;--surface:#fff;--surface-2:#eceef2;--ink:#16191f;--ink-soft:#4a515c;--ink-faint:#7c8590;--line:#d9dde3;--line-strong:#c4cad2;--accent:#a9631a;--accent-soft:#f3e6d4;--accent-line:#e0b783;--sub:#3a6ea5;--sub-soft:#e2ebf4;--kept:#2f7d5b;--kept-soft:#dcefe5;--gone:#a03d3d;--gone-soft:#f2e0e0;--shadow:0 1px 2px rgba(20,25,31,.05),0 8px 28px rgba(20,25,31,.06);}
+  :root[data-theme="dark"]{--bg:#0e1116;--surface:#161a21;--surface-2:#1d222b;--ink:#e6e9ee;--ink-soft:#a8b0bc;--ink-faint:#6b7480;--line:#262c36;--line-strong:#333b47;--accent:#d99a4e;--accent-soft:#2c2114;--accent-line:#5a441f;--sub:#6ea3d8;--sub-soft:#16212e;--kept:#57b088;--kept-soft:#14261e;--gone:#cf6f6f;--gone-soft:#2a1717;--shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);}
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1220px;margin:0 auto;padding:0 24px}
+  code,.mono{font-family:var(--mono)}
+  button{font:inherit;color:inherit}
+  a{color:var(--accent)}
+
+  .topbar{position:sticky;top:0;z-index:40;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  .topbar .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 24px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:600}
+  .brand .mk{width:26px;height:26px;border-radius:7px;background:linear-gradient(145deg,var(--accent),color-mix(in srgb,var(--accent) 60%,#000));display:grid;place-items:center;color:#fff;font-family:var(--mono);font-size:.72rem;font-weight:700}
+  .brand small{display:block;font-weight:400;font-size:.72rem;color:var(--ink-faint);font-family:var(--mono)}
+  .theme-btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:8px;padding:7px 12px;cursor:pointer;font-family:var(--mono);font-size:.76rem;color:var(--ink-soft)}
+  .theme-btn:hover{border-color:var(--accent-line);color:var(--ink)}
+
+  header.hero{padding:46px 0 26px}
+  .hero h1{font-size:clamp(1.9rem,4.4vw,3rem);line-height:1.05;letter-spacing:-.03em;margin:0 0 14px;font-weight:680;text-wrap:balance}
+  .hero h1 em{color:var(--accent);font-style:normal}
+  .hero p{color:var(--ink-soft);max-width:74ch;margin:0 0 10px;font-size:1.04rem}
+  .hint{display:inline-flex;align-items:center;gap:8px;margin-top:14px;font-family:var(--mono);font-size:.78rem;color:var(--accent);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:100px;padding:6px 14px}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:16px;font-family:var(--mono);font-size:.76rem;color:var(--ink-soft)}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .legend i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .legend .done{background:var(--kept)}.legend .wip{background:var(--accent)}.legend .planned{background:var(--ink-faint)}
+
+  .explorer{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:26px;align-items:start;padding-bottom:20px}
+  .band{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px}
+  .band+.band,.band+.rail,.rail+.band{margin-top:10px}
+  .band-label{font-family:var(--mono);font-size:.67rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:11px;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+  .band-label .role{text-transform:none;letter-spacing:.01em;font-size:.72rem;color:var(--ink-faint);font-weight:400}
+  .row{display:flex;flex-wrap:wrap;gap:8px}
+  .node{cursor:pointer;flex:1 1 auto;min-width:116px;text-align:center;font-family:var(--mono);font-size:.82rem;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;transition:border-color .14s,transform .08s;position:relative}
+  .node:hover{border-color:var(--accent-line);transform:translateY(-1px)}
+  .node:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .node.wide{flex:1 1 100%}
+  .node.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+  .node small{display:block;font-size:.64rem;color:var(--ink-faint);margin-top:2px;font-weight:400}
+  .rail{display:flex;align-items:center;gap:12px;margin:10px 2px}
+  .rail .l{flex:1;height:1px;background:repeating-linear-gradient(90deg,var(--sub) 0 6px,transparent 6px 12px);opacity:.5}
+  .rail .pill{cursor:pointer;font-family:var(--mono);font-size:.76rem;color:var(--sub);border:1px solid var(--sub);background:var(--sub-soft);border-radius:100px;padding:5px 14px;white-space:nowrap;font-weight:600;position:relative}
+  .rail .pill:hover{box-shadow:0 0 0 3px color-mix(in srgb,var(--sub) 16%,transparent)}
+  .rail .pill:focus-visible{outline:2px solid var(--sub);outline-offset:2px}
+  .kernel{border:1.5px solid var(--accent-line);background:linear-gradient(180deg,color-mix(in srgb,var(--accent-soft) 55%,var(--surface)),var(--surface) 62%)}
+  .kernel>.band-label{color:var(--accent);font-weight:700}
+  .kernel>.band-label .role{color:var(--accent);opacity:.82}
+  .krow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
+  .kcell{cursor:pointer;text-align:left;background:var(--surface);border:1px solid var(--accent-line);border-radius:8px;padding:12px 13px;transition:transform .08s,box-shadow .14s;position:relative}
+  .kcell:hover{transform:translateY(-1px);box-shadow:var(--shadow)}
+  .kcell:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .kcell.active{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+  .kcell h4{margin:0 0 4px;font-size:.8rem;font-family:var(--mono);color:var(--accent)}
+  .kcell p{margin:0;font-size:.76rem;color:var(--ink-soft);line-height:1.45}
+  .untrusted .band-label .role{color:var(--gone)}
+  .uflag{font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;color:var(--gone);border:1px solid var(--gone);border-radius:5px;padding:2px 6px}
+  .strip{cursor:pointer;margin-top:10px;display:flex;gap:12px;align-items:center;border:1px dashed var(--line-strong);border-radius:var(--radius);padding:12px 15px;background:var(--surface);transition:border-color .14s;position:relative;width:100%;text-align:left}
+  .strip:hover{border-color:var(--sub)}
+  .strip:focus-visible{outline:2px solid var(--sub);outline-offset:2px}
+  .strip .tw{font-family:var(--mono);font-size:.72rem;color:var(--sub);border:1px solid var(--sub);border-radius:6px;padding:4px 9px;white-space:nowrap;font-weight:600}
+  .strip p{margin:0;font-size:.82rem;color:var(--ink-soft)}
+
+  .sdot{position:absolute;top:6px;right:6px;width:9px;height:9px;border-radius:50%;border:1.5px solid var(--surface)}
+  .kcell .sdot{top:8px;right:8px}
+  .sdot.done{background:var(--kept)}.sdot.wip{background:var(--accent)}.sdot.planned{background:var(--ink-faint)}
+
+  .inspector{position:sticky;top:78px;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;min-height:420px}
+  .insp-head{padding:16px 18px 14px;border-bottom:1px solid var(--line)}
+  .insp-kind{font-family:var(--mono);font-size:.64rem;letter-spacing:.13em;text-transform:uppercase;font-weight:700}
+  .insp-title{font-size:1.18rem;letter-spacing:-.015em;margin:6px 0 4px;text-wrap:balance}
+  .insp-role{font-size:.86rem;color:var(--ink-soft);margin:0}
+  .insp-body{padding:6px 18px 20px}
+  .insp-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.78rem;font-family:var(--mono);padding:9px 11px;border-radius:8px;margin:2px 0 4px;border:1px solid var(--line)}
+  .insp-status.done{background:var(--kept-soft);color:var(--kept);border-color:var(--kept)}
+  .insp-status.wip{background:var(--accent-soft);color:var(--accent);border-color:var(--accent-line)}
+  .insp-status.planned{background:var(--surface-2);color:var(--ink-soft)}
+  .insp-status .prs{display:inline-flex;gap:5px;flex-wrap:wrap}
+  .insp-status .prs a{color:inherit;text-underline-offset:2px}
+  .insp-field{padding:13px 0 3px;border-top:1px solid var(--line)}
+  .insp-field:first-child{border-top:none}
+  .insp-field .k{font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;margin-bottom:6px}
+  .insp-field .v{font-size:.87rem;color:var(--ink)}
+  .insp-sig{font-family:var(--mono);font-size:.76rem;line-height:1.7;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:11px 13px;overflow-x:auto;white-space:pre}
+  .chips2{display:flex;flex-wrap:wrap;gap:6px}
+  .chip2{font-family:var(--mono);font-size:.73rem;color:var(--accent);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:6px;padding:3px 8px}
+  .chip2.sub{color:var(--sub);background:var(--sub-soft);border-color:var(--sub)}
+  .insp-note{font-size:.82rem;color:var(--ink-soft);border-left:3px solid var(--accent);padding-left:12px;margin:4px 0 0}
+  .insp-note.kept{border-color:var(--kept)}.insp-note.gone{border-color:var(--gone)}
+  .kind-kernel,.kind-capability{color:var(--accent)}.kind-substrate,.kind-interface{color:var(--sub)}.kind-product{color:var(--ink-soft)}.kind-lane{color:var(--gone)}
+  .insp-empty{padding:40px 22px;text-align:center;color:var(--ink-faint)}
+  .insp-empty .big{font-family:var(--mono);font-size:2.4rem;color:var(--accent);opacity:.5}
+  .insp-empty p{font-size:.88rem;margin:12px 0 0}
+
+  section.block{padding:44px 0;border-top:1px solid var(--line)}
+  .sec-num{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);letter-spacing:.08em;display:block;margin-bottom:10px}
+  h2{font-size:clamp(1.3rem,2.4vw,1.8rem);letter-spacing:-.015em;margin:0 0 8px;text-wrap:balance}
+  .lede{color:var(--ink-soft);max-width:76ch;font-size:1.02rem;margin:0 0 20px}
+  .lede strong{color:var(--ink)}
+
+  .prog-hero{display:flex;flex-wrap:wrap;gap:10px 26px;align-items:baseline;margin:4px 0 22px}
+  .prog-stat{font-family:var(--mono)}
+  .prog-stat b{font-size:1.7rem;color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .prog-stat span{display:block;font-size:.72rem;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+  .slices{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+  .slice{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:18px 19px;display:flex;flex-direction:column}
+  .slice.full{grid-column:1/-1}
+  .slice-hd{display:flex;align-items:center;gap:12px;margin-bottom:4px}
+  .slice-letter{font-family:var(--mono);font-weight:700;font-size:.8rem;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-line);flex:none}
+  .slice-hd h3{margin:0;font-size:1rem;letter-spacing:-.01em;flex:1}
+  .pill-status{font-family:var(--mono);font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;font-weight:700;padding:4px 9px;border-radius:100px;white-space:nowrap}
+  .pill-status.done{background:var(--kept-soft);color:var(--kept)}.pill-status.wip{background:var(--accent-soft);color:var(--accent)}.pill-status.planned{background:var(--surface-2);color:var(--ink-soft)}
+  .slice-sub{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);margin:0 0 12px}
+  .pips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px}
+  .pip{max-width:15px;height:15px;border-radius:4px;background:var(--surface-2);border:1px solid var(--line);flex:1 1 12px}
+  .pip.done{background:var(--kept);border-color:var(--kept)}.pip.wip{background:var(--accent);border-color:var(--accent-line)}.pip.planned{background:transparent}
+  .slice-meta{display:flex;flex-direction:column;gap:10px}
+  .metarow{font-size:.82rem;color:var(--ink-soft)}
+  .metarow .k{font-family:var(--mono);font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);display:block;margin-bottom:5px}
+  .prchips{display:flex;flex-wrap:wrap;gap:5px}
+  .pr{font-family:var(--mono);font-size:.72rem;text-decoration:none;padding:2px 7px;border-radius:5px;border:1px solid}
+  .pr.merged{color:var(--kept);border-color:var(--kept);background:var(--kept-soft)}
+  .pr.open{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .dod{font-size:.8rem;color:var(--ink-soft);border-left:3px solid var(--line-strong);padding-left:12px}
+  .dod b{color:var(--ink);font-weight:600}
+  .remain{font-family:var(--mono);font-size:.8rem;color:var(--gone);font-variant-numeric:tabular-nums}
+  .remain.zero{color:var(--kept)}
+
+  .demo-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);background:var(--surface)}
+  table.demo{width:100%;border-collapse:collapse;font-size:.88rem;min-width:720px}
+  table.demo th{text-align:left;font-family:var(--mono);font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);padding:11px 14px;border-bottom:1px solid var(--line);font-weight:600}
+  table.demo td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr.stage td{background:var(--surface-2);font-family:var(--mono);font-size:.7rem;letter-spacing:.07em;text-transform:uppercase;color:var(--accent);font-weight:700;padding:9px 14px}
+  tr.stage .st{font-size:.62rem;padding:2px 8px;border-radius:100px;margin-left:8px;font-weight:700}
+  tr.stage .st.done{background:var(--kept-soft);color:var(--kept)}tr.stage .st.wip{background:var(--accent-soft);color:var(--accent)}tr.stage .st.planned{background:var(--surface);color:var(--ink-soft);border:1px solid var(--line)}
+  .del{font-family:var(--mono);font-size:.82rem;color:var(--gone);line-height:1.55}
+  .del s{text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--gone) 55%,transparent);text-decoration-thickness:1.5px}
+  .del .sub{display:block;color:var(--ink-faint);font-size:.74rem;margin-top:2px}
+  .mag{font-family:var(--mono);font-size:.82rem;color:var(--ink);white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600}
+  .mag em{display:block;font-style:normal;font-weight:400;color:var(--ink-faint);font-size:.72rem;margin-top:2px;white-space:normal}
+  .becomes{font-family:var(--mono);font-size:.82rem;color:var(--kept)}
+  .gate{font-size:.79rem;color:var(--ink-soft)}
+  .gate code{font-family:var(--mono);font-size:.82em;background:var(--surface-2);padding:.04em .3em;border-radius:4px}
+  .principle{margin-top:16px;display:flex;gap:14px;align-items:flex-start;background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:var(--radius);padding:15px 17px}
+  .principle .arrow{font-family:var(--mono);color:var(--accent);font-weight:700;white-space:nowrap;font-size:.82rem;padding-top:1px}
+  .principle p{margin:0;font-size:.87rem;color:var(--ink)}
+  .principle b{color:var(--accent)}
+
+  footer{padding:40px 0 64px;border-top:1px solid var(--line);color:var(--ink-faint);font-size:.82rem}
+  footer .mono{color:var(--ink-soft)}
+
+  @media (max-width:900px){.explorer{grid-template-columns:1fr}.inspector{position:static;order:-1}.slices{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="topbar"><div class="wrap">
+  <div class="brand"><span class="mk" id="brandMk">AX</span><span id="brandName">Architecture Explorer<small id="brandSub"></small></span></div>
+  <button class="theme-btn" id="themeBtn" type="button">◐ theme</button>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <h1 id="heroTitle"></h1>
+  <p id="heroSub"></p>
+  <span class="hint"><span class="pulse"></span>Click any node, rail, or lifecycle step to inspect it — dots show status.</span>
+  <div class="legend" id="legend"></div>
+</div></header>
+
+<div class="wrap"><div class="explorer">
+  <div class="diagram" id="diagram"></div>
+  <aside class="inspector" id="inspector" aria-live="polite">
+    <div class="insp-empty" id="inspEmpty"><div class="big">{ }</div><p>Select a component to inspect its role, interface, types, and status.</p></div>
+    <div id="inspContent" hidden>
+      <div class="insp-head"><div class="insp-kind" id="iKind"></div><h3 class="insp-title" id="iTitle"></h3><p class="insp-role" id="iRole"></p></div>
+      <div class="insp-body" id="iBody"></div>
+    </div>
+  </aside>
+</div></div>
+
+<section class="block" id="progressSection" hidden><div class="wrap">
+  <span class="sec-num" id="progressNum">refactoring progress</span>
+  <h2 id="progressTitle">Where the work actually is</h2>
+  <p class="lede" id="progressLede"></p>
+  <div class="prog-hero" id="progStats"></div>
+  <div class="slices" id="slices"></div>
+</div></section>
+
+<section class="block" id="demoSection" hidden><div class="wrap">
+  <span class="sec-num">scope of cleaning · the demolition ledger</span>
+  <h2 id="demoTitle">What gets deleted, and at which stage</h2>
+  <p class="lede" id="demoLede"></p>
+  <div class="prog-hero" id="demoStats"></div>
+  <div class="demo-scroll"><table class="demo">
+    <thead><tr><th>Removed</th><th>Magnitude</th><th>Becomes</th><th>Deleted only once…</th></tr></thead>
+    <tbody id="demoBody"></tbody>
+  </table></div>
+  <div class="principle" id="demoPrinciple" hidden><span class="arrow">build → migrate → delete</span><p id="demoPrincipleText"></p></div>
+</div></section>
+
+<footer><div class="wrap"><p class="mono" id="footSrc"></p><p id="footNote" style="margin-top:8px;max-width:74ch"></p></div></footer>
+
+<script>
+"use strict";
+/* ════════════════════════════════════════════════════════════════════════
+   ── FILL IN ── everything below is data. The engine (bottom) renders it.
+   Populate from: (1) the code — crates/modules/traits become LAYERS + DATA;
+   (2) a design doc — its before→after + slices become STATUS/SLICES/DEMOLITION;
+   (3) PRs — merged/open PR numbers become STATUS.prs + SLICES chips.
+   Leave SLICES/DEMOLITION as [] to hide those sections. Leave STATUS as {} to
+   hide status dots (a plain code map with no refactor overlay).
+   ════════════════════════════════════════════════════════════════════════ */
+
+const META = {
+  brandInitials: "AX",
+  brandName: "Example System — Architecture Explorer",
+  brandSub: "current state · replace with your subject",
+  heroTitle: 'A one-line <em>thesis</em> for the architecture.',   // <em> renders as accent
+  heroSub: "One or two sentences: what this system is and the single idea the diagram encodes.",
+  repo: "owner/name",              // for PR links: https://github.com/owner/name/pull/N
+  asOf: "YYYY-MM-DD",
+  footSrc: "path/to/source-or-design-doc.md",
+  footNote: "What this diagram is and its provenance."
+};
+
+// LAYERS — top-to-bottom bands of the stack.
+//   type "band"  → a labeled band of nodes. variant: "kernel" (accent, cells) | "untrusted" (red flag) | undefined (plain).
+//   type "rail"  → a dashed interface line with a clickable pill (id → DATA/STATUS).
+//   type "strip" → a dashed full-width call-out (e.g. a config/deployment value).
+//   node: { id, label, sub? , wide? }   — id keys into DATA and STATUS.
+const LAYERS = [
+  { type:"band", name:"Products", role:"replaceable userland", nodes:[
+      {id:"cli", label:"CLI"}, {id:"web", label:"WebUI"} ] },
+  { type:"rail", id:"surface", text:"ProductSurface ▸ interface" },
+  { type:"band", name:"Kernel", role:"slow-moving core", variant:"kernel", nodes:[
+      {id:"coord", label:"Coordinator", sub:"durable state, recovery"},
+      {id:"mediation", label:"authorize() + dispatch()", sub:"all policy, one fold"} ] },
+  { type:"band", name:"Substrates", role:"mechanism behind ports", nodes:[
+      {id:"fs", label:"Filesystem"}, {id:"net", label:"Network"} ] },
+  { type:"strip", id:"config", tag:"DeploymentConfig", text:"A single data value selects each substrate's backend and policy width." }
+];
+
+// DATA — the inspector content for every id used above. Fields all optional except role.
+//   kind: Kernel | Substrate | Interface | Product | Lane | Capability  (drives the color)
+//   sig:  a code signature/snippet (monospace block).  types: chips.  note: {cls:''|'kept'|'gone', text}
+const DATA = {
+  cli:      { kind:"Product",   role:"Terminal UX over the product interface.", owns:"Parse/render, transport.", types:["CliAdapter"], changes:"the CLI UX changes" },
+  web:      { kind:"Product",   role:"Browser UX over the product interface.", owns:"Routes, SPA, delivery.", types:["WebAdapter"], changes:"the web UX changes" },
+  surface:  { kind:"Interface", role:"The only surface a product uses.", owns:"One door for all inbound.", sig:"trait ProductSurface {\n  submit(msg) -> RunId\n  events(from) -> Stream\n}", changes:"never for a feature", note:{cls:"kept", text:"A new feature adds a capability, not a method here."} },
+  coord:    { kind:"Kernel",    role:"Durable state, leases, recovery.", owns:"One active run per thread; terminal-on-expiry.", changes:"the recovery model changes" },
+  mediation:{ kind:"Kernel",    role:"All policy in one fold.", owns:"Trust, approval, reservation — one place.", sig:"fn authorize(inv) -> Result<Authorized, Blocked>\nfn dispatch(&Authorized, lane) -> Result<Outcome, Failure>", types:["Invocation","Authorized","Outcome"], changes:"the authority model changes", note:{cls:"kept", text:"dispatch takes &Authorized so authority can't be forged."} },
+  fs:       { kind:"Substrate", role:"Scoped storage behind one seam.", owns:"get/put/list/cas.", types:["RootFilesystem"], changes:"a backend is added" },
+  net:      { kind:"Substrate", role:"Egress mediation.", owns:"Every outbound decision.", changes:"never for a feature" },
+  config:   { kind:"Interface", role:"Selects backends + policy per target. It IS a value.", owns:"One value per policy axis.", sig:"struct DeploymentConfig { filesystem, network, ... }", changes:"a deployment target changes" }
+};
+
+// STATUS — OPTIONAL refactor overlay. Omit an id to leave it undotted. Leave {} to hide dots + legend.
+//   level: done (landed) | wip (in flight) | planned.  prs: PR numbers → linked chips.
+const STATUS = {
+  mediation: { level:"wip",     text:"fold being wired", prs:[] },
+  surface:   { level:"planned", text:"target interface", prs:[] },
+  fs:        { level:"done",    text:"seam already exists", prs:[] }
+};
+
+// SLICES — OPTIONAL progress cards (one per workstream). Leave [] to hide the whole section.
+//   pips: small squares, level done|wip|planned, title = tooltip. merged/open: PR numbers.
+const SLICES = [
+  { letter:"A", title:"Example slice", status:"wip", sub:"§ref · one-line scope",
+    pips:[{level:"done",title:"step 1"},{level:"done",title:"step 2"},{level:"wip",title:"step 3"},{level:"planned",title:"step 4"}],
+    merged:[/*1234*/], open:[/*1240*/], remaining:"N items left", remainingZero:false,
+    dod:"<b>Done when:</b> the ratchet/allowlist for this axis is empty." }
+];
+const PROGRESS = {
+  num:"progress · slices / ratchets", title:"Where the work actually is",
+  lede:"One paragraph: what has landed, what is in flight, how it is guarded.",
+  stats:[ {n:"0", label:"commits since proposal"}, {n:"0/0", label:"vocab merged"} ]
+};
+
+// DEMOLITION — OPTIONAL "what gets deleted, when" ledger. Leave [] to hide the section.
+//   Each stage: {stage, status, rows:[{removed, sub?, mag, magSub?, becomes, gate}]}. removed/becomes render mono.
+const DEMOLITION = [
+  { stage:"Stage 1 — example", status:"wip", rows:[
+    { removed:"OldThing", sub:"what it was", mag:"1,234 LOC", magSub:"+ N more", becomes:"NewThing", gate:"…its replacement covers the cases" }
+  ]}
+];
+const DEMO_META = {
+  lede:"The refactor is <strong>subtractive</strong>: describe what comes out and the build→migrate→delete order.",
+  stats:[ {n:"0", label:"LOC removed"} ],
+  principle:"Stand up the new vocabulary, migrate every caller, then delete the old wiring in one sweep — never before its replacement carries the load."
+};
+
+/* ════════════════════════════ ENGINE (do not edit to use) ════════════════════════════ */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const KIND_CLASS = {Kernel:"kind-kernel",Substrate:"kind-substrate",Interface:"kind-interface",Product:"kind-product",Lane:"kind-lane",Capability:"kind-capability"};
+const STATUS_LABEL = {done:"landed",wip:"in flight",planned:"planned"};
+const PR = `https://github.com/${META.repo}/pull/`;
+const hasStatus = Object.keys(STATUS).length > 0;
+
+// header / hero / footer
+$("brandMk").textContent = META.brandInitials;
+$("brandName").childNodes[0].textContent = META.brandName;
+$("brandSub").textContent = META.brandSub;
+$("heroTitle").innerHTML = META.heroTitle;
+$("heroSub").textContent = META.heroSub;
+$("footSrc").textContent = META.footSrc;
+$("footNote").textContent = META.footNote;
+document.title = META.brandName;
+if (hasStatus) $("legend").innerHTML =
+  '<span><i class="done"></i> landed</span><span><i class="wip"></i> in flight</span><span><i class="planned"></i> planned</span>' +
+  `<span style="color:var(--ink-faint)">status as of ${esc(META.asOf)}</span>`;
+
+// diagram
+function nodeHTML(n, kernel){
+  const sub = n.sub ? (kernel ? `<p>${esc(n.sub)}</p>` : `<small>${esc(n.sub)}</small>`) : "";
+  if (kernel) return `<button class="kcell" data-node="${n.id}"><h4>${esc(n.label)}</h4>${sub}</button>`;
+  return `<button class="node${n.wide?" wide":""}" data-node="${n.id}">${esc(n.label)}${sub}</button>`;
+}
+$("diagram").innerHTML = LAYERS.map(L => {
+  if (L.type === "rail")
+    return `<div class="rail"><span class="l"></span><button class="pill" data-node="${L.id}">${esc(L.text)}</button><span class="l"></span></div>`;
+  if (L.type === "strip")
+    return `<button class="strip" data-node="${L.id}"><span class="tw">${esc(L.tag)}</span><p>${esc(L.text)}</p></button>`;
+  const kernel = L.variant === "kernel";
+  const roleHTML = L.variant === "untrusted"
+    ? `<span class="role"><span class="uflag">untrusted</span> &nbsp;${esc(L.role||"")}</span>`
+    : `<span class="role">${esc(L.role||"")}</span>`;
+  const rows = `<div class="${kernel?"krow":"row"}">${L.nodes.map(n=>nodeHTML(n,kernel)).join("")}</div>`;
+  return `<div class="band ${L.variant||""}"><div class="band-label"><span>${esc(L.name)}</span>${roleHTML}</div>${rows}</div>`;
+}).join("");
+
+// inspector
+let current = null;
+function field(k,v){ return `<div class="insp-field"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+function render(id, el){
+  const d = DATA[id]; if(!d) return;
+  $("inspEmpty").hidden = true; $("inspContent").hidden = false;
+  $("iKind").textContent = d.kind || "Component";
+  $("iKind").className = "insp-kind " + (KIND_CLASS[d.kind]||"");
+  $("iTitle").textContent = (el && el.querySelector("h4")) ? el.querySelector("h4").textContent.trim() : (el ? el.textContent.replace(/\s+/g," ").trim() : id);
+  $("iRole").textContent = d.role || "";
+  let html = "";
+  const st = STATUS[id];
+  if (st){
+    const prs = (st.prs||[]).map(n=>`<a href="${PR}${n}" target="_blank" rel="noopener">#${n}</a>`).join(" ");
+    html += `<div class="insp-status ${st.level}">● ${STATUS_LABEL[st.level]}${st.text?" — "+esc(st.text):""}${prs?`<span class="prs">${prs}</span>`:""}</div>`;
+  }
+  if (d.owns) html += field("Owns", esc(d.owns));
+  if (d.sig)  html += field("Interface", `<div class="insp-sig">${esc(d.sig)}</div>`);
+  if (d.types && d.types.length){
+    const sub = d.kind==="Substrate"||d.kind==="Interface";
+    html += field("Types", `<div class="chips2">${d.types.map(t=>`<span class="chip2${sub?" sub":""}">${esc(t)}</span>`).join("")}</div>`);
+  }
+  if (d.changes) html += field("Changes when", esc(d.changes));
+  if (d.note && d.note.text) html += `<div class="insp-field"><p class="insp-note ${d.note.cls||""}">${esc(d.note.text)}</p></div>`;
+  $("iBody").innerHTML = html;
+}
+function clearActive(){ document.querySelectorAll(".active").forEach(e=>e.classList.remove("active")); }
+function selectNode(el){
+  const id = el.getAttribute("data-node"); if(!id) return;
+  if (current === el){ clearActive(); current=null; $("inspContent").hidden=true; $("inspEmpty").hidden=false; return; }
+  clearActive();
+  document.querySelectorAll(`[data-node="${id}"]`).forEach(e=>e.classList.add("active"));
+  current = el; render(id, el);
+  if (window.matchMedia && window.matchMedia("(max-width:900px)").matches) $("inspector").scrollIntoView({behavior:"smooth",block:"start"});
+}
+document.querySelectorAll("[data-node]").forEach(el => el.addEventListener("click", () => selectNode(el)));
+
+// status dots
+if (hasStatus) Object.keys(STATUS).forEach(id => {
+  document.querySelectorAll(`[data-node="${id}"]`).forEach(el => {
+    const dot = document.createElement("span");
+    dot.className = "sdot " + STATUS[id].level;
+    dot.title = STATUS_LABEL[STATUS[id].level];
+    el.appendChild(dot);
+  });
+});
+
+// progress section
+if (SLICES.length){
+  $("progressSection").hidden = false;
+  $("progressNum").textContent = PROGRESS.num;
+  $("progressTitle").textContent = PROGRESS.title;
+  $("progressLede").innerHTML = PROGRESS.lede;
+  $("progStats").innerHTML = (PROGRESS.stats||[]).map(s=>`<span class="prog-stat"><b>${esc(s.n)}</b><span>${esc(s.label)}</span></span>`).join("");
+  const prchips = (arr,cls)=>arr && arr.length ? `<div class="prchips">${arr.map(n=>`<a class="pr ${cls}" href="${PR}${n}">#${n}</a>`).join("")}</div>` : "";
+  $("slices").innerHTML = SLICES.map(s => `
+    <div class="slice${s.full?" full":""}">
+      <div class="slice-hd"><span class="slice-letter">${esc(s.letter)}</span><h3>${esc(s.title)}</h3><span class="pill-status ${s.status}">${STATUS_LABEL[s.status]||s.status}</span></div>
+      <p class="slice-sub">${esc(s.sub||"")}</p>
+      ${s.pips&&s.pips.length?`<div class="pips">${s.pips.map(p=>`<span class="pip ${p.level}" title="${esc(p.title||"")}"></span>`).join("")}</div>`:""}
+      <div class="slice-meta">
+        ${s.merged&&s.merged.length?`<div class="metarow"><span class="k">Merged</span>${prchips(s.merged,"merged")}</div>`:""}
+        ${s.open&&s.open.length?`<div class="metarow"><span class="k">Open</span>${prchips(s.open,"open")}</div>`:""}
+        ${s.remaining?`<div class="metarow"><span class="k">Remaining</span><span class="remain${s.remainingZero?" zero":""}">${esc(s.remaining)}</span></div>`:""}
+        ${s.dod?`<p class="dod">${s.dod}</p>`:""}
+      </div>
+    </div>`).join("");
+}
+
+// demolition ledger
+if (DEMOLITION.length){
+  $("demoSection").hidden = false;
+  $("demoLede").innerHTML = DEMO_META.lede || "";
+  $("demoStats").innerHTML = (DEMO_META.stats||[]).map(s=>`<span class="prog-stat"><b>${esc(s.n)}</b><span>${esc(s.label)}</span></span>`).join("");
+  $("demoBody").innerHTML = DEMOLITION.map(stg => {
+    const head = `<tr class="stage"><td colspan="4">${esc(stg.stage)}${stg.status?` <span class="st ${stg.status}">${STATUS_LABEL[stg.status]||stg.status}</span>`:""}</td></tr>`;
+    const rows = stg.rows.map(r => `<tr>
+      <td class="del"><s>${esc(r.removed)}</s>${r.sub?`<span class="sub">${esc(r.sub)}</span>`:""}</td>
+      <td class="mag">${esc(r.mag)}${r.magSub?`<em>${esc(r.magSub)}</em>`:""}</td>
+      <td class="becomes">${esc(r.becomes)}</td>
+      <td class="gate">${esc(r.gate)}</td></tr>`).join("");
+    return head + rows;
+  }).join("");
+  if (DEMO_META.principle){ $("demoPrinciple").hidden = false; $("demoPrincipleText").innerHTML = DEMO_META.principle; }
+}
+
+// theme toggle
+const root = document.documentElement;
+$("themeBtn").addEventListener("click", () => {
+  let cur = root.getAttribute("data-theme");
+  if (!cur) cur = (window.matchMedia && window.matchMedia("(prefers-color-scheme:dark)").matches) ? "dark" : "light";
+  root.setAttribute("data-theme", cur === "dark" ? "light" : "dark");
+});
+</script>
+</body>
+</html>
