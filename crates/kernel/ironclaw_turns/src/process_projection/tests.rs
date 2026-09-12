@@ -159,6 +159,66 @@ fn terminal_metadata_rewrite_preserves_activation_provenance() {
     );
 }
 
+/// State-derived rewrites deliberately omit lineage that belongs to the
+/// originally journaled process metadata.
+///
+/// This is the inverse of `terminal_metadata_rewrite_preserves_activation_provenance`:
+/// claimed/terminal metadata carries lineage forward, while rebuilding a
+/// process snapshot from `TurnRunState` must not invent lineage the state does
+/// not own.
+// arch-exempt: large_file, pair both halves of the process-projection lineage contract, plan #7760
+#[test]
+fn state_derived_metadata_rewrite_drops_original_lineage() {
+    let claimed = ClaimedTurnRun {
+        state: state_with_status(TurnStatus::Running),
+        resolved_run_profile: profile().resolved,
+        subagent_depth: 2,
+        spawn_tree_descendant_cap: Some(16),
+        subagent_activation_provenance: Some(ActivationProvenance::System),
+        runner_id: TurnRunnerId::new(),
+        lease_token: crate::TurnLeaseToken::new(),
+    };
+
+    let originally_journaled = ClaimedProcess::from(&claimed);
+    assert_eq!(
+        originally_journaled.state.metadata["agent_turn"]["subagent_depth"],
+        json!(2)
+    );
+    assert_eq!(
+        originally_journaled.state.metadata["agent_turn"]["subagent_activation_provenance"],
+        json!("system")
+    );
+    assert_eq!(
+        originally_journaled.state.metadata["agent_turn"]["spawn_tree_descendant_cap"],
+        json!(16)
+    );
+
+    let executor_view = claimed_turn_run_from_process_claim(originally_journaled)
+        .expect("claimed turn executor view");
+    let rewritten = executor_view.state.to_process_state_snapshot();
+
+    assert_eq!(
+        rewritten.metadata["agent_turn"]["subagent_depth"],
+        json!(0),
+        "state-derived rewrites must drop lineage because durable provenance stays on the \
+         originally journaled metadata"
+    );
+    assert!(
+        rewritten.metadata["agent_turn"]
+            .get("subagent_activation_provenance")
+            .is_none(),
+        "state-derived rewrites must drop activation provenance because durable provenance \
+         stays on the originally journaled metadata"
+    );
+    assert!(
+        rewritten.metadata["agent_turn"]
+            .get("spawn_tree_descendant_cap")
+            .is_none(),
+        "state-derived rewrites must drop the descendant cap because durable provenance stays \
+         on the originally journaled metadata"
+    );
+}
+
 #[test]
 fn activation_provenance_survives_the_agent_turn_metadata_round_trip() {
     let mut metadata = agent_turn_metadata(
