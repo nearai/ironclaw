@@ -2991,20 +2991,34 @@ def _slack_event_run_id_for_message(reborn_home: Path, message_key: str) -> str 
         return None
     if not isinstance(payload, dict):
         return None
-    dispatch_kind = payload.get("dispatch_kind")
-    if isinstance(dispatch_kind, dict):
-        user_message_turn = dispatch_kind.get("user_message_turn")
-        if isinstance(user_message_turn, dict):
-            run_id = str(user_message_turn.get("run_id") or "").strip()
-            if run_id:
-                return run_id
-    outcome = payload.get("outcome")
-    if isinstance(outcome, dict):
-        accepted = outcome.get("accepted")
-        if isinstance(accepted, dict):
-            run_id = str(accepted.get("submitted_run_id") or "").strip()
-            if run_id:
-                return run_id
+    # ONLY `outcome.accepted` states that this event was admitted into a run.
+    #
+    # `dispatch_kind` is deliberately not consulted: `dispatch_kind_from_ack`
+    # (crates/product/ironclaw_assistant/src/workflow.rs) maps `DeferredBusy`
+    # and `RejectedBusy` to `UserMessageTurn { run_id: active_run_id }` -- the
+    # run that was already active and BLOCKED this event. Reading it would
+    # report success for a rejected event and hand the gate helper a run the
+    # injected message never started.
+    return _accepted_run_id(payload.get("outcome"))
+
+
+def _accepted_run_id(outcome: object, *, depth: int = 0) -> str | None:
+    """The submitted run id of an `Accepted` ack, unwrapping one `Duplicate`.
+
+    A retried delivery settles as `Duplicate { prior }`; the event was still
+    admitted, so an accepted `prior` is the right answer. Depth is bounded
+    because `prior` is itself an ack and could nest.
+    """
+    if not isinstance(outcome, dict) or depth > 4:
+        return None
+    accepted = outcome.get("accepted")
+    if isinstance(accepted, dict):
+        run_id = str(accepted.get("submitted_run_id") or "").strip()
+        if run_id:
+            return run_id
+    duplicate = outcome.get("duplicate")
+    if isinstance(duplicate, dict):
+        return _accepted_run_id(duplicate.get("prior"), depth=depth + 1)
     return None
 
 
