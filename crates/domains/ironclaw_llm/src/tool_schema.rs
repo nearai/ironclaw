@@ -47,7 +47,7 @@ fn normalize_schema(
     let mut schema = schema.clone();
 
     if needs_top_level_flatten(&schema) {
-        flatten_top_level(&mut schema, description);
+        flatten_top_level(&mut schema, description, !strict_objects);
         if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
             for (_key, prop_schema) in props.iter_mut() {
                 normalize_schema_recursive(prop_schema, strict_objects);
@@ -247,7 +247,11 @@ pub(crate) fn serialize_json_capped(value: &JsonValue, max_bytes: usize) -> Resu
     })
 }
 
-fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
+fn flatten_top_level(
+    parameters: &mut JsonValue,
+    description: &mut String,
+    preserve_non_forbidden: bool,
+) {
     const SCHEMA_HINT_MAX_BYTES: usize = 1500;
 
     let detected = detect_forbidden_top_level(parameters);
@@ -266,12 +270,24 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
         description.push_str(&hint);
     }
 
-    *parameters = serde_json::json!({
-        "type": "object",
-        "properties": JsonValue::Object(merged_properties),
-        "additionalProperties": true,
-        "required": required
-    });
+    let mut flattened = if preserve_non_forbidden {
+        parameters.as_object().cloned().unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    for keyword in FORBIDDEN_TOP_LEVEL {
+        drop(flattened.remove(*keyword));
+    }
+    flattened.insert("type".to_string(), JsonValue::String("object".to_string()));
+    flattened.insert(
+        "properties".to_string(),
+        JsonValue::Object(merged_properties),
+    );
+    flattened.insert("required".to_string(), JsonValue::Array(required));
+    flattened
+        .entry("additionalProperties".to_string())
+        .or_insert(JsonValue::Bool(true));
+    *parameters = JsonValue::Object(flattened);
 }
 
 fn normalize_schema_recursive(schema: &mut JsonValue, strict_objects: bool) {
@@ -484,6 +500,86 @@ mod tests {
         assert_eq!(result["properties"]["mode"]["const"], "by_name");
         assert_eq!(result["properties"]["name"]["type"], "string");
         assert_eq!(result["properties"]["id"]["type"], "string");
+        assert!(description.contains("Upstream JSON schema"));
+    }
+
+    fn schema_with_top_level_constraints() -> JsonValue {
+        serde_json::json!({
+            "type": "object",
+            "title": "Conditional lookup",
+            "$defs": {
+                "identifier": { "type": "string", "minLength": 1 }
+            },
+            "properties": {
+                "mode": { "type": "string" },
+                "name": { "$ref": "#/$defs/identifier" }
+            },
+            "required": ["mode"],
+            "dependentRequired": {
+                "mode": ["name"]
+            },
+            "minProperties": 2,
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1 }
+                    }
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn test_flatten_only_preserves_non_forbidden_top_level_constraints() {
+        let mut description = "Conditional lookup tool".to_string();
+
+        let result = shape_tool_schema(
+            ToolSchemaPolicy::FlattenOnly,
+            &schema_with_top_level_constraints(),
+            &mut description,
+        );
+
+        assert!(result.get("allOf").is_none());
+        assert_eq!(result["type"], "object");
+        assert_eq!(result["title"], "Conditional lookup");
+        assert_eq!(
+            result["dependentRequired"],
+            serde_json::json!({"mode": ["name"]})
+        );
+        assert_eq!(result["minProperties"], 2);
+        assert_eq!(result["$defs"]["identifier"]["minLength"], 1);
+        assert_eq!(result["properties"]["limit"]["type"], "integer");
+        assert_eq!(result["required"], serde_json::json!(["mode"]));
+        assert_eq!(result["additionalProperties"], false);
+        assert!(description.contains("Upstream JSON schema"));
+    }
+
+    #[test]
+    fn test_strict_openai_drops_unsupported_top_level_constraints() {
+        let mut description = "Conditional lookup tool".to_string();
+
+        let result = shape_tool_schema(
+            ToolSchemaPolicy::StrictOpenAi,
+            &schema_with_top_level_constraints(),
+            &mut description,
+        );
+
+        let mut keys = result
+            .as_object()
+            .expect("strict schema")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["additionalProperties", "properties", "required", "type"]
+        );
+        assert_eq!(result["properties"]["mode"]["type"], "string");
+        assert_eq!(result["properties"]["limit"]["type"], "integer");
+        assert_eq!(result["required"], serde_json::json!(["mode"]));
+        assert_eq!(result["additionalProperties"], true);
         assert!(description.contains("Upstream JSON schema"));
     }
 
