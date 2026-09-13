@@ -17,10 +17,55 @@ use ironclaw_common::{AttachmentKind, AttachmentRef};
 
 use crate::contract::ContextImageAttachment;
 
+/// Environment flag selecting how a document attachment's extracted text
+/// reaches the model.
+///
+/// Unset or unrecognized means [`DocumentTextMode::Inline`] — the historical
+/// behavior — so a typo degrades toward the conservative default rather than
+/// silently withholding content the model is expected to see.
+pub(crate) const DOCUMENT_TEXT_MODE_ENV: &str = "IRONCLAW_ATTACHMENT_DOCUMENT_TEXT";
+
+/// How a `Document` attachment contributes to the model-visible block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DocumentTextMode {
+    /// Inline the extracted text (credential-redacted) into the block.
+    #[default]
+    Inline,
+    /// Contribute only the stored project path and tell the agent to page the
+    /// file with `read_file`. One PDF is roughly 25k tokens and a turn can
+    /// carry several, so a deployment that routes large documents prefers the
+    /// pointer and lets the agent read what it needs.
+    Pointer,
+}
+
+fn document_text_mode() -> DocumentTextMode {
+    match ironclaw_common::env_helpers::env_or_override(DOCUMENT_TEXT_MODE_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("pointer") => DocumentTextMode::Pointer,
+        _ => DocumentTextMode::Inline,
+    }
+}
+
 /// Append a rendered `<attachments>` block to `content` when `attachments` is
 /// non-empty; otherwise return `content` unchanged.
 pub(crate) fn augment_model_content(content: String, attachments: &[AttachmentRef]) -> String {
     match render_attachments_block(attachments) {
+        Some(block) => format!("{content}\n\n{block}"),
+        None => content,
+    }
+}
+
+/// [`augment_model_content`] with the document-text mode pinned instead of
+/// read from the environment.
+#[cfg(test)]
+fn augment_model_content_with_mode(
+    content: String,
+    attachments: &[AttachmentRef],
+    document_text: DocumentTextMode,
+) -> String {
+    match render_attachments_block_with_mode(attachments, document_text) {
         Some(block) => format!("{content}\n\n{block}"),
         None => content,
     }
@@ -158,21 +203,34 @@ pub(crate) fn model_image_attachments(
 }
 
 fn render_attachments_block(attachments: &[AttachmentRef]) -> Option<String> {
+    render_attachments_block_with_mode(attachments, document_text_mode())
+}
+
+/// Renderer with the document-text mode resolved by the caller, so a test can
+/// exercise both modes without touching process state.
+fn render_attachments_block_with_mode(
+    attachments: &[AttachmentRef],
+    document_text: DocumentTextMode,
+) -> Option<String> {
     if attachments.is_empty() {
         return None;
     }
     let mut out = String::from("<attachments>");
     for (index, attachment) in attachments.iter().enumerate() {
         out.push('\n');
-        out.push_str(&render_attachment(index + 1, attachment));
+        out.push_str(&render_attachment(index + 1, attachment, document_text));
     }
     out.push_str("\n</attachments>");
     Some(out)
 }
 
-fn render_attachment(index: usize, attachment: &AttachmentRef) -> String {
+fn render_attachment(
+    index: usize,
+    attachment: &AttachmentRef,
+    document_text: DocumentTextMode,
+) -> String {
     let header = render_attachment_header(index, attachment, attachment.kind);
-    let body = body_text(attachment, attachment.storage_key.is_some());
+    let body = body_text(attachment, attachment.storage_key.is_some(), document_text);
     let body = match attachment.storage_key.as_deref() {
         Some(path) => format!("Saved to project file: {}\n{}", escape_xml_text(path), body),
         None => body,
@@ -210,12 +268,24 @@ fn render_attachment_header(
     )
 }
 
-fn body_text(attachment: &AttachmentRef, has_project_path: bool) -> String {
+fn body_text(
+    attachment: &AttachmentRef,
+    has_project_path: bool,
+    document_text: DocumentTextMode,
+) -> String {
     match attachment.kind {
         AttachmentKind::Audio => match &attachment.extracted_text {
             Some(text) => format!("Transcript: {}", model_safe_extracted_text(text)),
             None => "Audio transcript unavailable.".to_string(),
         },
+        AttachmentKind::Document if document_text == DocumentTextMode::Pointer => {
+            if has_project_path {
+                "[Document attached - read it in pages with read_file at the project path above.]"
+                    .to_string()
+            } else {
+                "[Document attached - not yet stored.]".to_string()
+            }
+        }
         AttachmentKind::Document => match &attachment.extracted_text {
             Some(text) => model_safe_extracted_text(text),
             None => "[Document attached — text extraction unavailable]".to_string(),
@@ -499,5 +569,68 @@ mod tests {
     fn model_image_attachments_empty_when_no_images() {
         assert!(model_image_attachments(&[doc_ref(None)]).is_empty());
         assert!(model_image_attachments(&[]).is_empty());
+    }
+
+
+    /// Pointer mode is the deployment opt-in behind
+    /// `IRONCLAW_ATTACHMENT_DOCUMENT_TEXT=pointer`: the extracted text never
+    /// reaches the model, only the stored path plus a `read_file` instruction.
+    #[test]
+    fn pointer_mode_does_not_inline_document_text() {
+        let out = augment_model_content_with_mode(
+            "see attached".to_string(),
+            &[doc_ref(Some("Quarterly revenue up 12%"))],
+            DocumentTextMode::Pointer,
+        );
+
+        assert!(out.contains("read it in pages with read_file"));
+        assert!(!out.contains("Quarterly revenue up 12%"));
+        assert!(
+            out.contains("Saved to project file: /workspace/attachments/2026-06-09/m1-0-report.pdf")
+        );
+        assert!(out.contains("type=\"document\""));
+    }
+
+    /// Without a landed file there is nothing to page, so pointer mode says so
+    /// rather than pointing at a path that does not exist.
+    #[test]
+    fn pointer_mode_marks_an_unstored_document_as_not_stored() {
+        let mut att = doc_ref(Some("Quarterly revenue up 12%"));
+        att.storage_key = None;
+        let out = augment_model_content_with_mode(
+            "x".to_string(),
+            &[att],
+            DocumentTextMode::Pointer,
+        );
+
+        assert!(out.contains("[Document attached - not yet stored.]"));
+        assert!(!out.contains("project_path="));
+        assert!(!out.contains("Quarterly revenue up 12%"));
+    }
+
+    /// Audio keeps its transcript in pointer mode: the flag is about documents,
+    /// which are the ones that blow the context budget.
+    #[test]
+    fn pointer_mode_leaves_audio_transcripts_inlined() {
+        let mut att = doc_ref(None);
+        att.kind = AttachmentKind::Audio;
+        att.extracted_text = Some("spoken words".to_string());
+        let out =
+            augment_model_content_with_mode("x".to_string(), &[att], DocumentTextMode::Pointer);
+
+        assert!(out.contains("Transcript: spoken words"));
+    }
+
+    /// The default is upstream behavior, so an unset or misspelled flag cannot
+    /// silently withhold document text.
+    #[test]
+    fn default_mode_is_inline() {
+        assert_eq!(DocumentTextMode::default(), DocumentTextMode::Inline);
+        let out = augment_model_content_with_mode(
+            "see attached".to_string(),
+            &[doc_ref(Some("Quarterly revenue up 12%"))],
+            DocumentTextMode::default(),
+        );
+        assert!(out.contains("Quarterly revenue up 12%"));
     }
 }
