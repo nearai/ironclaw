@@ -45,6 +45,11 @@ pub struct LoopCompactionRequest {
     pub last_compacted_through_seq: Option<u64>,
     /// Inclusive transcript sequence through which context may be replaced.
     pub drop_through_seq: u64,
+    /// First model-visible transcript sequence retained after the replaced
+    /// prefix. When present, the host validates that this boundary starts at a
+    /// user or assistant message, never at a tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_retained_seq: Option<u64>,
     /// Estimated tail budget the strategy wanted preserved outside the range.
     pub preserve_tail_tokens: u64,
     /// Requested summary and cut-point validation mode.
@@ -104,6 +109,14 @@ impl Serialize for LoopSummaryArtifactId {
     }
 }
 
+/// Typed evidence that summarizer input omitted bytes from oversized durable
+/// message bodies. The durable transcript remains unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopCompactionInputTruncation {
+    pub message_count: u32,
+    pub omitted_bytes: u64,
+}
+
 /// Durable artifact produced by host-managed compaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCompactionResponse {
@@ -116,6 +129,10 @@ pub struct LoopCompactionResponse {
     /// compatibility with responses produced before redaction telemetry.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub redacted_leak_count: u32,
+    /// Summarizer-input-only truncation applied before inference. Additive and
+    /// defaulted for checkpoint/wire compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_truncation: Option<LoopCompactionInputTruncation>,
 }
 
 fn is_zero(value: &u32) -> bool {

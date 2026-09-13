@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::CapabilityId;
 use serde::{Deserialize, Serialize};
 
-use crate::compaction::{CompactionInitiator, LoopCompactionPort};
+use crate::compaction::{CompactionInitiator, LoopCompactionInputTruncation, LoopCompactionPort};
 use crate::system_inference::SystemInferenceTaskId;
 use ironclaw_host_api::turn::CapabilityActivityId;
 
@@ -91,6 +91,8 @@ pub enum LoopProgressEvent {
     CompactionCompleted {
         task_id: SystemInferenceTaskId,
         compression_ratio_ppm: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_truncation: Option<LoopCompactionInputTruncation>,
     },
     CompactionFailed {
         task_id: SystemInferenceTaskId,

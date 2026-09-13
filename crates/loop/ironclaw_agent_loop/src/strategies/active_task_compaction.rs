@@ -1,9 +1,10 @@
 use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::strategies::compaction::tail_preserving_user_boundary;
 use ironclaw_loop_contracts::{CompactionInitiator, LoopRunContext};
 
 use super::compaction::{
     CompactionDecision, CompactionStrategy, DefaultCompactionStrategy,
-    eligible_window_eviction_boundary, is_eligible_user_boundary,
+    eligible_window_eviction_boundary,
 };
 
 /// Compaction policy for Reborn runs that must preserve the live active task.
@@ -95,36 +96,24 @@ fn active_task_preserving_user_boundary(
     minimum_tail_messages: usize,
     minimum_compacted_messages: usize,
 ) -> Option<u64> {
-    let mut tail_tokens = 0_u64;
-    let mut tail_messages = 0_usize;
-    let mut latest_user_seen = false;
-    let mut candidate_sequence = None;
-    let mut compacted_prefix_messages = 0_usize;
-
-    for entry in state.compaction_prompt.message_index.iter().rev() {
-        let is_latest_user = entry.kind == IndexedMessageKind::User && !latest_user_seen;
-        if entry.kind == IndexedMessageKind::User {
-            latest_user_seen = true;
-        }
-
-        if candidate_sequence.is_none()
-            && tail_tokens >= preserve_tail_tokens
-            && tail_messages >= minimum_tail_messages
-            && !is_latest_user
-            && is_eligible_user_boundary(entry, state, prompt_fingerprint)
-        {
-            candidate_sequence = Some(entry.sequence);
-        }
-
-        if candidate_sequence.is_some() && is_compaction_prefix_message(entry) {
-            compacted_prefix_messages = compacted_prefix_messages.saturating_add(1);
-        }
-
-        tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
-        tail_messages = tail_messages.saturating_add(1);
-    }
-
-    candidate_sequence.filter(|_| compacted_prefix_messages >= minimum_compacted_messages)
+    let boundary = tail_preserving_user_boundary(
+        state,
+        prompt_fingerprint,
+        preserve_tail_tokens,
+        minimum_tail_messages,
+        |_| true,
+    )?;
+    let compacted_prefix_messages = state
+        .compaction_prompt
+        .message_index
+        .iter()
+        .filter(|entry| {
+            entry.sequence <= boundary
+                && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+                && is_compaction_prefix_message(entry)
+        })
+        .count();
+    (compacted_prefix_messages >= minimum_compacted_messages).then_some(boundary)
 }
 
 fn is_compaction_prefix_message(entry: &MessageIndexEntry) -> bool {

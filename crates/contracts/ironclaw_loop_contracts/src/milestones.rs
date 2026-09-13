@@ -19,7 +19,9 @@ use super::host::{
     LoopRecoveryDisposition, LoopRecoveryStage, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
-use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
+use super::{
+    CompactionInitiator, LoopCompactionInputTruncation, SkillTrustLevel, SystemInferenceTaskId,
+};
 use crate::{LoopCompletionKind, LoopFailureKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +156,8 @@ pub enum LoopHostMilestoneKind {
     CompactionCompleted {
         task_id: SystemInferenceTaskId,
         compression_ratio_ppm: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_truncation: Option<LoopCompactionInputTruncation>,
     },
     CompactionFailed {
         task_id: SystemInferenceTaskId,
@@ -640,10 +644,12 @@ where
         &self,
         task_id: SystemInferenceTaskId,
         compression_ratio_ppm: u32,
+        input_truncation: Option<LoopCompactionInputTruncation>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CompactionCompleted {
             task_id,
             compression_ratio_ppm,
+            input_truncation,
         })
         .await
     }

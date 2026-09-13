@@ -26,9 +26,9 @@ use ironclaw_loop_contracts::{
     InstructionSafetyContext, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked,
     LoopBlockedKind, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
     LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-    LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
-    LoopCompactionResponse, LoopCompleted, LoopCompletionKind, LoopContextBundle,
-    LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
+    LoopCompactionError, LoopCompactionInputTruncation, LoopCompactionOutcome, LoopCompactionPort,
+    LoopCompactionRequest, LoopCompactionResponse, LoopCompleted, LoopCompletionKind,
+    LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
     LoopContextSnippetMetadata, LoopDriverId, LoopDriverNoteKind, LoopExit, LoopGateKind,
     LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
     LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
@@ -59,6 +59,7 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
             .expect("valid summary id"),
         compression_ratio_ppm: 250_000,
         redacted_leak_count: 0,
+        input_truncation: None,
     });
     let compacted_json = serde_json::to_value(&compacted).expect("compacted should serialize");
     assert_eq!(
@@ -81,6 +82,10 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
             .expect("valid summary id"),
         compression_ratio_ppm: 200_000,
         redacted_leak_count: 2,
+        input_truncation: Some(LoopCompactionInputTruncation {
+            message_count: 1,
+            omitted_bytes: 65_536,
+        }),
     });
     assert_eq!(
         serde_json::to_value(redacted).expect("redacted compaction should serialize"),
@@ -88,7 +93,11 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
             "compacted": {
                 "summary_artifact_id": "summary:redacted",
                 "compression_ratio_ppm": 200000,
-                "redacted_leak_count": 2
+                "redacted_leak_count": 2,
+                "input_truncation": {
+                    "message_count": 1,
+                    "omitted_bytes": 65536
+                }
             }
         })
     );

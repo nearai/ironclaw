@@ -1,23 +1,53 @@
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, PromptContextTokenBudget,
 };
-use ironclaw_threads::{ContextMessage, ThreadMessageId};
+use ironclaw_threads::{ContextMessage, ContextWindowTruncation, MessageKind, ThreadMessageId};
 
 use crate::estimate_tokens_from_chars;
 
 pub(crate) type SelectedPromptContextMessage = (ContextMessage, u64);
 
+#[derive(Debug)]
+pub(crate) struct PromptContextSelection {
+    selected: Vec<SelectedPromptContextMessage>,
+    pub(crate) truncation: Option<ContextWindowTruncation>,
+}
+
+impl PromptContextSelection {
+    pub(crate) fn len(&self) -> usize {
+        self.selected.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.selected.is_empty()
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> std::slice::Iter<'_, SelectedPromptContextMessage> {
+        self.selected.iter()
+    }
+}
+
+impl IntoIterator for PromptContextSelection {
+    type Item = SelectedPromptContextMessage;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.selected.into_iter()
+    }
+}
+
 pub(crate) fn select_prompt_context_messages(
     mut messages: Vec<ContextMessage>,
     budget: PromptContextTokenBudget,
     pinned_message_id: Option<ThreadMessageId>,
-) -> Result<Vec<SelectedPromptContextMessage>, AgentLoopHostError> {
+) -> Result<PromptContextSelection, AgentLoopHostError> {
     let visible_tokens = budget.visible_transcript_tokens();
     let pinned = pinned_message_id
         .and_then(|message_id| {
             messages.iter().position(|message| {
-                message.message_id == Some(message_id)
-                    && message.kind == ironclaw_threads::MessageKind::User
+                message.message_id == Some(message_id) && message.kind == MessageKind::User
             })
         })
         .map(|index| messages.remove(index));
@@ -32,37 +62,49 @@ pub(crate) fn select_prompt_context_messages(
             "accepted task exceeds the prompt context token budget",
         ));
     }
-    let mut selected = Vec::new();
-    let mut selected_tokens = pinned_tokens;
 
-    for message in messages.into_iter().rev() {
+    let mut selected_tokens = pinned_tokens;
+    let mut selected_start = messages.len();
+    for (index, message) in messages.iter().enumerate().rev() {
         let message_tokens = estimate_tokens_from_chars(&message.content).as_u64();
-        let fits = selected_tokens.saturating_add(message_tokens) <= visible_tokens;
-        if fits {
-            selected_tokens = selected_tokens.saturating_add(message_tokens);
-            selected.push((message, message_tokens));
-        } else {
-            // Keep a contiguous transcript suffix. Skipping a middle message
-            // can orphan provider tool calls from their result references;
-            // grouping-aware truncation belongs at a higher transcript seam.
+        if selected_tokens.saturating_add(message_tokens) > visible_tokens {
             break;
         }
+        selected_tokens = selected_tokens.saturating_add(message_tokens);
+        selected_start = index;
     }
 
+    let truncation = selected_start
+        .checked_sub(1)
+        .and_then(|index| messages.get(index))
+        .map(|message| ContextWindowTruncation {
+            omitted_through_sequence: message.sequence,
+            omitted_through_kind: message.kind,
+        });
+    let mut selected = messages
+        .into_iter()
+        .skip(selected_start)
+        .map(|message| {
+            let tokens = estimate_tokens_from_chars(&message.content).as_u64();
+            (message, tokens)
+        })
+        .collect::<Vec<_>>();
     if let Some(pinned) = pinned {
         selected.push(pinned);
     }
     selected.sort_by_key(|(message, _)| message.sequence);
-    Ok(selected)
+    Ok(PromptContextSelection {
+        selected,
+        truncation,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use ironclaw_loop_contracts::PromptContextTokenBudget;
-    use ironclaw_threads::{ContextMessage, MessageKind, ThreadMessageId};
+    use ironclaw_threads::{ContextMessage, ContextWindowTruncation, MessageKind, ThreadMessageId};
 
     use super::select_prompt_context_messages;
-
     fn message(sequence: u64, content: &str) -> ContextMessage {
         ContextMessage {
             message_id: Some(
@@ -102,6 +144,13 @@ mod tests {
             select_prompt_context_messages(messages, PromptContextTokenBudget::new(1, 0, 0), None)
                 .unwrap();
 
+        assert_eq!(
+            selected.truncation,
+            Some(ContextWindowTruncation {
+                omitted_through_sequence: 2,
+                omitted_through_kind: MessageKind::User,
+            })
+        );
         assert!(selected.is_empty());
     }
 

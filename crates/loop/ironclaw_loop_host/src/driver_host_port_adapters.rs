@@ -363,9 +363,10 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             LoopProgressEvent::CompactionCompleted {
                 task_id,
                 compression_ratio_ppm,
+                input_truncation,
             } => {
                 emitter
-                    .compaction_completed(task_id, compression_ratio_ppm)
+                    .compaction_completed(task_id, compression_ratio_ppm, input_truncation)
                     .await
             }
             LoopProgressEvent::CompactionFailed {
