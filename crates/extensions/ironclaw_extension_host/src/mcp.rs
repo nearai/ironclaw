@@ -14,6 +14,8 @@ use ironclaw_mcp::{
     McpHostHttpEgressPlanner, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
 };
 
+use crate::hosted_mcp_admission::is_loopback_ip_literal;
+
 pub const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_TIMEOUT_MS: u32 = 60_000;
@@ -106,6 +108,11 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedMcpEgressEndpoint {
+    scheme: NetworkScheme,
+    /// True when `host_pattern` is a literal loopback IP. Such endpoints are
+    /// exempt from the private-range denial (see
+    /// [`hosted_mcp_network_policy_for_endpoint`]).
+    loopback: bool,
     host_pattern: String,
     port: Option<u16>,
     path: String,
@@ -115,15 +122,36 @@ pub struct HostedMcpEgressEndpoint {
 impl HostedMcpEgressEndpoint {
     fn parse(url: &str) -> Option<Self> {
         let parsed = url::Url::parse(url).ok()?;
-        if parsed.scheme() != "https"
-            || !parsed.username().is_empty()
+        let host = parsed.host()?;
+        let loopback = is_loopback_ip_literal(&host);
+        // `http` is admitted only for a literal loopback IP; every other target
+        // must be `https`. Mirrors the admission gate in `hosted_mcp_admission`.
+        let scheme = match parsed.scheme() {
+            "https" => NetworkScheme::Https,
+            "http" if loopback => NetworkScheme::Http,
+            _ => return None,
+        };
+        if !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.fragment().is_some()
         {
             return None;
         }
+        let host_pattern = parsed.host_str()?.to_ascii_lowercase();
+        // The same host rule the admission gate holds, restated here because
+        // this parser also runs for host-bundled manifests, which never pass
+        // through admission: `localhost` is a DNS name a resolver could rebind,
+        // and an IP literal is only ever admitted when it is loopback. Without
+        // this, a bundled manifest declaring `https://localhost/mcp` or
+        // `https://8.8.8.8/mcp` would still yield an egress policy.
+        let is_ip_literal = matches!(host, url::Host::Ipv4(_) | url::Host::Ipv6(_));
+        if host_pattern == "localhost" || (is_ip_literal && !loopback) {
+            return None;
+        }
         Some(Self {
-            host_pattern: parsed.host_str()?.to_ascii_lowercase(),
+            scheme,
+            loopback,
+            host_pattern,
             port: parsed.port(),
             path: normalize_mcp_path(parsed.path()),
             query: parsed.query().map(str::to_string),
@@ -131,7 +159,7 @@ impl HostedMcpEgressEndpoint {
     }
 
     fn allows_target(&self, target: &NetworkTargetPattern) -> bool {
-        target.scheme == Some(NetworkScheme::Https)
+        target.scheme == Some(self.scheme)
             && target.host_pattern.eq_ignore_ascii_case(&self.host_pattern)
             && target.port == self.port
     }
@@ -187,13 +215,15 @@ pub(crate) fn hosted_mcp_network_policy(package: &ExtensionPackage) -> Option<Ne
 fn hosted_mcp_network_policy_for_endpoint(endpoint: &HostedMcpEgressEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
+            scheme: Some(endpoint.scheme),
             host_pattern: endpoint.host_pattern.clone(),
             port: endpoint.port,
         }],
-        // Matches the bundled manifest's deny_private_ip_ranges default.
-        // Dispatcher would reject anyway, but the plan must agree.
-        deny_private_ip_ranges: true,
+        // A literal loopback endpoint is exempt from the private-range denial:
+        // it is a safe on-device target and the dispatcher already permits
+        // loopback when this is false. Every other endpoint keeps the deny in
+        // force to match the bundled manifest's default.
+        deny_private_ip_ranges: !endpoint.loopback,
         max_egress_bytes: Some(MCP_NETWORK_EGRESS_LIMIT),
     }
 }
@@ -219,6 +249,39 @@ mod tests {
 
     const NOTION_MCP_HOST: &str = "mcp.notion.com";
     const NOTION_MCP_URL: &str = "https://mcp.notion.com/mcp";
+
+    // ── loopback endpoints ─────────────────────────────────────────────────
+
+    #[test]
+    fn loopback_endpoint_admits_http_and_waives_private_range_denial() {
+        let endpoint = HostedMcpEgressEndpoint::parse("http://127.0.0.1:5001/mcp")
+            .expect("literal loopback http endpoint is admitted");
+        assert_eq!(endpoint.scheme, NetworkScheme::Http);
+        assert!(endpoint.loopback);
+
+        let policy = hosted_mcp_network_policy_for_endpoint(&endpoint);
+        assert!(!policy.deny_private_ip_ranges);
+        assert_eq!(policy.allowed_targets.len(), 1);
+        assert_eq!(policy.allowed_targets[0].scheme, Some(NetworkScheme::Http));
+        assert_eq!(policy.allowed_targets[0].host_pattern, "127.0.0.1");
+        assert_eq!(policy.allowed_targets[0].port, Some(5001));
+    }
+
+    #[test]
+    fn non_loopback_endpoints_keep_https_and_private_range_denial() {
+        // Public `http` is not an MCP endpoint at all.
+        assert!(HostedMcpEgressEndpoint::parse("http://mcp.example.test/mcp").is_none());
+        // `localhost` is a DNS name, not a literal loopback IP, so `http` is refused.
+        assert!(HostedMcpEgressEndpoint::parse("http://localhost:5001/mcp").is_none());
+
+        // A public `https` endpoint keeps the private-range denial and https scheme.
+        let public = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).expect("public https endpoint");
+        assert_eq!(public.scheme, NetworkScheme::Https);
+        assert!(!public.loopback);
+        let policy = hosted_mcp_network_policy_for_endpoint(&public);
+        assert!(policy.deny_private_ip_ranges);
+        assert_eq!(policy.allowed_targets[0].scheme, Some(NetworkScheme::Https));
+    }
 
     // ── credential projection ──────────────────────────────────────────────
 
@@ -266,6 +329,104 @@ mod tests {
 
         assert!(plan.credential_injections.is_empty());
         assert!(plan.network_policy.allowed_targets.is_empty());
+    }
+
+    /// The loopback exemption through the real call site: `plan()` resolves the
+    /// package endpoint, matches the request URL, and emits the final policy.
+    /// The parse/policy unit tests above cover the helpers in isolation; this
+    /// asserts the production path a dispatched MCP request actually takes.
+    #[test]
+    fn planner_emits_http_loopback_plan_without_private_range_denial() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+            "local-mcp",
+            "http://127.0.0.1:5001/mcp",
+            "local-mcp.search",
+            "local_token",
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("local-mcp").unwrap();
+        let cap = CapabilityId::new("local-mcp.search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "http://127.0.0.1:5001/mcp",
+            &scope,
+        ));
+
+        assert_eq!(
+            plan.network_policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Http),
+                host_pattern: "127.0.0.1".to_string(),
+                port: Some(5001),
+            }]
+        );
+        assert!(
+            !plan.network_policy.deny_private_ip_ranges,
+            "a literal loopback endpoint waives the private-range denial"
+        );
+    }
+
+    /// A non-loopback provider reached over the planner keeps the guard, so the
+    /// exemption above cannot be read as "the planner stopped denying".
+    #[test]
+    fn planner_keeps_private_range_denial_for_a_public_provider() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+            "fixture",
+            "https://fixture.example.com/mcp",
+            "fixture.search",
+            "fixture_token",
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("fixture").unwrap();
+        let cap = CapabilityId::new("fixture.search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "https://fixture.example.com/mcp",
+            &scope,
+        ));
+
+        assert!(plan.network_policy.deny_private_ip_ranges);
+    }
+
+    /// `localhost` and a non-loopback IP literal never produce an egress plan,
+    /// even though both are `https`. Host-bundled manifests never pass through
+    /// `hosted_mcp_admission`, so this parser is their only host gate.
+    #[test]
+    fn planner_denies_localhost_and_non_loopback_ip_literal_providers() {
+        for url in [
+            "https://localhost/mcp",
+            "https://8.8.8.8/mcp",
+            "https://[2001:db8::1]/mcp",
+        ] {
+            assert!(
+                HostedMcpEgressEndpoint::parse(url).is_none(),
+                "{url} must not yield an egress endpoint"
+            );
+
+            let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+                "rebindable",
+                url,
+                "rebindable.search",
+                "rebindable_token",
+            )));
+            let planner = RegistryMcpEgressPlanner::new(registry);
+            let provider = ExtensionId::new("rebindable").unwrap();
+            let cap = CapabilityId::new("rebindable.search").unwrap();
+            let scope = sample_scope();
+
+            let plan = planner.plan(sample_plan_request(&provider, &cap, url, &scope));
+
+            assert!(
+                plan.network_policy.allowed_targets.is_empty(),
+                "{url} must not produce an egress allowlist"
+            );
+        }
     }
 
     #[test]

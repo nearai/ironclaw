@@ -59,12 +59,20 @@ function connectionErrors(name: string, id: string, endpoint: string, t: (key: s
       const parsed = new URL(trimmedEndpoint);
       const host = parsed.hostname.toLowerCase();
       const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
+      // A literal loopback IP (127.0.0.0/8 or ::1) is a safe, non-rebindable
+      // on-device target: the one case where `http` and an IP literal are
+      // allowed. Mirrors the backend admission gate in `hosted_mcp_admission`.
+      // `localhost` (a DNS name) stays rejected.
+      const isLoopbackLiteral =
+        /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || host === "[::1]" || host === "::1";
+      const schemeOk =
+        parsed.protocol === "https:" || (parsed.protocol === "http:" && isLoopbackLiteral);
       const hasCredentialQuery = Array.from(parsed.searchParams.keys()).some((key) =>
         CREDENTIAL_QUERY_KEYS.has(key.toLowerCase()),
       );
       if (
-        parsed.protocol !== "https:" || !host || parsed.username || parsed.password || parsed.hash ||
-        host === "localhost" || isIpLiteral || hasCredentialQuery ||
+        !schemeOk || !host || parsed.username || parsed.password || parsed.hash ||
+        host === "localhost" || (isIpLiteral && !isLoopbackLiteral) || hasCredentialQuery ||
         trimmedEndpoint.length > 2048 || CONTROL_CHARACTER_PATTERN.test(trimmedEndpoint)
       ) throw new Error("invalid hosted MCP endpoint");
     } catch {

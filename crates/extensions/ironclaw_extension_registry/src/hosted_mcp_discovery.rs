@@ -101,14 +101,34 @@ fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
     Some(url.as_str())
 }
 
+/// A literal IPv4/IPv6 loopback address (`127.0.0.0/8` or `::1`). Hostnames
+/// such as `localhost` are excluded on purpose: only a literal loopback IP is
+/// exempted, so no DNS name can later rebind to a non-loopback address. Mirrors
+/// `ironclaw_extension_host::hosted_mcp_admission::is_loopback_ip_literal`,
+/// duplicated rather than shared because this crate sits below that one.
+fn is_loopback_ip_literal(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+        url::Host::Domain(_) => false,
+    }
+}
+
 fn valid_hosted_mcp_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
-    parsed.scheme() == "https"
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    // `http` is admitted only for a literal loopback IP — a same-device target
+    // that cannot rebind and never leaves the host. Every other endpoint must
+    // still be `https`, exactly as before.
+    let scheme_ok =
+        parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_ip_literal(&host));
+    scheme_ok
         && parsed.username().is_empty()
         && parsed.password().is_none()
-        && parsed.host_str().is_some()
         && parsed.fragment().is_none()
 }
 
@@ -230,7 +250,14 @@ fn discovered_capability_manifest(
 fn hosted_mcp_network_target(package: &ExtensionPackage) -> Option<NetworkTargetPattern> {
     let endpoint = url::Url::parse(hosted_http_mcp_url(package)?).ok()?;
     Some(NetworkTargetPattern {
-        scheme: Some(NetworkScheme::Https),
+        // Derived from the endpoint rather than assumed `https`: a loopback
+        // provider is reachable over `http`, and an allowlist entry carrying
+        // the wrong scheme would never match its own request.
+        scheme: Some(if endpoint.scheme() == "http" {
+            NetworkScheme::Http
+        } else {
+            NetworkScheme::Https
+        }),
         host_pattern: endpoint.host_str()?.to_ascii_lowercase(),
         port: endpoint.port(),
     })
