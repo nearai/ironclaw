@@ -20,7 +20,7 @@ dist = false
 [dependencies]
 base64 = "0.23"
 chrono-tz = "0.10"
-dirs = "6"
+dirs = "7"
 hex = "0.4"
 rand = "0.10"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
