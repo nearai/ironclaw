@@ -258,6 +258,44 @@ impl ToolResultReferenceEnvelope {
         Ok(envelope)
     }
 
+    /// Decode a durable reference for model projection without letting a legacy
+    /// observation whose detail lacks the required typed `kind` tag poison the
+    /// whole prompt.
+    ///
+    /// The transcript row remains unchanged. Only this in-memory projection
+    /// omits the untagged observation; the reference and its safe summary still
+    /// validate and remain model-visible. Other malformed observations fail
+    /// closed as before.
+    pub fn from_json_str_for_model_projection(value: &str) -> Result<Self, String> {
+        let mut envelope: Self = serde_json::from_str(value).map_err(|error| error.to_string())?;
+        match envelope.validate() {
+            Ok(()) => Ok(envelope),
+            Err(observation_error)
+                if envelope
+                    .model_observation
+                    .as_ref()
+                    .is_some_and(model_observation_detail_is_untagged) =>
+            {
+                let model_observation = envelope.model_observation.take();
+                match envelope.validate() {
+                    Ok(()) => {
+                        tracing::debug!(
+                            reason = %observation_error,
+                            result_ref = %envelope.result_ref,
+                            "ignoring untagged durable model observation during prompt projection"
+                        );
+                        Ok(envelope)
+                    }
+                    Err(_) => {
+                        envelope.model_observation = model_observation;
+                        Err(observation_error)
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn model_visible_content_or_safe_summary(&self) -> String {
         let Some(model_observation) = self.model_observation.as_ref() else {
             tracing::debug!(
@@ -406,6 +444,13 @@ fn normalized_model_observation(
             }
         }
     }
+}
+
+fn model_observation_detail_is_untagged(observation: &serde_json::Value) -> bool {
+    observation
+        .get("detail")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|detail| !detail.contains_key("kind"))
 }
 
 fn observation_detail_of_kind<'a>(
