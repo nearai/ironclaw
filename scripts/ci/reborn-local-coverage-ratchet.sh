@@ -72,8 +72,12 @@ while IFS= read -r bucket; do
             incremental_env=(env CARGO_INCREMENTAL=0)
         fi
 
+        # `${incremental_env[@]}` is empty for every package but composition, and
+        # bash 3.2 -- still the /bin/bash macOS ships -- treats expanding an empty
+        # array as an unbound variable under `set -u`. bash 4.4 fixed that; the
+        # `[@]+` guard works on both.
         # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-        run_cargo_cov_env "${incremental_env[@]}" cargo llvm-cov -p "${package}" ${feature_flags} --all-targets \
+        run_cargo_cov_env "${incremental_env[@]+"${incremental_env[@]}"}" cargo llvm-cov -p "${package}" ${feature_flags} --all-targets \
             --lcov --output-path "${package_lcov}" \
             test -- --nocapture
     done < <(jq -r '.packages[]' <<<"${bucket}")
