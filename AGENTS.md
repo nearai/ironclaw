@@ -82,6 +82,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/domains/ironclaw_llm/` | `crates/domains/ironclaw_llm/CONTRACT.md` |
 | `crates/substrates/ironclaw_filesystem/` | `crates/substrates/ironclaw_filesystem/CONTRACT.md` |
 | `crates/product/ironclaw_webui/` | `crates/product/ironclaw_webui/CONTRACT.md` |
+| WebUI design system | `crates/product/ironclaw_webui/frontend/DESIGN.md` + `.claude/rules/design-system.md` |
 | `crates/app/ironclaw_composition/` | `crates/app/ironclaw_composition/CONTRACT.md` |
 | `crates/domains/ironclaw_identity/` | `crates/domains/ironclaw_identity/CONTRACT.md` |
 | `crates/kernel/ironclaw_trust/` | `crates/kernel/ironclaw_trust/CONTRACT.md` |
