@@ -1284,6 +1284,36 @@ test("ChatInput command-menu rows render the title and description", () => {
   assert.ok(rowText.includes(MENU_COMMANDS[0].description));
 });
 
+test("ChatInput command-menu rows align at wide viewports and stack in sidebar-constrained panes", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  const modelRow = findCommandOption(tree, "model");
+  const rowClass = templateProps(modelRow).className;
+  assert.match(rowClass, /\bgrid\b/);
+  assert.match(rowClass, /\bgrid-cols-1\b/);
+  assert.doesNotMatch(rowClass, /sm:grid-cols-/);
+  assert.match(rowClass, /lg:grid-cols-\[18rem_minmax\(0,1fr\)\]/);
+
+  const commandBadge = findNode(
+    modelRow,
+    (node) => {
+      const className = templateProps(node).className;
+      return typeof className === "string" &&
+        className.includes("font-mono") &&
+        className.includes("rounded-md");
+    },
+  );
+  assert.ok(commandBadge, "expected the command badge inside the menu row");
+  assert.match(templateProps(commandBadge).className, /\bw-fit\b/);
+  assert.match(templateProps(commandBadge).className, /\bmax-w-full\b/);
+});
+
 test("ChatInput command-menu footer shows the usage hint for the active row only", () => {
   // The usage hint moved from an inline line inside the active row (which
   // made that one row taller than its neighbors — see the visual-design

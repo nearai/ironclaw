@@ -325,6 +325,8 @@ SEL_V2 = {
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "command_menu_listbox": "#chat-command-menu-listbox",
+    "command_menu_option": "#chat-command-menu-listbox [role='option']",
     "chat_cancel_run": "[data-testid='chat-cancel-run']",
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
