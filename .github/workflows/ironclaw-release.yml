@@ -143,7 +143,7 @@ jobs:
       - name: "Enable pnpm"
         run: "corepack enable pnpm"
         shell: "bash"
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
         with:
           key: ${{ join(matrix.targets, '-') }}
           cache-provider: ${{ matrix.cache_provider }}
