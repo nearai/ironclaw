@@ -1,5 +1,8 @@
+// @vitest-environment happy-dom
+
 import assert from "node:assert/strict";
-import React from "react";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test, vi } from "vitest";
 
@@ -15,6 +18,8 @@ vi.mock("../../../design-system/icons", async () => {
 
 vi.mock("../../../lib/toast", () => ({ toast: () => {} }));
 vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -51,6 +56,80 @@ test("a success result renders a heading, left-aligned field rows, and readable 
     /text-center/,
     "the redesigned result must not regress to centered prose",
   );
+});
+
+test("every visible command-result variant invokes its dismissal callback", async () => {
+  const { CommandResult } = await import("./command-result");
+  const cases = [
+    {
+      label: "success card",
+      response: {
+        command: "status",
+        result: { title: "Status", fields: [], lines: [] },
+      },
+    },
+    {
+      label: "live command-list card",
+      response: {
+        command: "",
+        rejection: { kind: "invalid_request", message: "Available commands" },
+      },
+      commands: [
+        { name: "status", title: "Status", description: "d", usage: "/status" },
+      ],
+    },
+    {
+      label: "command-list fallback notice",
+      response: {
+        command: "",
+        rejection: { kind: "invalid_request", message: "Available commands" },
+      },
+      commands: [],
+    },
+    {
+      label: "denial notice",
+      response: {
+        command: "extension_install",
+        rejection: { kind: "access_denied", message: "Admin required" },
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const onDismiss = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          React.createElement(CommandResult, {
+            response: testCase.response,
+            commands: testCase.commands,
+            onDismiss,
+          }),
+        );
+      });
+      const dismiss = container.querySelector(
+        '[data-testid="command-result-dismiss"]',
+      );
+      assert.ok(dismiss, `${testCase.label} should expose a dismiss button`);
+      assert.equal(dismiss.getAttribute("aria-label"), "common.dismiss");
+      assert.ok(
+        dismiss.querySelector('[data-icon="close"]'),
+        `${testCase.label} should use the close icon`,
+      );
+      dismiss.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      assert.equal(
+        onDismiss.mock.calls.length,
+        1,
+        `${testCase.label} should invoke its callback once`,
+      );
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  }
 });
 
 test("a run-id-shaped field value renders monospace, truncatable, with a copy affordance", async () => {

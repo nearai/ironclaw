@@ -997,6 +997,7 @@ test("Chat threads the server command inventory down to MessageList so a command
     { name: "status", title: "Status", description: "d", usage: "/status" },
     { name: "model", title: "Model", description: "d", usage: "/model" },
   ];
+  const dismissCommandResult = () => {};
   const { tree, components } = renderChat({
     activeThreadId: "thread-1",
     contextOverrides: { useChatCommands: () => commands },
@@ -1019,6 +1020,7 @@ test("Chat threads the server command inventory down to MessageList so a command
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
+      dismissCommandResult,
     },
   });
 
@@ -1027,6 +1029,11 @@ test("Chat threads the server command inventory down to MessageList so a command
     componentProps(messageList, components.MessageList).commands,
     commands,
     "MessageList should receive the same command inventory the composer uses",
+  );
+  assert.equal(
+    componentProps(messageList, components.MessageList).onDismissCommandResult,
+    dismissCommandResult,
+    "MessageList should receive the command-result dismissal callback",
   );
 });
 

@@ -132,6 +132,7 @@ export function MessageList({
   logsPath,
   pending = false,
   commands,
+  onDismissCommandResult,
   children,
 }) {
   const t = useT();
@@ -415,6 +416,7 @@ export function MessageList({
                     regressionArtifactExportEnabled
                   }
                   commands={commands}
+                  onDismissCommandResult={onDismissCommandResult}
                 />)
         )}
         {children}

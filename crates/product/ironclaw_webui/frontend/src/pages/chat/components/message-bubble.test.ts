@@ -41,12 +41,20 @@ vi.mock("./tool-activity", async () => {
 vi.mock("./command-result", async () => {
   const { createElement } = await import("react");
   return {
-    CommandResult: ({ response, commands }) =>
-      createElement("div", {
-        "data-testid": "command-result-mock",
-        "data-command": response?.command,
-        "data-commands-count": Array.isArray(commands) ? commands.length : -1,
-      }),
+    CommandResult: ({ response, commands, onDismiss }) =>
+      createElement(
+        "div",
+        {
+          "data-testid": "command-result-mock",
+          "data-command": response?.command,
+          "data-commands-count": Array.isArray(commands) ? commands.length : -1,
+        },
+        createElement(
+          "button",
+          { "data-testid": "command-result-dismiss-mock", onClick: onDismiss },
+          "dismiss",
+        ),
+      ),
   };
 });
 
@@ -256,6 +264,7 @@ test("untagged reasoning in an activity run renders Markdown", async () => {
 
 test("a SYSTEM message carrying a structured command result renders CommandResult, not the legacy markdown notice", async () => {
   const { MessageBubble } = await import("./message-bubble");
+  const onDismissCommandResult = vi.fn();
   const commands = [
     { name: "status", title: "Status", description: "d", usage: "/status" },
   ];
@@ -282,6 +291,7 @@ test("a SYSTEM message carrying a structured command result renders CommandResul
             timestamp: "2026-07-30T00:00:00.000Z",
           },
           commands,
+          onDismissCommandResult,
         }),
       );
     });
@@ -299,6 +309,10 @@ test("a SYSTEM message carrying a structured command result renders CommandResul
       /data-testid="markdown"/,
       "a structured command result must not also render through the legacy markdown notice path",
     );
+    container
+      .querySelector('[data-testid="command-result-dismiss-mock"]')
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    assert.deepEqual(onDismissCommandResult.mock.calls, [["system-command-1"]]);
   } finally {
     act(() => root.unmount());
     container.remove();

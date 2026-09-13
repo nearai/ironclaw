@@ -171,7 +171,24 @@ function CommandResultShell({ children }) {
   );
 }
 
-function CommandResultHeader({ title, badge = null }) {
+function CommandResultDismissButton({ onDismiss }) {
+  const t = useT();
+  if (!onDismiss) return null;
+  return (
+    <button
+      type="button"
+      data-testid="command-result-dismiss"
+      onClick={onDismiss}
+      aria-label={t("common.dismiss")}
+      title={t("common.dismiss")}
+      className="v2-button inline-grid h-6 w-6 shrink-0 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]"
+    >
+      <Icon name="close" className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+function CommandResultHeader({ title, badge = null, onDismiss }) {
   return (
     <div className="flex items-center gap-2 border-b border-[var(--v2-panel-border)] px-4 py-2.5">
       <Icon name="terminal" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]" />
@@ -186,14 +203,15 @@ function CommandResultHeader({ title, badge = null }) {
           {badge}
         </span>
       )}
+      <CommandResultDismissButton onDismiss={onDismiss} />
     </div>
   );
 }
 
-function CommandSuccessResult({ result }) {
+function CommandSuccessResult({ result, onDismiss }) {
   return (
     <CommandResultShell>
-      <CommandResultHeader title={result.title} />
+      <CommandResultHeader title={result.title} onDismiss={onDismiss} />
       <ResultFields fields={result.fields} />
       <ResultLines lines={result.lines} />
     </CommandResultShell>
@@ -203,7 +221,7 @@ function CommandSuccessResult({ result }) {
 // Shared shell for both a genuine denial and the "available commands" help
 // text when the inventory hasn't loaded — a calm inline notice (role=status,
 // muted tones), not a card and not the old amber centered blob.
-function CommandNotice({ icon, message, testId }) {
+function CommandNotice({ icon, message, testId, onDismiss }) {
   return (
     <div
       data-testid={testId}
@@ -211,7 +229,8 @@ function CommandNotice({ icon, message, testId }) {
       className="mx-auto flex w-full max-w-lg items-start gap-2.5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-left text-sm leading-6 text-[var(--v2-text-muted)]"
     >
       <Icon name={icon} className="mt-0.5 h-4 w-4 shrink-0 text-[var(--v2-text-faint)]" />
-      <span className="whitespace-pre-wrap break-words">{message}</span>
+      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{message}</span>
+      <CommandResultDismissButton onDismiss={onDismiss} />
     </div>
   );
 }
@@ -247,7 +266,7 @@ function CommandListRows({ commands }) {
 // help-text blob. The blob remains the fallback when the inventory hasn't
 // loaded yet (composer mounted before `useChatCommands()` resolved, or the
 // fetch failed) — see useChatCommands.ts.
-function CommandListResult({ rejection, commands }) {
+function CommandListResult({ rejection, commands, onDismiss }) {
   const t = useT();
   if (!commands || commands.length === 0) {
     return (
@@ -255,24 +274,35 @@ function CommandListResult({ rejection, commands }) {
         icon="list"
         message={rejection.message}
         testId="command-result-list-fallback"
+        onDismiss={onDismiss}
       />
     );
   }
   return (
     <CommandResultShell>
-      <CommandResultHeader title={t("chat.commandListTitle")} badge={commands.length} />
+      <CommandResultHeader
+        title={t("chat.commandListTitle")}
+        badge={commands.length}
+        onDismiss={onDismiss}
+      />
       <CommandListRows commands={commands} />
     </CommandResultShell>
   );
 }
 
-export function CommandResult({ response, commands = [] }) {
+export function CommandResult({ response, commands = [], onDismiss = null }) {
   const kind = classifyCommandResponse(response);
   if (kind === COMMAND_RESULT_KIND.SUCCESS) {
-    return <CommandSuccessResult result={response.result} />;
+    return <CommandSuccessResult result={response.result} onDismiss={onDismiss} />;
   }
   if (kind === COMMAND_RESULT_KIND.COMMAND_LIST) {
-    return <CommandListResult rejection={response.rejection} commands={commands} />;
+    return (
+      <CommandListResult
+        rejection={response.rejection}
+        commands={commands}
+        onDismiss={onDismiss}
+      />
+    );
   }
   if (kind === COMMAND_RESULT_KIND.DENIAL) {
     return (
@@ -280,6 +310,7 @@ export function CommandResult({ response, commands = [] }) {
         icon="lock"
         message={response.rejection.message}
         testId="command-result-denial"
+        onDismiss={onDismiss}
       />
     );
   }

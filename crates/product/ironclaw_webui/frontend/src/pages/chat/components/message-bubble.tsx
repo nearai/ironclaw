@@ -67,6 +67,7 @@ type MessageBubbleProps = {
   // `commandResult` whose rejection is the "available commands" help case;
   // see command-result.tsx.
   commands?: CommandDescriptor[];
+  onDismissCommandResult?: (messageId: string) => void;
 };
 
 function formatTimestamp(value?: string) {
@@ -128,6 +129,7 @@ function MessageBubbleImpl({
   activeRunId,
   regressionArtifactExportEnabled = false,
   commands,
+  onDismissCommandResult,
 }: MessageBubbleProps) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, errorKey, toolCalls, timestamp, commandResult } = message;
@@ -276,7 +278,15 @@ function MessageBubbleImpl({
   ) {
     return (
       <React.Suspense fallback={null}>
-        <CommandResult response={commandResult} commands={commands} />
+        <CommandResult
+          response={commandResult}
+          commands={commands}
+          onDismiss={
+            onDismissCommandResult
+              ? () => onDismissCommandResult(message.id)
+              : undefined
+          }
+        />
       </React.Suspense>
     );
   }

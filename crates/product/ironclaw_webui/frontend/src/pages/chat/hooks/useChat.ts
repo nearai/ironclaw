@@ -69,6 +69,14 @@ const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
 const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
+// Command results and useHistory's in-memory cache share the lifetime of this
+// frontend module. Keep their sequence here rather than inside useChat so a
+// route change/remount cannot reuse a cached result's React key.
+let commandResultSequence = 1;
+
+function nextCommandResultMessageId() {
+  return `system-command-${commandResultSequence++}`;
+}
 
 type ChatSendOptions = {
   threadId?: string | null;
@@ -1137,7 +1145,7 @@ export function useChat(threadId) {
     async (text) => {
       const appendNotice = (content, executedThreadId, meta = {}) => {
         const notice = {
-          id: `system-command-${pendingSeqRef.current++}`,
+          id: nextCommandResultMessageId(),
           role: CHAT_MESSAGE_ROLES.SYSTEM,
           content,
           timestamp: new Date().toISOString(),
@@ -1183,6 +1191,20 @@ export function useChat(threadId) {
     [threadId, setMessages, seedThreadMessages, t],
   );
 
+  const dismissCommandResult = React.useCallback(
+    (messageId) => {
+      setMessages((previous) =>
+        previous.filter(
+          (message) =>
+            message.id !== messageId ||
+            message.role !== CHAT_MESSAGE_ROLES.SYSTEM ||
+            !message.commandResult,
+        ),
+      );
+    },
+    [setMessages],
+  );
+
   return {
     // v2-native
     messages,
@@ -1198,6 +1220,7 @@ export function useChat(threadId) {
     cooldownSeconds,
     send,
     runCommand,
+    dismissCommandResult,
     resolveGate,
     submitAuthToken,
     startOnboardingOAuth,
