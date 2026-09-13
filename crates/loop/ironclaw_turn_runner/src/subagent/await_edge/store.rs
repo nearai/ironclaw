@@ -8,8 +8,8 @@ use ironclaw_host_api::turn::{LoopMessageRef, TurnRunId, TurnScope};
 use ironclaw_processes::{
     CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
-    ProcessLifecycleStatus, ProcessTerminalEvidence, SettleProcessDependencyRequest,
-    TransitionProcessDependencyRequest,
+    ProcessLifecycleStatus, ProcessTerminalEvidence, ScanUnclosedProcessDependenciesRequest,
+    SettleProcessDependencyRequest, TransitionProcessDependencyRequest,
 };
 
 use super::{
@@ -369,6 +369,66 @@ impl AwaitEdgeStore {
                 Self::edge_from_record(record).map(|edge| (parent, child, edge))
             })
             .collect()
+    }
+
+    /// Bounded, unscoped scan of unclosed background-mode dependency edges
+    /// (`group_ref_prefix = "bg:"`, the exact tag `finish_spawn` writes for
+    /// `SpawnSubagentMode::Background`) — the boot/periodic sweep's read
+    /// primitive (`boot_recovery::sweep_unclosed_background_edges`). Every
+    /// scope-bound caller keeps using `list_background_for_thread` /
+    /// `list_unclosed_for_scope`; this is the one caller allowed to reach
+    /// `ProcessDependencyPort::scan_unclosed_process_dependencies` cross-scope.
+    ///
+    /// Returns each record's own `group_ref` alongside its edge — the exact
+    /// `"bg:{parent_thread_id}"` tag `finish_spawn` writes — so the caller can
+    /// bucket by *parent* backlog for fairness. Deliberately not
+    /// `record.scope`: that field is the *child's* own scope (a fresh,
+    /// unique thread per spawned subagent), so grouping by it would put every
+    /// edge in its own singleton bucket regardless of which parent is
+    /// backlogged, defeating round-robin fairness entirely. `group_ref` is
+    /// the one field on this record that actually identifies "whose backlog
+    /// this is." Also returns the keyset cursor for the next page (`None`
+    /// once the scan is exhausted).
+    pub async fn scan_unclosed_background(
+        &self,
+        states: Vec<ProcessDependencyState>,
+        limit: u32,
+        after: Option<(
+            ironclaw_host_api::ids::ProcessId,
+            ironclaw_host_api::ids::ProcessId,
+        )>,
+    ) -> Result<
+        (
+            Vec<(TurnRunId, TurnRunId, Option<String>, AwaitEdge)>,
+            Option<(
+                ironclaw_host_api::ids::ProcessId,
+                ironclaw_host_api::ids::ProcessId,
+            )>,
+        ),
+        AwaitEdgeStoreError,
+    > {
+        let response = self
+            .dependencies
+            .scan_unclosed_process_dependencies(ScanUnclosedProcessDependenciesRequest {
+                scope_filter: None,
+                states,
+                group_ref_prefix: Some("bg:".to_string()),
+                limit,
+                after,
+            })
+            .await
+            .map_err(map_process_error)?;
+        let edges = response
+            .dependencies
+            .into_iter()
+            .map(|record| {
+                let parent = Self::run_id(record.dependent_process_id);
+                let child = Self::run_id(record.dependency_process_id);
+                let group_ref = record.group_ref.clone();
+                Self::edge_from_record(record).map(|edge| (parent, child, group_ref, edge))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((edges, response.next_after))
     }
 
     pub async fn consume(

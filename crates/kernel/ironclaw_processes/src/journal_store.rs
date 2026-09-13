@@ -33,6 +33,7 @@ use crate::journal::{
     ProcessTreeReservation, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
+    ScanUnclosedProcessDependenciesRequest, ScanUnclosedProcessDependenciesResponse,
     SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
     SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
     TransitionProcessDependencyRequest,
@@ -1282,6 +1283,45 @@ where
             )
         });
         Ok(records)
+    }
+
+    /// Bounded, scope-optional recovery scan over unclosed dependency edges.
+    ///
+    /// Rows are read once via the same unscoped `unresolved` dependency read
+    /// [`Self::unresolved_process_dependencies`] already uses — no new
+    /// filesystem query (`reborn_process_storage_scan_gate.rs` confines this
+    /// store's filesystem `.query(`/`.tail_bounded(` calls to
+    /// migration/bootstrap paths, and this method adds neither) — then every
+    /// filter, the scope check, and the keyset page are applied entirely in
+    /// memory by [`state::scan_unclosed_dependencies`], the free-function
+    /// counterpart of `ProcessJournalMaterializedState::expired_process_ids`'s
+    /// (lease-recovery) in-memory-scan pattern.
+    async fn scan_unclosed_process_dependencies(
+        &self,
+        request: ScanUnclosedProcessDependenciesRequest,
+    ) -> Result<ScanUnclosedProcessDependenciesResponse, Self::Error> {
+        // Required, not defensive: `unresolved_dependencies` below queries the
+        // `process_dependency_unresolved_v3` index, which only exists once
+        // `rows::ensure_indexes` has declared it (and, on first boot, once
+        // legacy data has been imported into row-native storage) —
+        // `ensure_materialized` is what guarantees both, exactly as it does
+        // for every other read in this impl (`query_process_dependencies`,
+        // `unresolved_process_dependencies`).
+        self.ensure_materialized().await?;
+        // ponytail: `rows::unresolved_dependencies` takes no limit — every
+        // call here reads the *whole* `process_dependency_unresolved_v3`
+        // index, so `request.limit`/`request.after` only bound the in-memory
+        // page, not the storage read; a second page costs a second full
+        // index read. Acceptable today because the index holds only
+        // *unclosed* rows (bounded by in-flight work, not by history), and
+        // the caller (`boot_recovery::sweep_unclosed_background_edges`)
+        // requests its scan cap as a single page, so the common case pays
+        // exactly one full read per pass, not one per page. Upgrade path:
+        // push `limit`/`after` down into `query_indexed_collection` the way
+        // `dependencies_for_scope_canonical_order` already does for the
+        // scope-bound query, so the storage read is bounded too.
+        let records = rows::unresolved_dependencies(self.filesystem.as_ref()).await?;
+        Ok(state::scan_unclosed_dependencies(records, &request))
     }
 }
 

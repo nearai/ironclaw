@@ -103,7 +103,9 @@ use ironclaw_turn_runner::runtime::{
     DefaultPlannedRuntimeParts, ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_turn_runner::subagent::await_edge::{
-    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
+    boot_recovery::{ScopeRecoveryDriver, sweep_unclosed_background_edges},
+    resolver::AwaitEdgeResolver,
+    store::AwaitEdgeStore,
 };
 use ironclaw_turn_runner::subagent::flavors::StaticSubagentDefinitionResolver;
 use ironclaw_turns::{
@@ -656,6 +658,12 @@ pub struct RebornRuntime {
     /// Boot-time reply-publication recovery sweep, owned so shutdown stops
     /// it before releasing publication leases.
     pub(crate) reply_publication_recovery: Option<tokio::task::JoinHandle<()>>,
+    /// Boot pass + periodic re-scan for stranded background subagent
+    /// await-edges (`sweep_unclosed_background_edges`, R4). `None` when
+    /// `SubagentSweepSettings::enabled` is false; owned here so shutdown can
+    /// stop the periodic loop instead of leaving it running past runtime
+    /// teardown.
+    pub(crate) subagent_background_sweep: Option<tokio::task::JoinHandle<()>>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -2541,6 +2549,10 @@ impl RebornRuntime {
             recovery.abort();
             let _ = recovery.await; // silent-ok: an aborted join is Cancelled.
         }
+        if let Some(sweep) = self.subagent_background_sweep {
+            sweep.abort();
+            let _ = sweep.await; // silent-ok: an aborted join is Cancelled.
+        }
         // Hand open reply publications back: their leases are released so
         // a publisher on the next process (or another node) resumes them
         // immediately instead of waiting for the lease to lapse.
@@ -3121,6 +3133,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         tool_disclosure,
         trigger_poller,
         credential_refresh,
+        subagent_sweep,
         trigger_fire_access_checker,
         trigger_fire_access,
         poll,
@@ -4441,6 +4454,35 @@ pub(crate) async fn build_runtime_with_resource_governor(
             }
         }));
     }
+
+    // Boot pass + periodic re-scan for background subagent await-edges whose
+    // parent thread never received attention again (§4.2, §6 row R4) — the
+    // third healing trigger alongside `recover_scope` (lazy, one scope on
+    // admission) and `sweep_thread_on_run_start` (one thread, at run start).
+    // `SubagentSweepSettings::enabled` defaults true: unlike the trigger
+    // poller or the keepalive sweep, leaving this off is not a safe default —
+    // without it a stranded background edge has no other path back to its
+    // parent thread. `sweep_unclosed_background_edges` never returns an
+    // error (internal failures are folded into `ResolveReport::failed` and
+    // logged by the callee at `debug!`), so this task degrades on its own
+    // without any match here; a second `debug!` of the same report at this
+    // call site would just duplicate that log line on every pass.
+    let mut subagent_background_sweep: Option<tokio::task::JoinHandle<()>> = None;
+    if subagent_sweep.enabled {
+        let resolver = Arc::clone(&subagent_await_edge_resolver);
+        let store = Arc::clone(&subagent_await_edge_store);
+        subagent_background_sweep = Some(tokio::spawn(async move {
+            let mut sweep_tick = tokio::time::interval(subagent_sweep.interval);
+            sweep_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                // `interval`'s first tick fires immediately, so this also
+                // serves as the once-at-boot pass.
+                sweep_tick.tick().await;
+                sweep_unclosed_background_edges(&resolver, &store).await;
+            }
+        }));
+    }
+
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
     // Forward-migrate pre-removal routines that still carry a stored delivery
@@ -4789,6 +4831,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         session_channel_directory,
         session_channel_extension_id,
         reply_publication_recovery,
+        subagent_background_sweep,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),

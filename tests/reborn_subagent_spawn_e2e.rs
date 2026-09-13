@@ -21,7 +21,6 @@ use parity_qa_support::model_replay::{
 use reborn_support::{config::WaitConfig, harness::RecordingTestCapabilityPort};
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn blocking_spawn_parks_parent_then_resumes_with_child_result() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -86,7 +85,6 @@ async fn blocking_spawn_parks_parent_then_resumes_with_child_result() {
 }
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn legacy_explicit_blocking_spawn_still_parks_parent_and_resumes() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -144,62 +142,114 @@ async fn legacy_explicit_blocking_spawn_still_parks_parent_and_resumes() {
     harness.shutdown().await;
 }
 
+/// Background spawn (R2) is a `Done`/`ChildSpawned` resolution, not a
+/// suspension: the capability port returns an immediate receipt
+/// ("subagent spawned in background; result will arrive as a tagged input")
+/// and the parent's loop keeps going without ever entering
+/// `TurnStatus::BlockedDependentRun`. This is the first end-to-end proof of
+/// that path — the deny-filter-obsolete predecessor
+/// (`background_spawn_is_rejected_before_child_run_or_auth_invocation`)
+/// asserted the opposite (no child run at all), which was only true while
+/// spawn_subagent was denied outright.
+///
+/// The parent's post-spawn model call and the child's first model call are
+/// genuinely concurrent (background does not park the parent behind the
+/// child), so both scripted continuation steps are pinned to request content
+/// (`ResponseForRequest`) rather than to queue order — `request_contains`
+/// matching is race-proof regardless of which call the runtime issues first.
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
-async fn background_spawn_is_rejected_before_child_run_or_auth_invocation() {
+async fn background_spawn_returns_a_receipt_and_the_parent_continues_without_waiting() {
+    const CHILD_TASK: &str = "quietly note that the background child ran";
+
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![spawn_call(
-                "spawn_background_disabled",
+                "spawn_background",
                 serde_json::json!({
                     "flavor_id": "general",
-                    "task": "run in the background",
+                    "task": CHILD_TASK,
                     "mode": "background",
                 }),
             )],
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
-            response: HostManagedModelResponse::assistant_reply("background spawn rejected"),
+        // The child's own first model call: scripted by content, since it can
+        // race the parent's continuation call below.
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: CHILD_TASK.to_string(),
+            response: HostManagedModelResponse::assistant_reply("background child output"),
+            expected_tool_results: Vec::new(),
+        },
+        // The parent's very next model call, immediately after the spawn
+        // tool call resolves with the background receipt (not after the
+        // child completes) — pinned on the receipt text so it cannot be
+        // confused with the child's request above.
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "subagent spawned in background".to_string(),
+            response: HostManagedModelResponse::assistant_reply("parent proceeded without waiting"),
             expected_tool_results: Vec::new(),
         },
     ]);
-    let mut harness = spawn_harness("room-subagent-background-disabled", model_gateway).await;
+    let mut harness = spawn_harness("room-subagent-background", model_gateway).await;
     harness.start();
 
     let submitted = harness
-        .submit_text(
-            "event-subagent-background-disabled",
-            "try background delegation",
-        )
+        .submit_text("event-subagent-background", "delegate in the background")
         .await
         .expect("submit root turn");
+
+    // The parent must never pass through the blocking-spawn park state.
+    // `wait_for_status_in_scope_with_config` fails fast the moment the run
+    // reaches ANY terminal status other than the one it's waiting for, so if
+    // the parent runs straight to `Completed` (as background spawn requires)
+    // this returns an `Err` deterministically rather than timing out.
+    let park_attempt = harness
+        .wait_for_status(submitted.run_id, TurnStatus::BlockedDependentRun)
+        .await;
+    assert!(
+        park_attempt.is_err(),
+        "background spawn must not park the parent on BlockedDependentRun: {park_attempt:?}"
+    );
+    assert_eq!(
+        harness
+            .run_state(submitted.run_id)
+            .await
+            .expect("parent run state")
+            .status,
+        TurnStatus::Completed,
+        "parent must reach a terminal status without waiting on the child"
+    );
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
-        .await
-        .expect("background spawn rejection completes parent turn");
-    harness
-        .assert_final_reply("background spawn rejected")
+        .assert_final_reply("parent proceeded without waiting")
         .await
         .expect("parent final reply");
-    assert!(
-        harness
-            .children_of(&submitted.scope, submitted.run_id)
-            .await
-            .expect("children")
-            .is_empty(),
-        "disabled background spawn must not create a child run"
-    );
-    assert!(
-        harness.capability_invocations().is_empty(),
-        "disabled background spawn must reject before inner authorization invocation"
-    );
+
+    // A genuinely distinct child run exists, spawned before the parent
+    // finished.
+    let child = await_single_child(&harness, &submitted).await;
+    assert_child_thread_invariants(&submitted, &child);
+
+    // The child itself runs its own scripted step to completion.
+    harness
+        .wait_for_status_in_scope(child.scope.clone(), child.run_id, TurnStatus::Completed)
+        .await
+        .expect("background child completes on its own schedule");
+
+    // Not asserted here: delivery of the child's result back into the parent
+    // thread. Background delivery lands as a queued `SubagentSettled` input
+    // that only drains on a later wake (a new run start, or an explicit
+    // System-provenance activation — see
+    // `tests/integration/subagent_await_edge.rs`), which this binary-E2E
+    // harness has no deterministic way to trigger: the parent run is already
+    // terminal, and nothing in this harness re-submits or activates it. A
+    // sleep-and-poll for a delivered message would be flaky (the interval is
+    // a real implementation detail, not a contract), so it is left uncovered
+    // here rather than forced.
     harness.assert_model_exhausted();
     harness.shutdown().await;
 }
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -309,7 +359,6 @@ async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() 
 }
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn parallel_blocking_spawn_resumes_once_after_last_child() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {

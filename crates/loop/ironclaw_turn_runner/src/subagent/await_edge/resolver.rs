@@ -12,6 +12,7 @@
 //! changed. Boot/lazy recovery split out to `boot_recovery.rs` (plan-review
 //! fix — keeps this file to the reactive settle path only).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 #[cfg(test)]
@@ -75,6 +76,14 @@ pub struct AwaitEdgeResolver<S: SessionThreadService + ?Sized> {
     input_enqueue: OnceLock<Arc<dyn HostInputEnqueuePort>>,
     coordinator: OnceLock<Arc<dyn TurnCoordinator>>,
     thread_service: Arc<S>,
+    /// Process-lifetime observability counters (§6, R4) for the reactive
+    /// settle path (`observe_committed_state`/`observe_committed_event`,
+    /// below) — the highest-volume delivery path, and previously entirely
+    /// unobserved. Atomics, not a `Mutex`: the resolver is shared behind
+    /// `Arc` and called from many concurrent async contexts, and a per-event
+    /// counter increment must never contend with (or block behind) the
+    /// store/coordinator I/O the same call already performs.
+    resolve_counters: ResolveCounters,
 }
 
 impl<S> AwaitEdgeResolver<S>
@@ -97,6 +106,7 @@ where
             input_enqueue: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
+            resolve_counters: ResolveCounters::default(),
         }
     }
 
@@ -117,6 +127,7 @@ where
             input_enqueue: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
+            resolve_counters: ResolveCounters::default(),
         }
     }
 
@@ -1122,6 +1133,27 @@ where
             })
     }
 
+    /// Records one reactive-settle result into the process-lifetime counters
+    /// and emits a `debug!` line for it. Per-outcome (not a coarser cadence):
+    /// `debug!` is already opt-in verbosity — nobody pays for this in a
+    /// default-level deployment — so the extra granularity costs nothing in
+    /// practice and is exactly what a live diagnosis of one stuck child needs;
+    /// a coarser periodic summary would blur which child's settle produced
+    /// which outcome. Observation only — never changes what the caller
+    /// returns.
+    fn record_reactive_outcome(&self, result: &Result<ResolveOutcome, TurnError>) {
+        match result {
+            Ok(outcome) => {
+                self.resolve_counters.record(*outcome);
+                tracing::debug!(?outcome, "await-edge reactive settle outcome");
+            }
+            Err(error) => {
+                self.resolve_counters.record_failed();
+                tracing::debug!(error = %error, "await-edge reactive settle failed");
+            }
+        }
+    }
+
     /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
     /// on `scope`'s thread. Queries at most `MAX_QUEUED_INPUTS_PER_RUN`
     /// background edges (`AwaitEdgeStore::list_background_for_thread`) and
@@ -1183,6 +1215,39 @@ where
             }
         }
         Ok(())
+    }
+}
+
+/// Process-lifetime, lock-free tally of reactive-settle outcomes (§6, R4).
+/// Plain `AtomicU64` fields rather than a `Mutex<ResolveReport>`: increments
+/// happen on the hot reactive settle path, called concurrently from every
+/// child turn's commit callback, and must never contend with (or block
+/// behind) another child's increment.
+#[derive(Default)]
+struct ResolveCounters {
+    resumed: AtomicU64,
+    drained: AtomicU64,
+    abandoned: AtomicU64,
+    already_closed: AtomicU64,
+    failed: AtomicU64,
+}
+
+impl ResolveCounters {
+    fn record(&self, outcome: ResolveOutcome) {
+        let counter = match outcome {
+            ResolveOutcome::Resumed => &self.resumed,
+            ResolveOutcome::Drained => &self.drained,
+            ResolveOutcome::Abandoned => &self.abandoned,
+            ResolveOutcome::AlreadyClosed => &self.already_closed,
+            // Not a subagent child at all — not a resolve outcome worth
+            // counting, mirroring `ResolveReport::record`'s own no-op arm.
+            ResolveOutcome::NotApplicable => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_failed(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1359,11 +1424,15 @@ where
         state: ironclaw_turns::TurnRunState,
     ) -> Result<(), TurnError> {
         let event = terminal_event_from_state(&state)?;
-        self.handle_child_terminal_inner(&event).await.map(|_| ())
+        let result = self.handle_child_terminal_inner(&event).await;
+        self.record_reactive_outcome(&result);
+        result.map(|_| ())
     }
 
     async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
-        self.handle_child_terminal_inner(&event).await.map(|_| ())
+        let result = self.handle_child_terminal_inner(&event).await;
+        self.record_reactive_outcome(&result);
+        result.map(|_| ())
     }
 }
 
