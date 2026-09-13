@@ -4,8 +4,10 @@ use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily};
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::{
-    DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy, DefaultRecoveryStrategy,
+    ActiveTaskPreservingCompactionStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy,
+    DefaultRecoveryStrategy,
 };
+use ironclaw_loop_contracts::PromptContextTokenBudget;
 
 mod subagent;
 mod unbound;
@@ -24,7 +26,11 @@ pub use unbound::{
 /// with their resolved values so a family's [`ComponentIdentity`] digest
 /// always identifies the configuration it actually runs with
 /// (see `family.rs` component-identity contract).
-fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts: u32) -> String {
+fn default_family_fingerprint(
+    iteration_limit: u32,
+    model_availability_attempts: u32,
+    context_limit_tokens: u64,
+) -> String {
     format!(
         "ironclaw_agent_loop.default_family.v3:\
         family_id=default;\
@@ -32,7 +38,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         planner=DefaultPlanner;\
         strategies=\
         context:DefaultContextStrategy(max_messages=128),\
-        compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),\
+        compaction:ActiveTaskPreservingCompactionStrategy(context_limit={context_limit_tokens},reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),\
         capability:DefaultCapabilityStrategy(all),\
         model:DefaultModelStrategy(primary_or_fallback_index),\
         batch:model_emitted_calls(bounded_fanout=4),\
@@ -81,6 +87,11 @@ pub struct FamilyOverrides {
     /// Availability-class model retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`).
     pub model_availability_attempts: Option<u32>,
+    /// Prompt-context ceiling the compaction strategy works against; defaults
+    /// to [`PromptContextTokenBudget::DEFAULT_CONTEXT_LIMIT_TOKENS`]. A
+    /// deployment whose models carry a larger window raises it here rather
+    /// than editing the constant.
+    pub context_limit_tokens: Option<u64>,
 }
 
 impl FamilyOverrides {
@@ -91,6 +102,11 @@ impl FamilyOverrides {
 
     pub fn set_model_availability_attempts(mut self, attempts: u32) -> Self {
         self.model_availability_attempts = Some(attempts);
+        self
+    }
+
+    pub fn set_context_limit_tokens(mut self, context_limit_tokens: u64) -> Self {
+        self.context_limit_tokens = Some(context_limit_tokens);
         self
     }
 }
@@ -116,11 +132,18 @@ pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     let max_model_availability_attempts = overrides
         .model_availability_attempts
         .unwrap_or(DefaultRecoveryStrategy::default().max_model_availability_attempts);
+    let context_limit_tokens = overrides
+        .context_limit_tokens
+        .unwrap_or(PromptContextTokenBudget::DEFAULT_CONTEXT_LIMIT_TOKENS);
     let digest = ComponentDigest::from_blake3(default_family_fingerprint(
         iteration_limit,
         max_model_availability_attempts,
+        context_limit_tokens,
     ));
+    let mut compaction = ActiveTaskPreservingCompactionStrategy::default();
+    compaction.base.prompt_context_budget.context_limit_tokens = context_limit_tokens;
     let planner = DefaultPlanner::compose_default()
+        .with_compaction(Arc::new(compaction))
         .with_version(ComponentIdentity::new("default", digest))
         .with_budget(Arc::new(DefaultBudgetStrategy {
             iteration_limit,
@@ -168,6 +191,7 @@ mod tests {
             ComponentDigest::from_blake3(default_family_fingerprint(
                 DEFAULT_ITERATION_BACKSTOP,
                 DefaultRecoveryStrategy::default().max_model_availability_attempts,
+                PromptContextTokenBudget::DEFAULT_CONTEXT_LIMIT_TOKENS,
             ))
         );
     }
@@ -181,6 +205,11 @@ mod tests {
             default_with_overrides(FamilyOverrides::default().set_model_availability_attempts(1));
         assert_ne!(attempts_override.version().digest, DEFAULT_FAMILY_DIGEST);
         assert_eq!(attempts_override.version().id, "default");
+
+        let context_override = default_with_overrides(
+            FamilyOverrides::default().set_context_limit_tokens(500_000),
+        );
+        assert_ne!(context_override.version().digest, DEFAULT_FAMILY_DIGEST);
 
         let iteration_override =
             default_with_overrides(FamilyOverrides::default().set_iteration_limit(5));
