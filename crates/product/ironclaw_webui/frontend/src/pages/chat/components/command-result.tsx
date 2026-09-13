@@ -164,7 +164,7 @@ function CommandResultShell({ children }) {
   return (
     <div
       data-testid="command-result"
-      className="mx-auto w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-left shadow-[0_20px_45px_-24px_rgba(0,0,0,0.6)]"
+      className="mx-auto w-full max-w-lg shrink-0 overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-left shadow-[0_20px_45px_-24px_rgba(0,0,0,0.6)]"
     >
       {children}
     </div>
@@ -208,7 +208,7 @@ function CommandNotice({ icon, message, testId }) {
     <div
       data-testid={testId}
       role="status"
-      className="mx-auto flex w-full max-w-lg items-start gap-2.5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-left text-sm leading-6 text-[var(--v2-text-muted)]"
+      className="mx-auto flex w-full max-w-lg shrink-0 items-start gap-2.5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-left text-sm leading-6 text-[var(--v2-text-muted)]"
     >
       <Icon name={icon} className="mt-0.5 h-4 w-4 shrink-0 text-[var(--v2-text-faint)]" />
       <span className="whitespace-pre-wrap break-words">{message}</span>
