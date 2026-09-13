@@ -58,6 +58,9 @@ export const SETTINGS_SUB_ROUTES = [
   { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
   // { id: "users", labelKey: "settings.users", icon: "lock" },
   { id: "language", labelKey: "settings.language", icon: "globe" },
+  // DEMO SCOPE: self-serve connect-link card. Superseded by device-code
+  // pairing; delete this row (and the tab it drives) when that lands.
+  { id: "devices", labelKey: "settings.devices", icon: "plug" },
 ];
 
 export const EXTENSIONS_SUB_ROUTES = [

@@ -111,6 +111,10 @@ use ironclaw_host_api::{
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
 };
+use ironclaw_product_contracts::approval_inbox::{
+    APPROVALS_PENDING_VIEW, ProductListPendingApprovalsResponse, ProductPendingApproval,
+    ProductPendingApprovalAction,
+};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductResolveGateRequest, ProductRetryRunRequest,
@@ -143,6 +147,9 @@ use ironclaw_product_contracts::product_wire::{
     RebornLogQueryRequest, RebornLogQueryResponse, RebornSuggestion,
     RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
     RebornSuggestionStartResponse, RebornSuggestionsResponse,
+};
+use ironclaw_product_contracts::session_tokens::{
+    ProductMintSessionTokenResponse, SESSION_TOKEN_MINT_COMMAND_ID,
 };
 use ironclaw_product_contracts::suggestions::{
     SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
@@ -1525,6 +1532,23 @@ impl StubServices {
                 .expect("notifications payload"),
                 next_cursor: Some("notification-cursor".to_string()),
             }),
+            id if id == APPROVALS_PENDING_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(ProductListPendingApprovalsResponse {
+                    approvals: vec![ProductPendingApproval {
+                        thread_id: "thread-alpha".to_string(),
+                        run_id: "run-alpha".to_string(),
+                        gate_ref: "gate:approval-alpha".to_string(),
+                        approval_request_id: "approval-alpha".to_string(),
+                        summary: "Approve the pending capability call".to_string(),
+                        action: ProductPendingApprovalAction::Dispatch {
+                            capability_id: "builtin.shell".to_string(),
+                        },
+                        thread_title: Some("Automation run".to_string()),
+                    }],
+                })
+                .expect("pending approvals payload"),
+                next_cursor: None,
+            }),
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -2006,6 +2030,21 @@ impl ProductSurface for StubServices {
             let output =
                 serde_json::to_value(ProductNotificationMutationResponse { updated: true })
                     .map_err(ProductSurfaceError::internal_from)?;
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
+        }
+
+        if request.operation_id.as_str() == SESSION_TOKEN_MINT_COMMAND_ID {
+            self.invoke_calls.lock().expect("lock").push((
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            ));
+            let output = serde_json::to_value(ProductMintSessionTokenResponse {
+                token: "stub-session-token".to_string(),
+            })
+            .map_err(ProductSurfaceError::internal_from)?;
             return Ok(
                 ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
             );
@@ -3427,6 +3466,65 @@ async fn notification_inbox_routes_query_and_mutate_product_surface() {
 }
 
 #[tokio::test]
+async fn list_pending_approvals_queries_the_flat_approvals_view() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/approvals/pending?limit=10")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["approvals"][0]["gate_ref"], "gate:approval-alpha");
+    assert_eq!(body["approvals"][0]["thread_id"], "thread-alpha");
+    assert_eq!(body["approvals"][0]["action"]["kind"], "dispatch");
+
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), APPROVALS_PENDING_VIEW.id);
+    assert_eq!(queries[0].params["limit"], 10);
+}
+
+#[tokio::test]
+async fn mint_session_token_dispatches_the_demo_scope_command() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/session/tokens")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert!(
+        body["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(
+        calls.last().expect("mint invoke recorded").0.as_str(),
+        SESSION_TOKEN_MINT_COMMAND_ID
+    );
+}
+
+#[tokio::test]
 async fn list_automations_omits_limits_and_forwards_none() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -4597,6 +4695,8 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], true);
+    assert_eq!(body["server"]["protocol_version"], 1);
+    assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
 
     // The session advertises the inline-attachment contract so the browser
     // file picker derives its `accept` set and size budgets from the server

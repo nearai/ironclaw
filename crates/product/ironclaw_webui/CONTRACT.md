@@ -133,9 +133,10 @@ candidate module.
 
 | Sub-owner | Owns | Never contains | Items |
 |---|---|---|---|
-| `session` | The session-bootstrap response and the feature flags it carries | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `get_session`, `global_auto_approve_enabled` |
+| `session` | The session-bootstrap response, the feature flags it carries, and the demo-scope self-serve session-token mint | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `WebUiV2ServerInfo`, `WEBUI_V2_PROTOCOL_VERSION`, `get_session`, `global_auto_approve_enabled`, `mint_session_token` |
 | `threads` | Thread lifecycle, message send, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `session_channel_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
 | `notifications` | Durable notification-inbox listing and lifecycle mutations, including route-edge query/path parsing | External-channel preferences, enrollment, or delivery — those are `outbound` | `list_notifications`, `ListNotificationsQuery`, `NotificationPath`, `mark_notification_read`, `mark_all_notifications_read`, `archive_notification` |
+| `approvals` | Cross-thread pending-approval listing for the caller | Gate resolution (that is `runs`) | `list_pending_approvals`, `PendingApprovalsQuery` |
 | `admin-users` | Admin user CRUD, role/status, and per-user secrets; parsing `{user_id}`/`{handle}` into domain types at the edge | Authorization logic — the service enforces admin authorization and last-admin protection | `parse_admin_user_id`, `parse_admin_secret_handle`, `read_admin_user_secret`, `admin_list_users`, `admin_create_user`, `admin_get_user`, `admin_update_user`, `admin_delete_user`, `admin_set_user_status`, `admin_set_user_role`, `admin_list_user_secrets`, `admin_put_user_secret`, `admin_delete_user_secret` |
 | `workspace-fs` | Project-file and mount-catalog reads, and the workspace path-scoping rules that keep a served path inside its projection | Attachment download (that is `attachments`) | `PROJECT_FS_ROOT`, `ProjectFsQuery`, `list_project_files`, `stat_project_file`, `read_project_file`, `project_fs_download_response`, `FsBrowseQuery`, `list_fs_mounts`, `browse_fs_dir`, `stat_fs_path`, `read_fs_file`, `require_fs_browse_path`, `workspace_scoped_projection_required`, `workspace_projection_for`, `workspace_served_path`, `strip_workspace_prefix`, `project_fs_list_path`, `require_project_fs_path` |
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
@@ -187,9 +188,11 @@ closed (`500`) if that layer is missing (locked by
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
+| `webui.v2.mint_session_token` | POST | `/api/webchat/v2/session/tokens` | — | `ProductSurface` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.list_notifications` | GET | `/api/webchat/v2/notifications` (`?limit&cursor`) | — | `ProductSurface` |
+| `webui.v2.list_pending_approvals` | GET | `/api/webchat/v2/approvals/pending` (`?limit`) | — | `ProductSurface` |
 | `webui.v2.mark_notification_read` | POST | `/api/webchat/v2/notifications/{notification_id}/read` | — | `ProductSurface` |
 | `webui.v2.mark_all_notifications_read` | POST | `/api/webchat/v2/notifications/read-all` | — | `ProductSurface` |
 | `webui.v2.archive_notification` | POST | `/api/webchat/v2/notifications/{notification_id}/archive` | — | `ProductSurface` |

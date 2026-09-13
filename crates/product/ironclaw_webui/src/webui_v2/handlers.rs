@@ -77,6 +77,9 @@ use ironclaw_product_contracts::admin_users::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_product_contracts::approval_inbox::{
+    APPROVALS_PENDING_VIEW, ProductListPendingApprovalsRequest, ProductListPendingApprovalsResponse,
+};
 use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
 };
@@ -135,6 +138,9 @@ use ironclaw_product_contracts::product_wire::{
 use ironclaw_product_contracts::product_wire::{
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
 };
+use ironclaw_product_contracts::session_tokens::{
+    ProductMintSessionTokenRequest, ProductMintSessionTokenResponse, SESSION_TOKEN_MINT_COMMAND,
+};
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
@@ -190,11 +196,25 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const SUGGESTIONS_MAX_RETRY_AFTER_SECONDS: u32 = 60;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
+/// Server identity a client uses to decide what it may call. `protocol_version`
+/// bumps only on a breaking change to the `/api/webchat/v2` surface.
+#[derive(Debug, Clone, Serialize)]
+pub struct WebUiV2ServerInfo {
+    pub version: &'static str,
+    pub protocol_version: u32,
+}
+
+/// Bumps only on a breaking change to the `/api/webchat/v2` surface.
+pub const WEBUI_V2_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Server identity (version + protocol version) so a client can decide
+    /// what it may call.
+    pub server: WebUiV2ServerInfo,
     /// Effective feature gates the browser uses to show/hide or constrain
     /// surfaces. Distinct from `capabilities`, which are per-token
     /// authorization flags.
@@ -266,6 +286,10 @@ pub async fn get_session(
         tenant_id,
         user_id,
         capabilities,
+        server: WebUiV2ServerInfo {
+            version: env!("CARGO_PKG_VERSION"),
+            protocol_version: WEBUI_V2_PROTOCOL_VERSION,
+        },
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
             workspace_requires_scoped_projection,
@@ -276,6 +300,26 @@ pub async fn get_session(
         attachments: attachment_capabilities(),
         session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
     })
+}
+
+/// `POST /api/webchat/v2/session/tokens`
+///
+/// DEMO SCOPE: self-serve bearer mint for a client that cannot complete the
+/// browser session flow itself. Superseded by device-code pairing; delete
+/// with the Settings Devices tab. 503s when the deployment has no admin
+/// token minter wired.
+pub async fn mint_session_token(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ProductMintSessionTokenResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SESSION_TOKEN_MINT_COMMAND,
+        ProductMintSessionTokenRequest {},
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 async fn global_auto_approve_enabled(state: &WebUiV2State, caller: ProductSurfaceCaller) -> bool {
@@ -1887,6 +1931,29 @@ pub struct ListNotificationsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+/// `GET /api/webchat/v2/approvals/pending`
+pub async fn list_pending_approvals(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Query(query): Query<PendingApprovalsQuery>,
+) -> Result<Json<ProductListPendingApprovalsResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = APPROVALS_PENDING_VIEW
+        .query_on(
+            &surface,
+            ProductListPendingApprovalsRequest { limit: query.limit },
+            None,
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PendingApprovalsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
