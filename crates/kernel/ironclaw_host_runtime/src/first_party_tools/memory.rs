@@ -535,19 +535,68 @@ pub fn map_memory_service_error(error: MemoryServiceError) -> FirstPartyCapabili
     match error.kind() {
         MemoryServiceErrorKind::Input => input_error(),
         MemoryServiceErrorKind::Operation | MemoryServiceErrorKind::Unavailable => {
-            // Log only the sanitized error kind — the `Display`/`source` chain
+            // Log only the sanitized error kind: the `Display`/`source` chain
             // can carry backend details or host paths.
             tracing::debug!(
                 error_kind = ?error.kind(),
                 "memory service operation failed"
             );
-            operation_error()
+            // Carry the sanitized message. Without it every domain failure
+            // arrives as the same opaque sentence, so "the document is not
+            // there" is indistinguishable from "the backend is broken" and the
+            // model cannot tell which of the two it should act on.
+            FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::OperationFailed,
+                error.message(),
+            )
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::map_memory_service_error;
+    use crate::first_party::FirstPartyCapabilityError;
+    use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
+    use ironclaw_memory::MemoryServiceError;
+
+    /// The service classifying absence correctly is only half of it. This is
+    /// the seam where that classification becomes the sentence the model reads,
+    /// and a `Dispatch { safe_summary: None }` here would put every domain
+    /// failure back behind one opaque message.
+    #[test]
+    fn a_not_found_error_reaches_the_model_as_a_named_operation_failure() {
+        let mapped = map_memory_service_error(MemoryServiceError::not_found());
+
+        let FirstPartyCapabilityError::Dispatch {
+            kind, safe_summary, ..
+        } = mapped
+        else {
+            panic!("a memory service failure must map to a dispatch failure");
+        };
+        assert_eq!(
+            kind,
+            RuntimeDispatchErrorKind::OperationFailed,
+            "absence is a domain failure, not an encoding failure"
+        );
+        assert_eq!(
+            safe_summary.as_deref(),
+            Some("no memory document at that path"),
+            "the cause must survive to the model, not collapse into a generic summary"
+        );
+    }
+
+    /// The other side of the same seam: an input error must keep saying so.
+    #[test]
+    fn an_input_error_still_maps_to_input_encode() {
+        let mapped = map_memory_service_error(MemoryServiceError::input());
+
+        let FirstPartyCapabilityError::Dispatch { kind, .. } = mapped else {
+            panic!("a memory service failure must map to a dispatch failure");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+    }
+
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
