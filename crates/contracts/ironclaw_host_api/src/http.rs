@@ -486,6 +486,13 @@ impl CapabilityHostHttpRequest {
 
 pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_body_limit_exceeded";
 
+/// Stable wire token emitted by host response sanitization when the leak
+/// detector blocks response headers or body content. Centralized here so MCP
+/// diagnostics can recognize the sentinel without minting a new global
+/// `RuntimeHttpEgressReasonCode` variant; `stable_runtime_reason()` continues
+/// to classify it as `response_error` for non-MCP consumers.
+pub const RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED: &str = "response_leak_blocked";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeHttpEgressReasonCode {
     CredentialUnavailable,

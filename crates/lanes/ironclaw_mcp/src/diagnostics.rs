@@ -195,6 +195,8 @@ impl McpResponseErrorCause {
 pub(crate) enum McpEgressCause {
     /// The host runtime egress future panicked.
     RuntimeEgressPanicked,
+    /// The shared host leak detector blocked response headers/body content.
+    ResponseLeakBlocked,
     /// The host runtime egress refused or failed the request, reported as one
     /// of `RuntimeHttpEgressError`'s stable, host-owned reason codes.
     RuntimeEgressFailed(&'static str),
@@ -204,6 +206,7 @@ impl McpEgressCause {
     fn into_reason(self) -> String {
         match self {
             Self::RuntimeEgressPanicked => "runtime_http_egress_panicked".to_string(),
+            Self::ResponseLeakBlocked => "response_leak_blocked".to_string(),
             // Already a closed set of `&'static str` codes owned by
             // `ironclaw_host_api`, but bounded here anyway: the cap is this
             // module's invariant, not the producer's.
@@ -280,6 +283,22 @@ mod tests {
         assert_eq!(
             provider_error_code(McpProviderRejectionCause::ToolRejected).as_str(),
             "mcp_tool_rejected"
+        );
+    }
+
+    #[test]
+    fn egress_causes_map_to_stable_reasons() {
+        assert_eq!(
+            egress_failure(McpEgressCause::RuntimeEgressPanicked),
+            "runtime_http_egress_panicked"
+        );
+        assert_eq!(
+            egress_failure(McpEgressCause::ResponseLeakBlocked),
+            "response_leak_blocked"
+        );
+        assert_eq!(
+            egress_failure(McpEgressCause::RuntimeEgressFailed("response_error")),
+            "response_error"
         );
     }
 }

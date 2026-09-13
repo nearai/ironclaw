@@ -7,9 +7,10 @@ use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     host_port::HostPortCatalog,
     http::{
-        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
-        RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+        CapabilityHostHttpRequest, RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED,
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
     },
     ids::{
         CapabilityId, ExtensionId, InvocationId, ProjectId, ResourceReservationId, SecretHandle,
@@ -176,6 +177,59 @@ async fn mcp_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error(
 
     let rendered = error.to_string();
     assert!(rendered.contains("runtime_http_egress_panicked"));
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn mcp_host_http_adapter_logs_safe_response_leak_diagnostics() {
+    let adapter = McpRuntimeHttpAdapter::new(Arc::new(LeakBlockedRuntimeEgress));
+
+    let error = adapter
+        .request(CapabilityHostHttpRequest {
+            scope: sample_scope(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            method: NetworkMethod::Get,
+            url: "https://mcp.example.test/mcp".to_string(),
+            headers: vec![],
+            body: vec![],
+            network_policy: mcp_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        })
+        .await
+        .expect_err("response leak blocking must fail closed");
+
+    assert!(error.to_string().contains("response_leak_blocked"));
+    assert!(logs_contain("runtime_reason=response_error"));
+    assert!(logs_contain("mcp_reason=response_leak_blocked"));
+    assert!(logs_contain("request_bytes=74"));
+    assert!(logs_contain("response_bytes=109922"));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_preserves_response_leak_blocked_reason() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(LeakBlockedRuntimeEgress)),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("response leak blocking must fail the MCP call");
+
+    assert_eq!(error.stable_reason(), "response_leak_blocked");
 }
 
 #[tokio::test]
@@ -2983,6 +3037,23 @@ impl RuntimeHttpEgress for SecretEchoRuntimeEgress {
             reason: "private target 10.0.0.7 denied for sk-test-secret".to_string(),
             request_bytes: 0,
             response_bytes: 0,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct LeakBlockedRuntimeEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for LeakBlockedRuntimeEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        Err(RuntimeHttpEgressError::Response {
+            reason: RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED.to_string(),
+            request_bytes: 74,
+            response_bytes: 109_922,
         })
     }
 }

@@ -10,9 +10,10 @@ use ironclaw_host_api::{
     decision::Obligation,
     dispatch::CredentialStageError,
     http::{
-        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
-        RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget,
+        CapabilityHostHttpRequest, RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED,
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSaveTarget,
     },
     ids::{
         AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, SecretHandle, TenantId,
@@ -4231,7 +4232,7 @@ async fn host_http_egress_blocks_credential_shaped_response_body() {
     assert!(matches!(
         error,
         ironclaw_host_api::http::RuntimeHttpEgressError::Response { ref reason, .. }
-            if reason == "response_leak_blocked"
+            if reason == RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
     assert_eq!(error.request_bytes(), 5);
@@ -4328,7 +4329,8 @@ async fn credential_exchange_passes_token_body_that_default_execute_blocks() {
     assert!(
         matches!(
             error,
-            RuntimeHttpEgressError::Response { ref reason, .. } if reason == "response_leak_blocked"
+            RuntimeHttpEgressError::Response { ref reason, .. }
+                if reason == RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED
         ),
         "expected response_leak_blocked, got {error:?}"
     );
@@ -4569,7 +4571,7 @@ async fn host_http_egress_blocks_leaky_response_header_values() {
     assert!(matches!(
         error,
         ironclaw_host_api::http::RuntimeHttpEgressError::Response { ref reason, .. }
-            if reason == "response_leak_blocked"
+            if reason == RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED
     ));
 }
 

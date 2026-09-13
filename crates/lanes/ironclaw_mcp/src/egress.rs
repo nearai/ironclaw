@@ -15,14 +15,16 @@ use futures_util::FutureExt as _;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
     http::{
-        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeHttpEgress,
-        RuntimeHttpEgressError, RuntimeHttpEgressResponse,
+        CapabilityHostHttpRequest, RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED,
+        RuntimeCredentialInjection, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressResponse,
     },
     ids::{CapabilityId, ExtensionId},
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
 use thiserror::Error;
+use tracing::warn;
 
 use crate::contract::McpClientError;
 use crate::diagnostics::{McpEgressCause, egress_failure};
@@ -66,11 +68,24 @@ where
 }
 
 fn mcp_http_error(error: RuntimeHttpEgressError) -> McpHostHttpError {
-    McpHostHttpError::Egress {
-        reason: egress_failure(McpEgressCause::RuntimeEgressFailed(
-            error.stable_runtime_reason(),
-        )),
-    }
+    let runtime_reason = error.stable_runtime_reason();
+    let mcp_cause = match &error {
+        RuntimeHttpEgressError::Response { reason, .. }
+            if reason == RUNTIME_HTTP_REASON_RESPONSE_LEAK_BLOCKED =>
+        {
+            McpEgressCause::ResponseLeakBlocked
+        }
+        _ => McpEgressCause::RuntimeEgressFailed(runtime_reason),
+    };
+    let mcp_reason = egress_failure(mcp_cause);
+    warn!(
+        runtime_reason = %runtime_reason,
+        mcp_reason = %mcp_reason,
+        request_bytes = error.request_bytes(),
+        response_bytes = error.response_bytes(),
+        "MCP host HTTP egress failed"
+    );
+    McpHostHttpError::Egress { reason: mcp_reason }
 }
 
 #[async_trait]
