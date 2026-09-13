@@ -309,6 +309,11 @@ fields = [{{ handle = "hosted_mcp_account", label = "Bearer token", secret = tru
         }
         HostedMcpAuthSelection::OAuth { .. } => String::new(),
     };
+    // `max_tools` is the ceiling for a server the USER registered by URL, so it cannot be
+    // sized from a vendor's known catalog the way a first-party manifest can. It is combined
+    // with the host ceiling as a MIN, so this value alone decided discovery -- and at 1,024 a
+    // real integration catalog silently lost everything past the first few pages. Measured
+    // against a 47,337-tool endpoint: discovery stopped after six pages every time.
     let raw = format!(
         r#"schema_version = "reborn.extension_manifest.v3"
 id = "{id}"
@@ -321,7 +326,7 @@ trust = "third_party"
 origin_gate_matrix = {{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }}
 server = {quoted_endpoint}
 namespace = "{id}"
-max_tools = 1024
+max_tools = 65536
 default_permission = "ask"
 effects = ["network", "use_secret"]
 {auth}"#

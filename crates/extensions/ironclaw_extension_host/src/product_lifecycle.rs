@@ -1374,8 +1374,23 @@ impl ExtensionLifecycleManager {
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
                 visible_capability_ids,
+                // Tell the caller that discovery is ASYNCHRONOUS and that an empty tool
+                // list means "not yet", not "failed". Without this the model reads the
+                // first empty `tool_search` as a broken install and re-registers -- and
+                // because re-registration restarts discovery, a catalog large enough to
+                // take a while can never finish. Observed on a 47,337-tool server: seven
+                // registrations, eight installs, 218 searches, zero tools published, the
+                // agent finally hand-rolling HTTP. The livelock is driven entirely by the
+                // caller's reasonable inference from a success response with no tools.
                 next_step: format!(
-                    "Installation will attempt activation for extension_id \"{}\". If credentials are missing, the install response opens the auth gate; otherwise the tools are published.",
+                    "Installation will attempt activation for extension_id \"{}\". If \
+                     credentials are missing, the install response opens the auth gate; \
+                     otherwise the tools are published. Tool discovery runs \
+                     ASYNCHRONOUSLY after this response and can take up to a minute for a \
+                     large catalog: an empty `tool_search` result means discovery is still \
+                     running, NOT that the install failed. Wait and search again. Do not \
+                     re-register or re-install -- that restarts discovery from the \
+                     beginning.",
                     package_ref.id.as_str()
                 ),
             },

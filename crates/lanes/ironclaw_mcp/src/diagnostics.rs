@@ -126,9 +126,22 @@ pub(crate) enum McpInvalidToolListCause {
     InvalidDescription,
     MissingInputSchema,
     UnsafeInputSchema,
+    /// The input schema exceeded a host SIZE bound (depth, node count, or string
+    /// length). A resource limit, not a trust violation, so it drops the single
+    /// oversized tool instead of rejecting the whole generation.
+    OversizeInputSchema,
     InvalidAnnotations,
     InvalidCursor,
+    /// Retained for the diagnostic vocabulary, no longer raised: exhausting the page
+    /// budget now truncates, for the same reason as the tool and byte ceilings.
+    #[allow(dead_code)]
     TooManyPages,
+    /// Retained for the diagnostic vocabulary, no longer raised: an over-large catalog
+    /// now truncates rather than failing the discovery pass, because discarding every
+    /// already-collected tool left the extension indistinguishable from an unreachable
+    /// one. Kept so existing log/metric consumers keying on `catalog_too_large` do not
+    /// break, and so a future hard limit has a name ready.
+    #[allow(dead_code)]
     CatalogTooLarge,
 }
 
@@ -141,6 +154,7 @@ impl McpInvalidToolListCause {
             Self::InvalidDescription => "invalid_description",
             Self::MissingInputSchema => "missing_input_schema",
             Self::UnsafeInputSchema => "unsafe_input_schema",
+            Self::OversizeInputSchema => "oversize_input_schema",
             Self::InvalidAnnotations => "invalid_annotations",
             Self::InvalidCursor => "invalid_cursor",
             Self::TooManyPages => "too_many_pages",
