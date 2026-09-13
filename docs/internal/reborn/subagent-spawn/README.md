@@ -574,9 +574,13 @@ the append-model design review.
   (authoring UX; `SubagentKindId` is already the primitive), and
   fleet-wide cross-session messaging (R6 covers the in-scope
   parent→child case). Evidence is changelog-grade — shipped-behavior
-  descriptions, not source. (status, 2026-09-02: the cap did not ship with
-  R2 and is open R2 debt for its own follow-up slice — the descendant cap
-  is the only admission bound today.)
+  descriptions, not source. (status, 2026-09-03: the cap shipped —
+  `SubagentSpawnLimits::max_concurrent_children` defaults to 8 and refuses
+  with the model-visible `spawn_rejected("concurrent_children_cap_exceeded")`,
+  like the fanout and depth caps beside it; it is a read-then-decide
+  pre-check, not an atomic reservation, so the remaining ceiling is a brief
+  overshoot under parallel spawns within one turn, bounded by the per-turn
+  and tree caps.)
 - **D9 ◇ Not in scope**: `TurnOwner` vs `TurnThreadOwner` stay separate
   types (ownership shape vs resolution disposition); no stored counters;
   never append to `completion_observer.rs`; new files < 800 lines;
@@ -651,8 +655,8 @@ work, in order — names map to the retired shape doc's slices for continuity:
 
 | # | Work | Contents | Was |
 | --- | --- | --- | --- |
-| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal (sweep-based), crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real — **shipped 2026-08 except the concurrent-running-children cap (open debt, own slice) and the boot pass (moved to R4, §4.2)** | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
-| R3 | **Gate escalation walk** | 3a: a blocked child's approval/auth gate reaches the parent's owner as an actionable inbox item opening the child thread (shipped 2026-09); 3b: verify/land the WebUI gate card on a hidden child thread opened by URL; R3 is a prerequisite of the R9 enable, not the enable itself | slice 4 |
+| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal (sweep-based), crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real — **shipped 2026-08, including the concurrent-running-children cap (shipped 2026-09); only the boot pass remains, moved to R4 (§4.2)** | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
+| R3 | **Gate escalation walk** | 3a: a blocked child's approval/auth gate reaches the parent's owner as an actionable inbox item opening the child thread (shipped 2026-09); 3b: a hidden child thread opened by URL already replayed its gate card correctly — verified, and pinned with a regression test on the cold-reader replay path (shipped 2026-09, no production change); R3 is a prerequisite of the R9 enable, not the enable itself | slice 4 |
 | R4 | **Counters, operator command, e2e revival** | `ResolveReport` counters; `ironclaw subagent edges`; un-ignore the five e2e tests via harness-side enablement; boot-recovery fairness | slice 5 |
 | R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override. Plus the **degraded-result taxonomy**: `child_terminal_output` distinguishes clean success / partial-on-forced-cutoff / provider error — Claude Code shipped three separate fixes for children returning empty on rate-limit cutoff or fabricating success on API error; D10's lifecycle-taxonomy line; the parent model learns of a blocked child here | slice 6 |
 | R6 | **`subagent_extend` + human priority** | `activate(child, …, ParentAgent)` with consent-to-wake + budget window; `human_waiting` reservation marker | slice 7 |
@@ -743,6 +747,8 @@ Things no slice may break; each is enforced or pinned today.
 | Disabled-capability pins | `tests/integration/tool_call.rs` |
 | E2E suite (ignored until R4) | `tests/reborn_subagent_spawn_e2e.rs` |
 | Child gate → owner inbox (R3 3a) | `crates/product/ironclaw_assistant/src/run_outcome_observer.rs` (`child_gate_run`, `observe_child_gate_commit`) |
+| Hidden child thread replays its gate to a cold reader (R3 3b) | `crates/product/ironclaw_assistant/tests/reborn_services_contract.rs` (`a_hidden_child_thread_replays_its_pending_gate_to_a_cold_reader`) |
+| Concurrent-running-children cap at spawn admission (R2 debt) | `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs`, tests in `subagent_spawn_port/tests.rs` (`invoke_spawn_rejects_when_concurrent_children_cap_is_exceeded`, `invoke_spawn_allows_a_child_when_earlier_children_are_terminal`) |
 
 Family rules: `crates/loop/AGENTS.md` and per-crate `AGENTS.md`/`README.md`
 files govern placement; `tests/integration/AGENTS.md` governs scenario
@@ -754,12 +760,25 @@ change.
 
 ## 9. Part II — pending work
 
-R3 slice 3a shipped 2026-09, PR #8046. Next: 3b (WebUI
-gate card on a hidden child thread opened by URL — verify first, it may
-already render), then the two R2 debts as their own slices
-(concurrent-running-children cap at spawn admission; the `ThreadBusy`
-immediate-re-enqueue optimization in `activate_parked_parent` — R2 already
-ships the sweep-based heal that parks and re-attends the edge; this debt is
-re-enqueueing into the now-live parent's queue right away instead of waiting
-for the next sweep). Plans are written here, spec-first against
-Part I, when a slice starts.
+R3 slice 3a shipped 2026-09, PR #8046. Slice 3b (2026-09) verified the WebUI
+gate card on a hidden child thread opened by URL already worked and shipped
+the regression test that pins it — no production change. The
+concurrent-running-children cap (§6 R2, D11) also shipped 2026-09. What
+remains:
+
+- The **`ThreadBusy` immediate-re-enqueue** optimization in
+  `activate_parked_parent` — R2 already ships the sweep-based heal that
+  parks and re-attends the edge; this debt is enqueueing into the now-live
+  parent's queue right away instead of waiting for the next sweep.
+- **R4**: counters, `ironclaw subagent edges`, un-ignoring the five e2e
+  tests via harness-side enablement, boot-recovery fairness.
+- **Newly identified, worth its own slice**: the tree-wide descendant cap
+  surfaces as a run-ending host error rather than a model-visible refusal,
+  unlike the fanout, depth, and new concurrency caps beside it. The kernel's
+  `ProcessTreeCapacityExceeded` maps through
+  `TurnErrorCategory::CapacityExceeded` →
+  `AgentLoopHostErrorKind::BudgetExceeded` in `map_turn_error`
+  (`subagent_spawn_port.rs`) and propagates as `Err`, which
+  `.claude/rules/tool-evidence.md` says a correctable failure should not do.
+
+Plans are written here, spec-first against Part I, when a slice starts.
