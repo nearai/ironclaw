@@ -21,7 +21,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 deadpool-postgres = "0.14"
 futures-util = "0.3"
-dirs = "6"
+dirs = "7"
 hex = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_attachments = { path = "../../domains/ironclaw_attachments" }
