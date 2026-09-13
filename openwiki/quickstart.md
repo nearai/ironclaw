@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "IronClaw OpenWiki: Quick Start"
+openwiki_generated: true
+---
+
 # IronClaw OpenWiki: Quick Start
 
 Welcome to the IronClaw repository documentation. This is your entry point to understanding the codebase structure, how to build and test, and where to find help.
@@ -46,7 +52,9 @@ ironclaw/
 
 - **[Architecture Overview](architecture/overview.md)** — High-level system design, four-layer model, crate organization
 - **[Crate Reference](architecture/crates.md)** — Detailed breakdown of 68 crates, their purpose, and key types
+<!-- openwiki: broken internal link [architecture/data-model.md] file "architecture/data-model.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Data Model](architecture/data-model.md)** — Events, runs, threads, turns, capabilities, and state flows
+<!-- openwiki: broken internal link [architecture/security.md] file "architecture/security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Security & Safety](architecture/security.md)** — Kernel/userland boundary, policy enforcement, threat model
 
 ### 🛠️ Building and Testing
@@ -57,17 +65,26 @@ ironclaw/
 
 ### 📚 Domain Deep Dives
 
+<!-- openwiki: broken internal link [domains/agent-loop.md] file "domains/agent-loop.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Agent Loop & Execution](domains/agent-loop.md)** — How turns flow through planning, execution, and checkpointing
+<!-- openwiki: broken internal link [domains/capabilities.md] file "domains/capabilities.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Capabilities & Tools](domains/capabilities.md)** — How tools are registered, approved, and executed
+<!-- openwiki: broken internal link [domains/memory.md] file "domains/memory.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Memory & Persistence](domains/memory.md)** — Event store, snapshots, recovery, and indexing
+<!-- openwiki: broken internal link [domains/product-workflow.md] file "domains/product-workflow.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Product Workflow](domains/product-workflow.md)** — Missions, projects, skills, routines, and approvals
+<!-- openwiki: broken internal link [domains/channels.md] file "domains/channels.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Channels & Integrations](domains/channels.md)** — Slack, WebUI, Discord, and custom channel adapters
 
 ### 📖 Reference
 
+<!-- openwiki: broken internal link [reference/glossary.md] file "reference/glossary.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Glossary](reference/glossary.md)** — Key terminology and concepts
+<!-- openwiki: broken internal link [reference/api.md] file "reference/api.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[API Surface](reference/api.md)** — HTTP endpoints, WebSocket events, CLI commands
+<!-- openwiki: broken internal link [reference/configuration.md] file "reference/configuration.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Configuration](reference/configuration.md)** — Startup options, environment variables, and config.toml schema
+<!-- openwiki: broken internal link [reference/troubleshooting.md] file "reference/troubleshooting.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Troubleshooting](reference/troubleshooting.md)** — Common errors, debugging tips, and support
 
 ## Key Architectural Concepts
@@ -116,12 +133,18 @@ Substrate Layer (Events, Filesystem, Memory, Threads)
 
 ### I want to...
 
+<!-- openwiki: broken internal link [development/workflows.md#fixing-a-bug] heading anchor "fixing-a-bug" does not exist in "development/workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **Fix a bug:** Jump to [Workflows: Fix a Bug](development/workflows.md#fixing-a-bug) (test-first discipline required)
 - **Add a new feature:** See [Architecture Overview](architecture/overview.md#where-to-build-new-features) and [Crate Reference](architecture/crates.md)
+<!-- openwiki: broken internal link [development/workflows.md#code-review] heading anchor "code-review" does not exist in "development/workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **Review a pull request:** Read [Workflows: Code Review](development/workflows.md#code-review) and the [Testing Guide](development/testing.md)
+<!-- openwiki: broken internal link [reference/configuration.md] file "reference/configuration.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **Deploy to production:** See [Configuration](reference/configuration.md) and Dockerfile patterns in `crates/ironclaw_cli`
+<!-- openwiki: broken internal link [domains/capabilities.md] file "domains/capabilities.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **Understand a capability:** Visit [Capabilities & Tools](domains/capabilities.md)
+<!-- openwiki: broken internal link [AGENTS.md#code-discovery] file "AGENTS.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **Query the codebase:** Use the knowledge graph (see [AGENTS.md: Code Discovery](AGENTS.md#code-discovery)) before grep
+<!-- openwiki: broken internal link [architecture/security.md] file "architecture/security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **Report a security issue:** See [Security & Safety](architecture/security.md) and SECURITY.md (if present)
 
 ## Important Rules & Practices
@@ -197,16 +220,22 @@ openwiki/
 |----------|-----------|
 | "What does this crate do?" | [Crate Reference](architecture/crates.md) |
 | "How do I run tests?" | [Testing Guide](development/testing.md) |
+<!-- openwiki: broken internal link [architecture/security.md] file "architecture/security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 | "What's the security model?" | [Security & Safety](architecture/security.md) |
+<!-- openwiki: broken internal link [domains/capabilities.md] file "domains/capabilities.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 | "How do capabilities work?" | [Capabilities & Tools](domains/capabilities.md) |
+<!-- openwiki: broken internal link [/AGENTS.md#where-to-work] heading anchor "where-to-work" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
 | "Where do I add a new feature?" | [Architecture Overview](architecture/overview.md#where-to-build-new-features) + [AGENTS.md: Where to Work](/AGENTS.md#where-to-work) |
+<!-- openwiki: broken internal link [reference/troubleshooting.md] file "reference/troubleshooting.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 | "What's this error?" | [Troubleshooting](reference/troubleshooting.md) |
+<!-- openwiki: broken internal link [reference/glossary.md] file "reference/glossary.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 | "What's a 'turn'?" | [Glossary](reference/glossary.md) |
 
 ### Direct Code Exploration
 
 When these docs don't answer your question:
 
+<!-- openwiki: broken internal link [/AGENTS.md#code-discovery---query-the-knowledge-graph-first] heading anchor "code-discovery---query-the-knowledge-graph-first" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
 1. **Use the knowledge graph** (faster than grep): See [AGENTS.md: Code Discovery](/AGENTS.md#code-discovery---query-the-knowledge-graph-first)
 2. **Read subsystem specs** in [CLAUDE.md](/CLAUDE.md) (detailed architecture per crate/module)
 3. **Check crate README/AGENTS files** (many crates have their own docs in `src/` or `Cargo.toml`)
@@ -215,6 +244,7 @@ When these docs don't answer your question:
 ## Next Steps
 
 - **Beginner?** Start with [Development Setup](development/setup.md) and run `cargo test`
+<!-- openwiki: broken internal link [development/workflows.md#code-review] heading anchor "code-review" does not exist in "development/workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **Reviewer?** Jump to [Workflows: Code Review](development/workflows.md#code-review)
 - **Architect?** Read [Architecture Overview](architecture/overview.md) and [CLAUDE.md](/CLAUDE.md)
 - **Seeking a specific feature?** Use the navigation table above or grep the docs

@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Crate Reference"
+openwiki_generated: true
+---
+
 # Crate Reference
 
 This page documents all 68+ crates in the IronClaw repository, organized by functional group. Use this as a reference when exploring code or deciding where to add new features.
@@ -55,13 +61,29 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Depends on:** serde, toml
 
 ### ironclaw_architecture_tests
-**Role:** Architecture boundary tests and enforcement
-- Dependency graph checking
-- Composition boundary tests
-- Reborn vs v1 boundary enforcement
-- **When to touch:** Refactoring crate dependencies
-- **Key modules:** `tests/reborn_composition_boundaries.rs`
-- **Tests:** Run with `cargo test -p ironclaw_architecture_tests --test '*'`
+**Role:** Architecture contract enforcement — validates that the crate dependency graph, composition boundaries, and public surfaces remain aligned with the declared Reborn design model. This is the mechanical gate that prevents architectural drift.
+
+**Responsibilities:**
+- **Dependency boundaries:** Enforces layer-by-layer dependency direction (substrate ← kernel ← userland ← products; no circular deps)
+- **Composition boundaries:** Tests that each crate publishes only the types and traits it owns (prevents accidental coupling)
+- **Extension specificity:** Scans source code to ban concrete extension names (vendor, host) in product code — catches hardcoded integrations that should use registries
+- **Contract ratchets:** Records baseline counts (e.g., number of authorized-seal origination sites) and fails the build if the count increases, forcing deliberate re-baselineing in the PR that increases it
+- **Sealed evidence:** Verifies that security-critical types (e.g., `AuthorizedSeal`) can only be minted from approved locations
+- **Persistence rules:** Ensures consistent use of event-sourcing and stored procedures patterns across backends (PostgreSQL vs. libSQL)
+
+**When to touch:** 
+- Refactoring crate dependencies (add/remove edges)
+- Adding a new crate (register in the layer/family model)
+- Moving a crate to a different family/layer (update boundary rules)
+- Approving new extension integration patterns (update allowlists in the same PR as the pattern)
+
+**Key tests:** `reborn_dependency_boundaries`, `reborn_composition_boundaries`, `reborn_extension_specificity`, `reborn_sealed_evidence_mint_ratchet`, `reborn_authorized_seal_ratchet`
+
+**Zero production surface:** This crate ships no runtime code; it is consumed only by CI/CD. Every test reads the workspace structure and source text without linking any crate.
+
+**Run:** `cargo test -p ironclaw_architecture_tests` (full suite) or `cargo test -p ironclaw_architecture_tests --test reborn_composition_boundaries` (single test)
+
+**See also:** `crates/app/ironclaw_architecture_tests/README.md` (full gate documentation), `docs/internal/reborn/contracts/` (design contracts and allowed architecture changes)
 
 ---
 
@@ -467,6 +489,22 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Features:** `webui-v2-beta` (for serve command), `slack-v2-host-beta` (for Slack)
 - **Depends on:** `ironclaw_reborn`, `ironclaw_config`, `clap`
 
+### ironclaw_webui
+**Role:** WebUI HTTP server and single-page application (the browser interface)
+- HTTP server entrypoint and middleware stack (auth, rate limiting, CORS)
+- 114+ routes serving the Vite-built SPA
+- Session management, OAuth integration, bearer token auth
+- Web debug inspector for development
+- **When to touch:** Adding routes, changing auth model, updating SPA, or modifying middleware
+- **Frontend:** Vite SPA under `frontend/` with TypeScript, React, component library
+- **Component Library:** Documented in Storybook (~31 stories covering design tokens, primitives, composites, and icons)
+- **Build:** Embedded SPA is compiled by `build.rs` via `pnpm build` and embedded in the binary
+- **Tests:** Route table contract (all routes registered), product symbol boundary (frozen at 104 symbols), authentication flows
+- **Testing Frontend:** `pnpm test` (unit tests), `pnpm test:storybook` (visual component tests in headless Chromium), `pnpm build-storybook` (static catalog)
+- **Key modules:** `src/webui_v2/` (routes, auth, handlers), `frontend/src/` (React components, pages)
+- **Depends on:** `ironclaw_product_contracts`, `ironclaw_auth`, `axum`, `ironclaw_extensions_host`
+- **Invariants:** Route table is a contract (add routes in handlers + route descriptor); product symbol boundary pinned at 104 symbols (architecture test `reborn_transport_product_boundary` enforces this)
+
 ### ironclaw_config
 **Role:** Configuration parsing and resolution
 - `config.toml` parsing
@@ -814,7 +852,9 @@ subscriber.subscribe(filter, |event| async {
 1. **To understand the overall architecture:** Start with [overview.md](overview.md)
 2. **To understand a specific crate:** Find it in this reference
 3. **To add a new feature:** Use [overview.md: Where to Build New Features](overview.md#where-to-build-new-features) to pick a crate, then read its docs
+<!-- openwiki: broken internal link [data-model.md] file "data-model.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 4. **To understand data flow:** Read [data-model.md](data-model.md)
+<!-- openwiki: broken internal link [security.md] file "security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 5. **To understand security:** Read [security.md](security.md)
 
 ---
@@ -822,7 +862,9 @@ subscriber.subscribe(filter, |event| async {
 ## See Also
 
 - **[Overview](overview.md)** — System design and four-layer model
+<!-- openwiki: broken internal link [data-model.md] file "data-model.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Data Model](data-model.md)** — Events, threads, turns, capabilities
+<!-- openwiki: broken internal link [security.md] file "security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Security & Safety](security.md)** — Kernel boundary and threat model
 - **[AGENTS.md](/AGENTS.md)** — Quick rules and code discovery
 - **[CLAUDE.md](/CLAUDE.md)** — Subsystem deep-dives
