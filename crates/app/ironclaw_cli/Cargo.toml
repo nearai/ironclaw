@@ -40,7 +40,11 @@ test-support = [
     "ironclaw_webui/test-support",
 ]
 [dependencies]
+# ACP (Agent Client Protocol) stdio transport for IDE/CLI agent integration.
+agent-client-protocol = "0.10"
 anyhow = "1"
+# Needed for ACP stdio compat (futures-io AsyncWrite trait).
+futures-io = "0.3"
 async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
@@ -83,7 +87,7 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
