@@ -92,7 +92,23 @@ impl CompositionClientCredentials {
                     );
                     AuthProductError::BackendUnavailable
                 })?;
-            if let Some(value) = prefer_configured(configured, self.values.get(handle)) {
+            let deployment = self.values.get(handle);
+            // Both sources holding the same handle is a deployment that is
+            // configured twice and expected not to occur. It resolves
+            // deterministically (administrator wins) rather than failing, but
+            // it is worth being able to see after the fact: the symptom of
+            // the wrong one winning is an `invalid_client` from the vendor,
+            // which says nothing about where the client came from.
+            // `debug!`, not `warn!` — this runs per request and warn-level
+            // output corrupts the REPL surface.
+            if configured.is_some() && deployment.is_some() {
+                tracing::debug!(
+                    handle,
+                    "vendor client-credential handle is set in both administrator \
+                     configuration and deployment config; administrator value wins"
+                );
+            }
+            if let Some(value) = prefer_configured(configured, deployment) {
                 return Ok(Some(value));
             }
             return Ok(None);
