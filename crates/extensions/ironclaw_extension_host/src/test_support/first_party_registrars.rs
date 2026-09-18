@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     CredentialAccount, CredentialAccountSelectionRequest, RuntimeCredentialAccountVisibilityPolicy,
 };
-use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
+use ironclaw_extension_host::{
+    FirstPartyHandlerRegistrar, FirstPartyRegistrarContext, ProviderInstanceReadinessPort,
+};
 use ironclaw_extension_support::{
     FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID, FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID,
     FirstPartyWebDispatchError, FirstPartyWebDispatchRequest, FirstPartyWebExecutor,
@@ -74,7 +76,8 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
                     context.product_auth_runtime_ports.clone(),
                 )),
             ),
-            google_oauth_configured: context.oauth_backend_configured,
+            provider_instance_readiness: Arc::clone(&context.provider_instance_readiness),
+            google_vendor: VendorId::new(GOOGLE_PROVIDER_ID)?,
         });
         for package in gsuite_package_specs() {
             for capability in package.capabilities {
@@ -87,7 +90,8 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
 
 struct GsuiteFirstPartyHandler {
     executor: GsuiteExecutor,
-    google_oauth_configured: bool,
+    provider_instance_readiness: Arc<dyn ProviderInstanceReadinessPort>,
+    google_vendor: VendorId,
 }
 
 #[async_trait]
@@ -96,7 +100,12 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        if !self.google_oauth_configured {
+        if self
+            .provider_instance_readiness
+            .remediation_for(&self.google_vendor)
+            .await
+            .is_some()
+        {
             return Err(FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,
                 None,

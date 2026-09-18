@@ -370,18 +370,21 @@ pub(super) async fn build_backend_production(
     );
     let uses_local_host_runtime = local_process_port.is_some() || deployment_is_local_single_user;
     let first_party_reserved_ids = first_party_reserved_extension_ids(&first_party_bundles);
-    let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
     let google_provider = VendorId::new(ironclaw_auth::GOOGLE_PROVIDER_ID).map_err(|error| {
         RebornBuildError::InvalidConfig {
-            reason: format!("provider instance readiness map could not be built: {error}"),
+            reason: format!("provider instance readiness could not be built: {error}"),
         }
     })?;
-    let provider_instance_readiness =
-        provider_instance_readiness_map([ProviderInstanceReadinessInput {
-            provider: google_provider,
-            configured: google_oauth_configured,
-            remediation: "configure Google OAuth credentials".to_string(),
-        }]);
+    // Vendors whose activation is gated on host-level client credentials, and
+    // what to tell the operator when they are absent. Whether each one is
+    // actually configured is resolved per activation by the composed
+    // credential chain (administrator configuration first, then deployment
+    // config), never decided here — an operator can configure a vendor in the
+    // Web UI minutes after this line runs.
+    let provider_instance_remediation = BTreeMap::from([(
+        google_provider,
+        "configure Google OAuth credentials".to_string(),
+    )]);
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
@@ -701,15 +704,16 @@ pub(super) async fn build_backend_production(
         })?,
     );
     let admin_configuration_credential_slot = AdminConfigurationCredentialSlot::default();
-    let provider_composition = compose_provider_client(
-        oauth_provider_configs,
-        oauth_dcr_callback,
-        Arc::clone(&secret_store),
-        provider_runtime_ports,
-        admin_configuration_credential_slot.clone(),
-        &first_party_bundles,
-        Arc::clone(&extension_installation_store),
-    )?;
+    let provider_composition = compose_provider_client(ProviderClientCompositionInput {
+        configs: oauth_provider_configs,
+        dcr_callback: oauth_dcr_callback,
+        secret_store: Arc::clone(&secret_store),
+        runtime_ports: provider_runtime_ports,
+        admin_configuration_credentials: admin_configuration_credential_slot.clone(),
+        first_party_bundles: &first_party_bundles,
+        installation_store: Arc::clone(&extension_installation_store),
+        provider_instance_remediation,
+    })?;
     let services = if let Some(process_port) = local_process_port {
         services.with_runtime_process_port(Arc::new(process_port))
     } else {
@@ -767,6 +771,10 @@ pub(super) async fn build_backend_production(
             )
         }
     };
+    // Cloned before `provider_composition` moves into product-auth
+    // composition: both the first-party dispatch backstop and the extension
+    // activation gate resolve readiness through this one handle.
+    let provider_instance_readiness = Arc::clone(&provider_composition.provider_instance_readiness);
     let keepalive_recipes = provider_composition
         .engine
         .as_ref()
@@ -804,7 +812,7 @@ pub(super) async fn build_backend_production(
         credential_account_record_source: product_auth_dependencies
             .credential_account_record_source(),
         product_auth_runtime_ports: product_auth_runtime_ports.clone(),
-        oauth_backend_configured: google_oauth_configured,
+        provider_instance_readiness: Arc::clone(&provider_instance_readiness),
     };
     for registrar in &first_party_registrars {
         registrar
@@ -1013,7 +1021,7 @@ pub(super) async fn build_backend_production(
         )
         .with_account_setup_registry(Arc::new(account_setups.clone()))
         .with_removal_cleanup_registry(removal_cleanup)
-        .with_provider_instance_readiness(provider_instance_readiness)
+        .with_provider_instance_readiness_port(Arc::clone(&provider_instance_readiness))
         .with_channel_disconnect_slot(Arc::clone(&channel_disconnect_slot)),
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(

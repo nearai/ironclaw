@@ -2731,3 +2731,77 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 }
+
+/// Administrator-entered vendor client credentials must satisfy the
+/// provider-instance readiness gate, with no deployment env var in sight.
+///
+/// The gate (`ExtensionHostProductLifecycle::activation_credential_requirements`)
+/// used to read a `BTreeMap` snapshotted at composition time from
+/// `resolve_google_oauth_config_from_env`, while the OAuth engine resolved the
+/// same vendor's client material live from manifest-declared administrator
+/// configuration. A deployment whose operator configured Google through the
+/// Web UI — the only path available when each install brings its own client —
+/// therefore completed the whole OAuth ceremony (consent, code, token
+/// exchange) and then failed activation with
+/// `ProviderInstanceNotConfigured`, whose terminal lifecycle failure revoked
+/// the credential that had just been minted. Every retry re-consented and
+/// re-failed.
+///
+/// This fixture composes with NO `with_vendor_oauth_client` call at all, so it
+/// reproduces exactly that deployment: readiness may only be satisfied by the
+/// administrator configuration written through the real operator route.
+#[tokio::test]
+async fn admin_configured_vendor_client_satisfies_provider_instance_readiness() {
+    let fixture = AdminConfigurationFixture::new("google-readiness").await;
+
+    let (put_status, put_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/vendor.google",
+        serde_json::json!({
+            "values": google_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-google-readiness-1",
+        }),
+    )
+    .await;
+    assert_eq!(
+        put_status,
+        StatusCode::OK,
+        "operator must be able to store the Google client: {put_body}"
+    );
+
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "gmail"},
+            "client_action_id": "webui-gmail-install-readiness-1",
+        }),
+    )
+    .await;
+
+    assert_ne!(
+        install_status,
+        StatusCode::BAD_REQUEST,
+        "administrator-configured Google client must satisfy the provider-instance \
+         readiness gate; a sanitized 400 here is the gate still reading the \
+         composition-time env snapshot: {install_body}"
+    );
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install must succeed once the vendor client is configured: {install_body}"
+    );
+
+    fixture.shutdown().await;
+}
+
+fn google_admin_configuration_values() -> Value {
+    serde_json::json!([
+        {
+            "handle": "google_oauth_client_id",
+            "value": "readiness-client-id.apps.googleusercontent.com"
+        },
+        {"handle": "google_oauth_client_secret", "value": "readiness-client-secret"}
+    ])
+}

@@ -12,6 +12,9 @@ pub(super) struct OAuthProviderComposition {
     pub(super) engine: Option<Arc<AuthEngine>>,
     pub(super) client: Option<Arc<dyn AuthProviderClient>>,
     pub(super) gate_driver: Option<Arc<OAuthGateFlowDriver>>,
+    /// Readiness for the vendors the caller named, resolved live from the
+    /// same credential chain this composition handed the engine.
+    pub(super) provider_instance_readiness: Arc<dyn ProviderInstanceReadinessPort>,
 }
 
 #[derive(Clone, Default)]
@@ -53,28 +56,57 @@ impl CompositionClientCredentials {
         self.admin_configuration = Some(slot);
     }
 
+    /// Administrator configuration first, deployment (env/config.toml)
+    /// material second.
+    ///
+    /// An operator who enters vendor client credentials in the Web UI is
+    /// making a later, more specific statement than whatever the image was
+    /// built or deployed with, and on a multi-install deployment it is the
+    /// only statement that can differ per install. Reading the static value
+    /// first would silently pin every install to the baked client and leave
+    /// the configured one unused.
     async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
-        if let Some(value) = self.values.get(handle) {
-            return Ok(Some(value.clone()));
-        }
-        let Some(service) = self
+        if let Some(service) = self
             .admin_configuration
             .as_ref()
             .and_then(|slot| slot.get())
-        else {
+        {
+            let configured = service
+                .credential_handle_value(handle)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        handle,
+                        "administrator client-credential lookup failed"
+                    );
+                    AuthProductError::BackendUnavailable
+                })?;
+            if let Some(value) = prefer_configured(configured, self.values.get(handle)) {
+                return Ok(Some(value));
+            }
             return Ok(None);
+        }
+        Ok(self.values.get(handle).cloned())
+    }
+
+    /// The vendor's client-id handle, or `None` when the vendor's recipe
+    /// carries no static client credentials at all (dynamic client
+    /// registration, device link, api key).
+    fn vendor_client_id_handle(
+        recipes: &StaticAuthRecipeResolver,
+        vendor: &VendorId,
+    ) -> Option<String> {
+        use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+
+        let resolved = recipes.recipe_for_vendor(vendor.as_str())?;
+        let VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+            return None;
         };
-        service
-            .credential_handle_value(handle)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    %error,
-                    handle,
-                    "administrator client-credential lookup failed"
-                );
-                AuthProductError::BackendUnavailable
-            })
+        recipe
+            .client_credentials
+            .as_ref()
+            .map(|handles| handles.client_id_handle.as_str().to_string())
     }
 }
 
@@ -84,6 +116,70 @@ impl fmt::Debug for CompositionClientCredentials {
             .debug_struct("CompositionClientCredentials")
             .field("handles", &self.values.keys().collect::<Vec<_>>())
             .finish()
+    }
+}
+
+/// Administrator-configured material wins; deployment material is the
+/// fallback.
+///
+/// Extracted so the precedence itself is pinned by a test rather than
+/// inferred from the order of two `if let`s.
+fn prefer_configured(
+    administrator: Option<SecretString>,
+    deployment: Option<&SecretString>,
+) -> Option<SecretString> {
+    administrator.or_else(|| deployment.cloned())
+}
+
+/// Provider-instance readiness resolved from the same client-credential
+/// chain the auth engine itself uses.
+///
+/// The gate and the engine must not be able to disagree: a vendor whose
+/// client id resolves here is a vendor whose OAuth flow the engine can start,
+/// whether that client came from administrator configuration written a
+/// moment ago or from deployment configuration read at boot. The former is
+/// why this resolves per call instead of filling a map at composition time.
+#[derive(Clone)]
+pub(super) struct ClientCredentialProviderReadiness {
+    credentials: CompositionClientCredentials,
+    recipes: Arc<StaticAuthRecipeResolver>,
+    remediation: BTreeMap<VendorId, String>,
+}
+
+impl fmt::Debug for ClientCredentialProviderReadiness {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientCredentialProviderReadiness")
+            .field("vendors", &self.remediation.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderInstanceReadinessPort for ClientCredentialProviderReadiness {
+    async fn remediation_for(&self, provider: &VendorId) -> Option<String> {
+        // A vendor nobody asked us to watch is not this gate's business.
+        let remediation = self.remediation.get(provider)?;
+        // No static client-credential handles: dynamic client registration or
+        // a non-OAuth recipe. There is no host-level client to be missing, so
+        // the vendor is ready by construction.
+        let handle =
+            CompositionClientCredentials::vendor_client_id_handle(self.recipes.as_ref(), provider)?;
+        match self.credentials.resolve_handle(&handle).await {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(remediation.clone()),
+            // Fail closed: an unreadable configuration store is not evidence
+            // that a client exists, and activation must not publish tools
+            // whose credentials we could not confirm.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    vendor = provider.as_str(),
+                    "vendor client-credential readiness lookup failed; treating as unconfigured"
+                );
+                Some(remediation.clone())
+            }
+        }
     }
 }
 
@@ -118,15 +214,33 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
     }
 }
 
+/// Everything the OAuth provider composition needs, as one value.
+pub(super) struct ProviderClientCompositionInput<'bundles> {
+    pub(super) configs: Vec<OAuthProviderBackendConfig>,
+    pub(super) dcr_callback: Option<OAuthDcrCallbackConfig>,
+    pub(super) secret_store: Arc<dyn SecretStorePort>,
+    pub(super) runtime_ports: ProductAuthProviderRuntimePorts,
+    pub(super) admin_configuration_credentials: AdminConfigurationCredentialSlot,
+    pub(super) first_party_bundles: &'bundles [ironclaw_extension_host::FirstPartyPackageBundle],
+    pub(super) installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    /// Vendors whose activation and dispatch are gated on host-level client
+    /// credentials, mapped to the operator remediation shown when absent.
+    pub(super) provider_instance_remediation: BTreeMap<VendorId, String>,
+}
+
 pub(super) fn compose_provider_client(
-    configs: Vec<OAuthProviderBackendConfig>,
-    dcr_callback: Option<OAuthDcrCallbackConfig>,
-    secret_store: Arc<dyn SecretStorePort>,
-    runtime_ports: ProductAuthProviderRuntimePorts,
-    admin_configuration_credentials: AdminConfigurationCredentialSlot,
-    first_party_bundles: &[ironclaw_extension_host::FirstPartyPackageBundle],
-    installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    input: ProviderClientCompositionInput<'_>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
+    let ProviderClientCompositionInput {
+        configs,
+        dcr_callback,
+        secret_store,
+        runtime_ports,
+        admin_configuration_credentials,
+        first_party_bundles,
+        installation_store,
+        provider_instance_remediation,
+    } = input;
     let static_recipes = Arc::new(StaticAuthRecipeResolver::new(
         ironclaw_extension_host::AvailableExtensionCatalog::bundled_vendor_recipes(
             first_party_bundles,
@@ -158,6 +272,12 @@ pub(super) fn compose_provider_client(
                 .find_map(|config| callback_base_from_redirect(config.client.redirect_uri.as_str()))
         });
 
+    let provider_instance_readiness = Arc::new(ClientCredentialProviderReadiness {
+        credentials: client_credentials.clone(),
+        recipes: Arc::clone(&static_recipes),
+        remediation: provider_instance_remediation,
+    });
+
     compose_auth_engine(
         Arc::new(CompositionAuthRecipeResolver {
             static_recipes,
@@ -169,6 +289,7 @@ pub(super) fn compose_provider_client(
         callback_base,
         secret_store,
         runtime_ports,
+        provider_instance_readiness,
     )
 }
 
@@ -298,6 +419,7 @@ fn compose_auth_engine(
     callback_base: Option<EngineCallbackBase>,
     secret_store: Arc<dyn SecretStorePort>,
     runtime_ports: ProductAuthProviderRuntimePorts,
+    provider_instance_readiness: Arc<dyn ProviderInstanceReadinessPort>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let Some(callback_base) = callback_base else {
         tracing::debug!("no OAuth callback base configured; auth engine not composed");
@@ -305,6 +427,7 @@ fn compose_auth_engine(
             engine: None,
             client: None,
             gate_driver: None,
+            provider_instance_readiness,
         });
     };
     let egress: Arc<dyn RuntimeHttpEgress> = Arc::new(ObligationStagedAuthEgress::new(
@@ -328,6 +451,7 @@ fn compose_auth_engine(
         client: Some(Arc::clone(&engine) as Arc<dyn AuthProviderClient>),
         engine: Some(engine),
         gate_driver: Some(gate_driver),
+        provider_instance_readiness,
     })
 }
 
@@ -703,4 +827,39 @@ pub(super) fn compose_product_auth_services(
         services = services.with_flow_record_source(source);
     }
     Ok((services, base_continuation))
+}
+
+#[cfg(test)]
+mod client_credential_precedence_tests {
+    use super::*;
+    use secrecy::ExposeSecret as _;
+
+    fn secret(value: &str) -> SecretString {
+        SecretString::from(value.to_string())
+    }
+
+    /// An operator entering vendor client credentials in the Web UI is making
+    /// a later and more specific statement than the image's deployment
+    /// configuration, and on a deployment where each install brings its own
+    /// OAuth client it is the only statement that can differ per install.
+    #[test]
+    fn administrator_configuration_outranks_deployment_material() {
+        let resolved = prefer_configured(Some(secret("admin-client")), Some(&secret("env-client")))
+            .expect("a value resolves");
+        assert_eq!(resolved.expose_secret(), "admin-client");
+    }
+
+    /// Deployments that bake client material and never open the Web UI form
+    /// must keep working untouched.
+    #[test]
+    fn deployment_material_is_the_fallback() {
+        let resolved =
+            prefer_configured(None, Some(&secret("env-client"))).expect("a value resolves");
+        assert_eq!(resolved.expose_secret(), "env-client");
+    }
+
+    #[test]
+    fn neither_source_resolves_to_nothing() {
+        assert!(prefer_configured(None, None).is_none());
+    }
 }

@@ -1441,7 +1441,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_assistant/src/blocked_auth_resume.rs",
         "slack",
     ),
-    ("crates/ironclaw_composition/src/factory.rs", "google"),
     (
         "crates/ironclaw_composition/src/factory/production_backend_assembly.rs",
         "google",
@@ -1705,7 +1704,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // exact header targets. The authorization fold, shell adapter, and direct-argv
 // parser no longer name GitHub or its API audience, retiring all five #7732
 // pilot carve-outs.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 109;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

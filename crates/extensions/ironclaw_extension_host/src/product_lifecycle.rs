@@ -65,6 +65,9 @@ pub trait ExtensionCredentialCleanup: Send + Sync {
 }
 
 use crate::extension_credential_requirements::activation_requirement_applies;
+use crate::provider_instance_readiness::{
+    ProviderInstanceReadinessPort, StaticProviderInstanceReadiness,
+};
 use crate::{
     ActiveExtensionCapability, AvailableExtensionCatalog, AvailableExtensionPackage,
     ExtensionInstallPlan, imported_extension_package, materialize_available_extension,
@@ -200,15 +203,21 @@ pub struct ExtensionLifecycleManager {
     /// `None` behaves exactly as an empty registry: no descriptor, no missing
     /// requirement (`ExtensionAccountSetupReader`'s doc pins the equivalence).
     account_setups: Option<Arc<dyn ExtensionAccountSetupReader>>,
-    /// Static per-provider instance-config readiness map. Opt-in, defaults
-    /// empty via `new` — a third readiness axis alongside `account_setups`
-    /// (per-user) and the package-level
-    /// requirements `activation_credential_requirements` computes below; see
+    /// Per-provider instance-config readiness. Opt-in, defaults `None` via
+    /// `new` — a third readiness axis alongside `account_setups` (per-user)
+    /// and the package-level requirements
+    /// `activation_credential_requirements` computes below; see
     /// `provider_instance_readiness.rs` module doc for the full distinction.
-    /// Defaulting empty keeps every direct `::new(...)` construction outside
-    /// the factory (e.g. test fixtures) unaffected until they opt in via
-    /// `with_provider_instance_readiness`.
-    provider_instance_readiness: std::collections::BTreeMap<VendorId, String>,
+    /// `None` behaves as "every provider configured", keeping every direct
+    /// `::new(...)` construction outside the factory (e.g. test fixtures)
+    /// unaffected until it opts in.
+    ///
+    /// Resolved through the port on every activation rather than read from a
+    /// composition-time map: administrator-configured vendor clients are
+    /// written while the process runs, and the OAuth engine already honors
+    /// them per request. A snapshot here would refuse activation for a vendor
+    /// whose flow the engine can start.
+    provider_instance_readiness: Option<Arc<dyn ProviderInstanceReadinessPort>>,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -362,7 +371,7 @@ impl ExtensionLifecycleManager {
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: None,
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
-            provider_instance_readiness: std::collections::BTreeMap::new(),
+            provider_instance_readiness: None,
         }
     }
 
@@ -563,15 +572,29 @@ impl ExtensionLifecycleManager {
         self
     }
 
-    /// Install the static per-provider instance-config readiness map.
-    /// Defaults empty from `new`, so callers that never opt in (test
-    /// fixtures, any composition without the build-time signal) see no
-    /// behavior change.
+    /// Install a fixed per-provider instance-config readiness map.
+    ///
+    /// Retained for hosts and fixtures whose provider configuration cannot
+    /// change while the process runs; a host whose operators configure vendor
+    /// clients at runtime must use
+    /// [`Self::with_provider_instance_readiness_port`] instead, or activation
+    /// will answer from a stale snapshot.
     pub fn with_provider_instance_readiness(
-        mut self,
+        self,
         provider_instance_readiness: std::collections::BTreeMap<VendorId, String>,
     ) -> Self {
-        self.provider_instance_readiness = provider_instance_readiness;
+        self.with_provider_instance_readiness_port(Arc::new(StaticProviderInstanceReadiness::new(
+            provider_instance_readiness,
+        )))
+    }
+
+    /// Install the per-provider instance-config readiness port, resolved on
+    /// every activation.
+    pub fn with_provider_instance_readiness_port(
+        mut self,
+        provider_instance_readiness: Arc<dyn ProviderInstanceReadinessPort>,
+    ) -> Self {
+        self.provider_instance_readiness = Some(provider_instance_readiness);
         self
     }
 
@@ -842,18 +865,28 @@ impl ExtensionLifecycleManager {
         // and the package-level `requirements` just computed (per-package
         // static declarations). Mirrors the same three-axis distinction drawn
         // in `gsuite.rs:69-73` for the dispatch-time backstop that shares
-        // this build-time signal. Both callers of this function share this
+        // this signal. Both callers of this function share this
         // one chokepoint: the LLM tool handler's own `missing_requirements`
         // short-circuit (`extension_lifecycle_capabilities.rs`) and the
         // WebUI card's `activate_inner` credential gate never see a
         // requirement shape for an unconfigured provider — they see this
         // `Err` instead.
-        if let Some(reason) = requirements.iter().find_map(|requirement| {
-            self.provider_instance_readiness
-                .get(&requirement.provider)
-                .cloned()
-        }) {
-            return Err(ProductOperationFailure::ProviderInstanceNotConfigured { reason });
+        //
+        // Resolved through the port here, once per distinct provider, so an
+        // administrator-configured vendor client counts the moment it is
+        // saved — the OAuth engine already resolves client material from that
+        // same source per request, so a composition-time snapshot would
+        // refuse activation for a vendor whose flow the engine can start.
+        if let Some(readiness) = self.provider_instance_readiness.as_ref() {
+            let mut probed: BTreeSet<&VendorId> = BTreeSet::new();
+            for requirement in &requirements {
+                if !probed.insert(&requirement.provider) {
+                    continue;
+                }
+                if let Some(reason) = readiness.remediation_for(&requirement.provider).await {
+                    return Err(ProductOperationFailure::ProviderInstanceNotConfigured { reason });
+                }
+            }
         }
         Ok(requirements)
     }

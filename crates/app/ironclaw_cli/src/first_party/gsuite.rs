@@ -16,7 +16,7 @@ use ironclaw_auth::{
 use ironclaw_extension_host::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
-    FirstPartyRegistrarContext, ProductAuthProviderRuntimePorts,
+    FirstPartyRegistrarContext, ProductAuthProviderRuntimePorts, ProviderInstanceReadinessPort,
 };
 use ironclaw_extension_support::{
     GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
@@ -54,7 +54,8 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
                     context.product_auth_runtime_ports.clone(),
                 )),
             ),
-            google_oauth_configured: context.oauth_backend_configured,
+            provider_instance_readiness: Arc::clone(&context.provider_instance_readiness),
+            google_vendor: VendorId::new(GOOGLE_PROVIDER_ID)?,
         });
         for package in gsuite_package_specs() {
             for capability in package.capabilities {
@@ -67,7 +68,8 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
 
 struct GsuiteFirstPartyHandler {
     executor: GsuiteExecutor,
-    google_oauth_configured: bool,
+    provider_instance_readiness: Arc<dyn ProviderInstanceReadinessPort>,
+    google_vendor: VendorId,
 }
 
 #[async_trait]
@@ -77,10 +79,20 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         // Pre-dispatch check: every GSuite capability requires a Google OAuth
-        // account, so a missing build-time OAuth backend means no dispatch can
-        // ever succeed. Short-circuit with a remediation tool result instead of
-        // a silent auth-gate stall.
-        if !self.google_oauth_configured {
+        // account, so a host with no Google OAuth client at all means no
+        // dispatch can ever succeed. Short-circuit with a remediation tool
+        // result instead of a silent auth-gate stall.
+        //
+        // Resolved per dispatch, against the same credential chain the auth
+        // engine and the activation gate use: an operator who supplies the
+        // client through administrator configuration must not have to restart
+        // the process before their tools work.
+        if self
+            .provider_instance_readiness
+            .remediation_for(&self.google_vendor)
+            .await
+            .is_some()
+        {
             return Err(google_oauth_not_configured_error());
         }
         let egress = request
