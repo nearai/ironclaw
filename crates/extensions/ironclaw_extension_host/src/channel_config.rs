@@ -454,6 +454,61 @@ impl ChannelConfigService {
         Ok(None)
     }
 
+    /// One manifest's administrator-configured value for `handle`, or `None`
+    /// when the manifest does not declare it or the operator has not set it.
+    async fn admin_configuration_handle_value(
+        &self,
+        admin: &AdminConfigurationConsumer,
+        manifest: &ResolvedExtensionManifest,
+        typed_handle: &SecretHandle,
+    ) -> Result<Option<secrecy::SecretString>, ChannelConfigError> {
+        let Some((descriptor, field)) =
+            manifest.admin_configuration.iter().find_map(|descriptor| {
+                descriptor
+                    .fields
+                    .iter()
+                    .find(|field| &field.handle == typed_handle)
+                    .map(|field| (descriptor, field))
+            })
+        else {
+            return Ok(None);
+        };
+        if field.secret {
+            return Ok(admin
+                .service
+                .secret_material(&admin.scope, &descriptor.group_id, typed_handle)
+                .await
+                .map_err(admin_configuration_error)?
+                .map(|material| {
+                    secrecy::SecretString::from(
+                        secrecy::ExposeSecret::expose_secret(&material).to_string(),
+                    )
+                }));
+        }
+        Ok(admin
+            .service
+            .non_secret_value(&admin.scope, &descriptor.group_id, typed_handle)
+            .await
+            .map_err(admin_configuration_error)?
+            .map(secrecy::SecretString::from))
+    }
+
+    /// The durable manifest list, loaded at most once per call.
+    async fn installed_manifests<'cache>(
+        &self,
+        cache: &'cache mut Option<Vec<ExtensionManifestRecord>>,
+    ) -> Result<&'cache [ExtensionManifestRecord], ChannelConfigError> {
+        if cache.is_none() {
+            *cache = Some(
+                self.installation_store
+                    .list_manifests()
+                    .await
+                    .map_err(storage_error)?,
+            );
+        }
+        Ok(cache.as_deref().unwrap_or_default())
+    }
+
     /// Resolve one auth-recipe client-credential handle from manifest-declared
     /// administrator configuration, including extensions with no channel
     /// surface. The retired channel-config store remains a compatibility
@@ -463,50 +518,42 @@ impl ChannelConfigService {
         &self,
         handle: &str,
     ) -> Result<Option<secrecy::SecretString>, ChannelConfigError> {
-        let installed_manifests = self
-            .installation_store
-            .list_manifests()
-            .await
-            .map_err(storage_error)?;
         let typed_handle = SecretHandle::new(handle).map_err(storage_error)?;
+        // The durable manifest list is loaded only if the in-memory available
+        // set cannot answer. This runs on every extension activation and, for
+        // provider-instance readiness, on every first-party tool dispatch;
+        // `list_manifests` is a store query that parses every installed
+        // extension's full manifest, and a handle declared by a bundled
+        // manifest never needed it. Resolution ORDER is unchanged: available
+        // manifests first, then installed.
+        let mut installed_manifests: Option<Vec<ExtensionManifestRecord>> = None;
         if let Some(admin) = &self.admin_configuration {
-            let available = self.available_manifests.values().cloned();
-            let installed = installed_manifests
-                .iter()
-                .map(|record| Arc::new(record.resolved().clone()));
-            for manifest in available.chain(installed) {
-                let Some((descriptor, field)) =
-                    manifest.admin_configuration.iter().find_map(|descriptor| {
-                        descriptor
-                            .fields
-                            .iter()
-                            .find(|field| field.handle == typed_handle)
-                            .map(|field| (descriptor, field))
-                    })
-                else {
-                    continue;
-                };
-                if field.secret {
-                    let material = admin
-                        .service
-                        .secret_material(&admin.scope, &descriptor.group_id, &typed_handle)
-                        .await
-                        .map_err(admin_configuration_error)?;
-                    if let Some(material) = material {
-                        return Ok(Some(secrecy::SecretString::from(
-                            secrecy::ExposeSecret::expose_secret(&material).to_string(),
-                        )));
-                    }
-                } else if let Some(value) = admin
-                    .service
-                    .non_secret_value(&admin.scope, &descriptor.group_id, &typed_handle)
-                    .await
-                    .map_err(admin_configuration_error)?
+            for manifest in self.available_manifests.values() {
+                if let Some(value) = self
+                    .admin_configuration_handle_value(admin, manifest, &typed_handle)
+                    .await?
                 {
-                    return Ok(Some(secrecy::SecretString::from(value)));
+                    return Ok(Some(value));
+                }
+            }
+            let installed = self.installed_manifests(&mut installed_manifests).await?;
+            for manifest in installed
+                .iter()
+                .map(|record| Arc::new(record.resolved().clone()))
+                .collect::<Vec<_>>()
+            {
+                if let Some(value) = self
+                    .admin_configuration_handle_value(admin, &manifest, &typed_handle)
+                    .await?
+                {
+                    return Ok(Some(value));
                 }
             }
         }
+        let installed_manifests = self
+            .installed_manifests(&mut installed_manifests)
+            .await?
+            .to_vec();
         for record in installed_manifests {
             let Some(field) = channel_config_fields(record.resolved())
                 .into_iter()

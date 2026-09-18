@@ -251,7 +251,8 @@ pub use product_lifecycle::{
     ExtensionCredentialCleanup, ExtensionLifecycleManager, ExtensionLifecycleManagerDependencies,
 };
 pub use provider_instance_readiness::{
-    ProviderInstanceReadinessInput, provider_instance_readiness_map,
+    ProviderInstanceReadinessInput, ProviderInstanceReadinessPort, StaticProviderInstanceReadiness,
+    provider_instance_readiness_map,
 };
 pub use recipes::{
     InstalledManifestAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes,
