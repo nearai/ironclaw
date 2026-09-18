@@ -1047,7 +1047,7 @@ pub(super) async fn build_backend_production(
         .with_available_manifests(available_manifests.clone()),
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
-    admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
+    admin_configuration_credential_slot.fill(&admin_configuration_resolver);
     let initialized_channel_bootstraps =
         crate::channel_initialization::initialize_first_party_channels(
             &channel_extension_bindings,

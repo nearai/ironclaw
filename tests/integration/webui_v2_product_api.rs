@@ -1695,6 +1695,16 @@ struct AdminConfigurationFixture {
 
 impl AdminConfigurationFixture {
     async fn new(name: &str) -> Self {
+        Self::build(name, true).await
+    }
+
+    /// A composition with no vendor callback base, so `compose_auth_engine`
+    /// produces no engine and no OAuth flow can be started for any vendor.
+    async fn without_oauth_callback_base(name: &str) -> Self {
+        Self::build(name, false).await
+    }
+
+    async fn build(name: &str, oauth_callback_base: bool) -> Self {
         let root = tempdir().expect("runtime storage tempdir");
         let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
         let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
@@ -1712,6 +1722,17 @@ impl AdminConfigurationFixture {
         .with_network_http_egress_for_test(Arc::new(
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
+        // Anchors the vendor callback base, so composition actually produces
+        // an auth engine. Without it `compose_auth_engine` returns no engine
+        // and provider-instance readiness is unsatisfiable by design: an
+        // extension whose OAuth flow can never start must not activate.
+        let input = if oauth_callback_base {
+            input
+                .with_dcr_oauth_callback("http://127.0.0.1:3000")
+                .expect("loopback DCR callback origin is valid")
+        } else {
+            input
+        };
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_build_input(input)
                 .with_identity(RebornRuntimeIdentity {
@@ -2792,6 +2813,53 @@ async fn admin_configured_vendor_client_satisfies_provider_instance_readiness() 
         StatusCode::OK,
         "install must succeed once the vendor client is configured: {install_body}"
     );
+
+    fixture.shutdown().await;
+}
+
+/// Client material alone is not readiness: without a composed OAuth engine
+/// there is no flow to start, so an administrator-configured vendor client
+/// must NOT unlock activation.
+///
+/// A host built with no callback base gets `engine: None`, `client: None` and
+/// `gate_driver: None` from `compose_auth_engine`. Reporting that vendor ready
+/// would install the extension and publish its tools while every
+/// authorization attempt remains impossible — the activation gate exists to
+/// prevent exactly that, and this is the state the sibling test's fixture
+/// silently sat in before it was given a callback base.
+#[tokio::test]
+async fn admin_configured_vendor_client_is_not_ready_without_a_composed_oauth_engine() {
+    let fixture = AdminConfigurationFixture::without_oauth_callback_base("google-no-engine").await;
+
+    let (put_status, put_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/vendor.google",
+        serde_json::json!({
+            "values": google_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-google-no-engine-1",
+        }),
+    )
+    .await;
+    assert_eq!(put_status, StatusCode::OK, "{put_body}");
+
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "gmail"},
+            "client_action_id": "webui-gmail-install-no-engine-1",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        install_status,
+        StatusCode::BAD_REQUEST,
+        "a vendor whose OAuth flow cannot be started must stay unready even \
+         with administrator-configured client material: {install_body}"
+    );
+    assert_eq!(install_body["error"], "invalid_request");
 
     fixture.shutdown().await;
 }

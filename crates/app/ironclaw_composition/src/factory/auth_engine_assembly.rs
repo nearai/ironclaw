@@ -17,18 +17,28 @@ pub(super) struct OAuthProviderComposition {
     pub(super) provider_instance_readiness: Arc<dyn ProviderInstanceReadinessPort>,
 }
 
+/// Weak, deliberately.
+///
+/// The resolver owns `ExtensionLifecycleManager` as its channel-reactivation
+/// handle, and the manager owns the readiness port that reads through this
+/// slot. A strong handle here would close the cycle
+/// `manager -> readiness -> credentials -> slot -> resolver -> manager` and
+/// leak the manager's whole filesystem/secret-store graph past shutdown.
+/// `ExtensionLifecycleManager::attach_channel_config` downgrades for exactly
+/// this reason; this mirrors it. The runtime holds the strong handle
+/// (`RebornRuntime::channel_config_service`) for as long as it lives.
 #[derive(Clone, Default)]
 pub(super) struct AdminConfigurationCredentialSlot {
-    inner: Arc<std::sync::OnceLock<Arc<ComposedExtensionAdminConfigurationResolver>>>,
+    inner: Arc<std::sync::OnceLock<std::sync::Weak<ComposedExtensionAdminConfigurationResolver>>>,
 }
 
 impl AdminConfigurationCredentialSlot {
-    pub(super) fn fill(&self, service: Arc<ComposedExtensionAdminConfigurationResolver>) {
-        let _ = self.inner.set(service);
+    pub(super) fn fill(&self, service: &Arc<ComposedExtensionAdminConfigurationResolver>) {
+        let _ = self.inner.set(Arc::downgrade(service));
     }
 
     fn get(&self) -> Option<Arc<ComposedExtensionAdminConfigurationResolver>> {
-        self.inner.get().cloned()
+        self.inner.get().and_then(std::sync::Weak::upgrade)
     }
 }
 
@@ -36,7 +46,7 @@ impl fmt::Debug for AdminConfigurationCredentialSlot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AdminConfigurationCredentialSlot")
-            .field("filled", &self.inner.get().is_some())
+            .field("filled", &self.get().is_some())
             .finish()
     }
 }
@@ -144,6 +154,15 @@ pub(super) struct ClientCredentialProviderReadiness {
     credentials: CompositionClientCredentials,
     recipes: Arc<StaticAuthRecipeResolver>,
     remediation: BTreeMap<VendorId, String>,
+    /// Whether this composition produced an auth engine at all.
+    ///
+    /// Client material is necessary but not sufficient: without a callback
+    /// base `compose_auth_engine` returns no engine, no client and no gate
+    /// driver, so no OAuth flow can be started for any vendor. Reporting a
+    /// vendor ready there would let an extension install and publish tools
+    /// whose authorization can never be obtained — the activation gate exists
+    /// precisely to prevent that.
+    flow_startable: bool,
 }
 
 impl fmt::Debug for ClientCredentialProviderReadiness {
@@ -160,6 +179,9 @@ impl ProviderInstanceReadinessPort for ClientCredentialProviderReadiness {
     async fn remediation_for(&self, provider: &VendorId) -> Option<String> {
         // A vendor nobody asked us to watch is not this gate's business.
         let remediation = self.remediation.get(provider)?;
+        if !self.flow_startable {
+            return Some(remediation.clone());
+        }
         // No static client-credential handles: dynamic client registration or
         // a non-OAuth recipe. There is no host-level client to be missing, so
         // the vendor is ready by construction.
@@ -276,6 +298,8 @@ pub(super) fn compose_provider_client(
         credentials: client_credentials.clone(),
         recipes: Arc::clone(&static_recipes),
         remediation: provider_instance_remediation,
+        // Same condition `compose_auth_engine` branches on below.
+        flow_startable: callback_base.is_some(),
     });
 
     compose_auth_engine(
