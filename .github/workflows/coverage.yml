@@ -120,7 +120,7 @@ jobs:
           components: llvm-tools-preview
           targets: wasm32-wasip2
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: coverage-llvm21-${{ matrix.name }}
 
@@ -192,7 +192,7 @@ jobs:
         run: cargo llvm-cov --branch --skip-functions ${{ matrix.flags }} --workspace --lcov --output-path lcov.info test --ignore-rust-version
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
           flags: ${{ matrix.name }}
@@ -232,7 +232,7 @@ jobs:
           components: llvm-tools-preview
           targets: wasm32-wasip2
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: e2e-coverage-llvm21
 
@@ -373,7 +373,7 @@ jobs:
 
       - name: Upload to Codecov
         if: always()
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: e2e-coverage.info
           flags: e2e
