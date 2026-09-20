@@ -18,7 +18,7 @@ layer = "substrates"
 # editor copies every event through untouched except the ones it targets, so
 # attribute order, namespace prefixes, and whitespace survive a round trip.
 # A DOM re-serializer normalizes all three and would churn parts nobody edited.
-quick-xml = "0.41"
+quick-xml = "0.42"
 # Pure-Rust PDF writer for the HTML-subset renderer. Uses the PDF standard-14
 # fonts, so no font files are vendored and no system fonts are read — the
 # renderer stays hermetic.
