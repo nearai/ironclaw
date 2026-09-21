@@ -11,6 +11,24 @@ always documents the **latest stable release** — docs for earlier releases
 live in their git tags, such as
 [`ironclaw-v1.0.0`](https://github.com/nearai/ironclaw/tree/ironclaw-v1.0.0/docs).
 
+<Update label="2026-09-20" description="v1.4.1">
+
+**Google extensions activate when you configure the OAuth client in the app.**
+
+- **Gmail and Google Calendar connect from the Web UI alone.** If your
+  deployment supplies its Google OAuth client through Settings rather than
+  environment variables, authorizing Google now finishes the job: the
+  extension activates and its tools publish. Previously authorization
+  succeeded and activation refused, and the refusal revoked the credential you
+  had just approved, so retrying sent you back through Google's consent screen
+  to the same dead end.
+- **Credentials you enter take precedence** over any client baked into the
+  deployment, which is what makes a per-install OAuth client work at all. A
+  deployment that configures Google only through environment variables is
+  unaffected.
+
+</Update>
+
 <Update label="2026-08-26" description="v1.4.0">
 
 **Notifications, background subagents, and a sandbox that holds still.**
