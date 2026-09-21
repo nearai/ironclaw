@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1-rc.1] - 2026-09-20
+
+Patch candidate over `1.4.0`, carrying one fix.
+
+### Fixed
+
+- Google extensions (Gmail, Google Calendar) can now be activated on a
+  deployment whose operator supplies the Google OAuth client through the
+  Web UI rather than environment variables. Authorization completed and then
+  activation failed, and the terminal failure revoked the credential that had
+  just been issued, so every retry re-consented and failed again. Two sources
+  answered "is this vendor's OAuth client configured": the auth engine
+  resolved client material live from administrator configuration, while the
+  extension activation gate and the first-party tool-dispatch backstop read a
+  map captured at process start from environment variables alone, which the
+  Web UI cannot write. Readiness is now resolved per activation and per
+  dispatch through the same credential chain the auth engine uses, and it
+  requires a composed OAuth engine, so a vendor whose flow cannot be started
+  is never reported ready.
+
+  Within that chain, administrator configuration now takes precedence over
+  deployment (environment / `config.toml`) client material. Deployments that
+  bake client credentials and never open the administrator form are
+  unaffected — they resolve through the same path as before.
+
 ## [1.4.0] - 2026-08-27
 
 Stable promotion of `1.4.0-rc.1`, covering the 81 commits since
