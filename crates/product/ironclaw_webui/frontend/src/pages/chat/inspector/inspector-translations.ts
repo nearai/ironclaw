@@ -7,7 +7,7 @@ import { registerPack } from "../../../lib/i18n";
 //
 // `src/lib/i18n.test.ts` lists this file in `ENGLISH_SIDECAR_PACKS`, so these
 // keys are part of the all-locale parity gate. Adding a key here without
-// adding it to all ten locale files fails that test.
+// adding it to all eleven locale files fails that test.
 registerPack("en", {
   "inspector.title": "Web Debug Inspector",
   "inspector.panelLabel": "Web Debug Inspector",

@@ -68,7 +68,7 @@ function loadI18n() {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", "zh-CN"];
+const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "pt-BR", "uk", "zh-CN"];
 
 // English copy that a lazily loaded route registers instead of `src/i18n/en.ts`.
 //
@@ -81,7 +81,7 @@ const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", 
 // still carry the whole union in its own `src/i18n/<locale>.ts`.
 //
 // A new sidecar must be added here, or its keys silently fall back to English
-// in all ten other locales.
+// in all eleven other locales.
 const ENGLISH_SIDECAR_PACKS = [
   "../components/device-link-translations.ts",
   "../pages/chat/inspector/inspector-translations.ts",
@@ -529,6 +529,7 @@ test("commandMenuHintRun is an imperative verb, not a bare noun or transliterati
     de: "Ausführen",
     es: "Ejecutar",
     fr: "Exécuter",
+    it: "Esegui",
     "pt-BR": "Executar",
     uk: "Запустити",
     hi: "रन करें",

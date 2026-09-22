@@ -19,6 +19,7 @@ function detectLanguage() {
   if (nav.startsWith("uk")) return "uk";
   if (nav.startsWith("zh")) return "zh-CN";
   if (nav.startsWith("ko")) return "ko";
+  if (nav.startsWith("it")) return "it";
   return "en";
 }
 
@@ -48,6 +49,7 @@ const loaders = {
   uk: () => import("../i18n/uk"),
   "zh-CN": () => import("../i18n/zh-CN"),
   ko: () => import("../i18n/ko"),
+  it: () => import("../i18n/it"),
 };
 
 const pending = {};
@@ -167,4 +169,5 @@ export const AVAILABLE_LANGUAGES = [
   { code: "uk", name: "Ukrainian", native: "Українська" },
   { code: "zh-CN", name: "Chinese (Simplified)", native: "简体中文" },
   { code: "ko", name: "Korean", native: "한국어" },
+  { code: "it", name: "Italian", native: "Italiano" },
 ];
