@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.1-rc.1] - 2026-09-20
+## [1.4.1-rc.2] - 2026-09-24
 
-Patch candidate over `1.4.0`, carrying one fix.
+Second patch candidate over `1.4.0`, carrying the same fix as RC1.
 
 ### Fixed
 
