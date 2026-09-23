@@ -96,7 +96,7 @@ Skills pass through four stages before injection:
   </Step>
 
   <Step title="Attenuate">
-    Trust-based restrictions are applied. Installed skills (from IronHub) are excluded from model-selected activation — the agent cannot load them via `skill_activate`. Skills in trusted directories retain full activation access. See Trust Levels below.
+    Trust-based restrictions are applied. Skills classified as Installed are excluded from model-selected activation — the agent cannot load them via `skill_activate`. Skills classified as Trusted retain full activation access. See Trust Levels below.
   </Step>
 </Steps>
 
@@ -104,33 +104,33 @@ Skills pass through four stages before injection:
 
 ## Trust levels
 
-| Trust Level   | Source                                                      | Activation access                                        |
-|---------------|-------------------------------------------------------------|----------------------------------------------------------|
-| **Trusted**   | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | Model can auto-select via `skill_activate`               |
-| **Installed** | Downloaded from IronHub registry via `ironclaw ironhub install --kind skill` | Excluded from `skill_activate`. Available via explicit `$name` mention. |
+| Trust Level   | Runtime assignment                                           | Activation access                                        |
+|---------------|--------------------------------------------------------------|----------------------------------------------------------|
+| **Trusted**   | Bundles in system and user roots by default; each bundle's effective trust is evaluated separately | Model can auto-select via `skill_activate`               |
+| **Installed** | Lower-trust bundles, including the tenant-shared root when enabled and a system/user-root bundle marked by install metadata | Excluded from `skill_activate`. Available via explicit `$name` mention. |
 
 <Warning>
-Never place a skill file in the trusted directories unless you have reviewed its contents. A skill in `~/.ironclaw/skills/` has the same tool access as you do.
+Review a skill before making it available. Activating a skill adds its instructions to the LLM context; skill trust governs prompt-content exposure, not tool permissions.
 </Warning>
 
 ---
 
 ## Skill directories
 
-IronClaw discovers skills from three locations, checked in order:
+IronClaw reads skills through scoped virtual roots. These are runtime paths, not host filesystem locations:
 
-| Directory                       | Trust     | Description                                                 |
-|---------------------------------|-----------|-------------------------------------------------------------|
-| `~/.ironclaw/skills/`           | Trusted   | User's global skills, available in all sessions             |
-| `<workspace>/skills/`           | Trusted   | Per-workspace skills, activated in that workspace's context |
-| `~/.ironclaw/installed_skills/` | Installed | Registry-installed skills from IronHub                      |
+| Virtual root               | Access at runtime | Description |
+|----------------------------|-------------------|-------------|
+| `/skills`                  | Read/write for skill management; read-only for discovery and activation | The current tenant and user's database-backed skill root |
+| `/system/skills`           | Read-only | System skills |
+| `/tenant-shared/skills`    | Read-only when enabled | Optional tenant-shared skills |
 
-Skills in trusted directories are loaded as-is. Skills in `installed_skills/` follow the same activation rules as the Trust levels table above.
+The physical backing store is deployment-specific. A standalone deployment can import a legacy host-disk skill tree into the database-backed virtual tree, but that host path is migration input rather than a runtime discovery root.
 
 Each skill lives in its own subdirectory named after the skill:
 
 ```
-~/.ironclaw/skills/
+<skill root>/
 └── my-skill/
     └── SKILL.md
 ```
@@ -141,10 +141,4 @@ To verify that a skill was picked up correctly:
 ironclaw skills list
 ```
 
-A correctly installed skill appears with its name, version, and trust level. If a skill is missing from the list, check the directory structure and SKILL.md validity.
-
----
-
-## Auto-discovery
-
-IronClaw scans all skill directories at startup and indexes all valid SKILL.md files. New skills added while the agent is running are picked up on the next restart.
+A listed skill shows its name, source, and description when present; `--verbose` also shows its version. Trust classification is not rendered directly. If a skill is missing, check its bundle structure and `SKILL.md` validity through the supported skill-management surface.
