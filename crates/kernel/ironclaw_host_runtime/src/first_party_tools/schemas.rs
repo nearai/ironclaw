@@ -59,10 +59,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["now", "parse", "convert", "format", "diff"],
-                    "description": "Time operation to perform. Defaults to now."
+                    "enum": ["now", "parse", "convert", "format", "diff", "shift"],
+                    "description": "Time operation to perform. Defaults to now. shift adds the signed seconds, minutes, hours, days, and weeks offsets to input, or to now when input is omitted."
                 },
-                "input": timestamp_input_schema("Timestamp input for parse, convert, format, or diff"),
+                "input": timestamp_input_schema("Timestamp input for parse, convert, format, diff, or shift"),
                 "timestamp": timestamp_input_schema("Alias for input"),
                 "timestamp2": timestamp_input_schema("Second timestamp for diff"),
                 "timezone": { "type": "string", "description": "IANA timezone name" },
@@ -70,7 +70,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "from_timezone": { "type": "string", "description": "IANA timezone for interpreting the input" },
                 "to_timezone": { "type": "string", "description": "IANA timezone for conversion output" },
                 "format": { "type": "string", "description": "chrono format string for format operation" },
-                "format_string": { "type": "string", "description": "Alias for format" }
+                "format_string": { "type": "string", "description": "Alias for format" },
+                "seconds": { "type": "integer", "description": "shift offset; may be negative" },
+                "minutes": { "type": "integer", "description": "shift offset; may be negative" },
+                "hours": { "type": "integer", "description": "shift offset; may be negative" },
+                "days": { "type": "integer", "description": "shift offset in 24-hour days; may be negative" },
+                "weeks": { "type": "integer", "description": "shift offset; may be negative" }
             },
             "additionalProperties": false
         }),
@@ -1080,7 +1085,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
 fn timestamp_input_schema(description: &str) -> Value {
     json!({
         "description": format!(
-            "{description}. Accepts an ISO 8601 string, Unix seconds (including fractional Slack timestamps), or Unix milliseconds. Integer values with absolute magnitude at least {UNIX_MILLIS_THRESHOLD} are interpreted as milliseconds."
+            "{description}. Accepts an ISO 8601 string, Unix seconds (including fractional Slack timestamps), or Unix milliseconds. Integer values with absolute magnitude at least {UNIX_MILLIS_THRESHOLD} are interpreted as milliseconds. Relative or natural-language expressions such as \"24 hours ago\", \"yesterday\", or \"next monday\" are not accepted; use operation \"shift\" for relative times."
         ),
         "oneOf": [
             { "type": "string" },

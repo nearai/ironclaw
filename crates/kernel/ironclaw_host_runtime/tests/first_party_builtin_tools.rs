@@ -3860,6 +3860,39 @@ async fn builtin_time_now_accepts_utc_offset_compatibility_input() {
 }
 
 #[tokio::test]
+async fn builtin_time_rejects_wrong_typed_optional_fields_through_dispatch() {
+    let runtime = runtime();
+    for field in ["operation", "utc_offset"] {
+        for value in [json!(5), json!(true), json!([5]), json!({"value": 5})] {
+            let failure = invoke_failure_with_context(
+                &runtime,
+                TIME_CAPABILITY_ID,
+                json!({(field): value}),
+                execution_context([TIME_CAPABILITY_ID]),
+            )
+            .await;
+            assert_eq!(failure.kind, FailureKind::InputEncode);
+            let issue =
+                failure_input_issue(&failure, field, DispatchInputIssueCode::TypeMismatch, field);
+            assert_eq!(issue.received.as_deref(), Some(value.to_string().as_str()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn builtin_time_defaults_absent_and_null_optional_fields_through_dispatch() {
+    for input in [
+        json!({}),
+        json!({"operation": null, "utc_offset": null}),
+        json!({"operation": "null", "utc_offset": "null"}),
+    ] {
+        let output = invoke(TIME_CAPABILITY_ID, input).await.unwrap();
+        assert!(output.get("iso").and_then(Value::as_str).is_some());
+        assert!(output.get("utc_offset").is_none());
+    }
+}
+
+#[tokio::test]
 async fn builtin_time_now_rejects_invalid_utc_offset() {
     let failure = invoke(
         TIME_CAPABILITY_ID,
@@ -3872,6 +3905,117 @@ async fn builtin_time_now_rejects_invalid_utc_offset() {
     .unwrap_err();
 
     assert_eq!(failure, FailureKind::InputEncode);
+}
+
+#[tokio::test]
+async fn builtin_time_input_issue_reaches_the_dispatch_boundary() {
+    // The production failure (#7191): a natural-language timestamp came back as
+    // a bare `input_encode` with no detail. The typed issue must survive the
+    // runtime, not just the time.rs helper.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "parse",
+            "input": "24 hours ago",
+            "timezone": "America/Los_Angeles"
+        }),
+        execution_context([TIME_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::InputEncode);
+    let issue = failure_input_issue(
+        &failure,
+        "input",
+        DispatchInputIssueCode::InvalidValue,
+        "relative time expression",
+    );
+    assert_eq!(issue.received.as_deref(), Some("24 hours ago"));
+    assert!(
+        issue
+            .expected
+            .as_deref()
+            .is_some_and(|expected| expected.contains("operation \"shift\"")),
+        "expected text should point at shift, got {issue:?}"
+    );
+
+    // Nothing upstream of dispatch rejects a wrong-typed field, so `to_timezone: 5`
+    // reaches the tool. It is a type error: `MissingRequired` is reserved for a field
+    // that is absent, and telling the model a field it sent is missing sends it to fix
+    // the wrong thing.
+    let wrong_type = invoke_failure_with_context(
+        &runtime,
+        TIME_CAPABILITY_ID,
+        json!({"operation": "convert", "input": "2026-08-04T21:06:40Z", "to_timezone": 5}),
+        execution_context([TIME_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(wrong_type.kind, FailureKind::InputEncode);
+    let wrong_type_issue = failure_input_issue(
+        &wrong_type,
+        "to_timezone",
+        DispatchInputIssueCode::TypeMismatch,
+        "numeric to_timezone",
+    );
+    assert_eq!(wrong_type_issue.received.as_deref(), Some("5"));
+}
+
+#[tokio::test]
+async fn builtin_time_shift_offsets_through_host_runtime() {
+    let output = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "shift",
+            "input": "2026-08-04T21:06:40Z",
+            "days": -14,
+            "timezone": "UTC"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["iso"], json!("2026-07-21T21:06:40+00:00"));
+    assert_eq!(output["timezone"], json!("UTC"));
+
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        TIME_CAPABILITY_ID,
+        json!({"operation": "shift", "days": i64::MAX}),
+        execution_context([TIME_CAPABILITY_ID]),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::InputEncode);
+    assert_failure_has_input_issue(
+        &failure,
+        "days",
+        DispatchInputIssueCode::InvalidValue,
+        "overflowing shift component",
+    );
+}
+
+#[tokio::test]
+async fn builtin_time_shift_accepts_signed_component_cancellation() {
+    for (sign, expected) in [
+        (1_i64, "2026-08-04T19:24:55+00:00"),
+        (-1_i64, "2026-08-04T04:35:05+00:00"),
+    ] {
+        let output = invoke(
+            TIME_CAPABILITY_ID,
+            json!({
+                "operation": "shift",
+                "input": "2026-08-04T12:00:00Z",
+                "seconds": sign * 9_223_372_036_854_775_i64,
+                "minutes": sign * 153_722_867_280_912_i64,
+                "hours": sign * -2_562_047_788_015_i64,
+                "days": sign * -106_751_991_167_i64
+            }),
+        )
+        .await
+        .expect("representable final offset");
+        assert_eq!(output["utc_iso"], json!(expected));
+    }
 }
 
 #[tokio::test]
