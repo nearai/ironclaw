@@ -1,0 +1,300 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:7268b1153c76904da576974c7e2085cf49cae05ed6d4ce69eec4fa40f8601c1f",
+  "claims": [
+    {
+      "id": "claim_16db75abda004d2b8bf113806d6eb5b9",
+      "statement": "Channel adapters are stateless protocol translators that parse vendor message formats and render replies. The host owns all durable state including secrets, sessions, bindings, and delivery records.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L1-L50",
+          "version": "repo-lines-v1:sha256:715d98d94459f2bfd2441504488320a4bcd304181d5f1af4d12da88cf1fa78ca:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1OGRlM2VmYzgyZWUzNmRkZTdjMWUyOTE1NTYyYzU2OTlhOGQ5MjhjZGNiZDcwMTdkOTAzZTM3MGZjNjNkMTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE5MWQ1YmYzODNkY2YxZDA3NGQzN2YzNjg5YTIzOGE1ZWNmODJlNjQ4YTU4ZGMzMTI3MmQwMmZjMTFkMTgxMmUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/how-to-port-channel-to-reborn.md#L48-L87",
+          "version": "repo-lines-v1:sha256:47f3374a60b9cd5c25bc700fce97b093d3bf3af8a0c2fca2ce7bcacb9d5b78d4:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVjZDFmM2UzOGQxODgwYjUyOTMxOGM2YTlhZTliMjExMGZiMTViOTljNjIzNTZkNzdhMjc1YTY5MjI3NmQ2ZGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEzODRjY2E4ODM1YWU4MGUyMTQwNzc4NTQzMzFkMjgxNTgxYWNlY2ZlOWM2ZDM3NjE1MDQ4MmZmOWZmNDg3NmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7eb11582c51643729d9e9c7ee86822ac",
+      "statement": "ChannelAdapter contracts split into three optional halves: ChannelIngress (parse inbound), ChannelDelivery (render and post outbound), and ReplySink (stream or materialize replies). Adapters implement only the halves their manifest declares.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L57-L175",
+          "version": "repo-lines-v1:sha256:8454d8942af0f29e28a010dcc113b3aeb78d16947f7fac01c3edac4c3df60d73:eyJzZWxlY3RlZExpbmVDb3VudCI6MTE5LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI2ZTRjMzVjNGUyZGEyMDE3M2I5ZGMwMTM4M2Y0NTZlM2ExMWRiYmQ4YmNiOWUyZjQ3NmNhMWY2OGE4ZTA2MDFiIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI4YThjMzEzZDhiN2M1OTllYzk4Njg3YzFjZjc4ZmI1ZTExZTIwN2Y0M2ViNDUwMjM1YTkwNmM0MzBkNDZlZGY1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI1YTZjMDBhNGI4MzY2ZDBkOWY4N2QxMzQyYTVmZjI3Y2M2NzQ2MGI1Zjc3ODgwMDFjMjY2NjU4ZGIyM2I2NTY3In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_3e7c575af9db4e7980c08fe8ce198688",
+      "statement": "ChannelIngress::receive is called only after host verification; it receives the verified installation_id, non-secret manifest config, and request body. The adapter returns NormalizedInboundMessage with untrusted bounds that the host validates.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L57-L69",
+          "version": "repo-lines-v1:sha256:fddfc5194c874d9f840cd2c7bc8bce377fbc2fdcd6fb3982f7c70b74067c83ff:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZlNGMzNWM0ZTJkYTIwMTczYjlkYzAxMzgzZjQ1NmUzYTExZGJiZDhiY2I5ZTJmNDc2Y2ExZjY4YThlMDYwMWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhhOGMzMTNkOGI3YzU5OWVjOTg2ODdjMWNmNzhmYjVlMTFlMjA3ZjQzZWI0NTAyMzVhOTA2YzQzMGQ0NmVkZjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMyOWU3MTFhM2E1MjVlZDFmYmE2MWNkZDA0MDYzMzQ0ODIwYzk4MTgxMjMxMmM5MmVjYTlhZWQwODk5MWUxYmIifQ"
+        },
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_host/src/ingress/router.rs#L40-L120",
+          "version": "repo-lines-v1:sha256:3e9947c8b4f882de306ea1036ea03f3e2a8282c6d8a5b727ede0e34b66109da7:eyJzZWxlY3RlZExpbmVDb3VudCI6ODEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhYTgwN2IxN2VmNzhhYzRkYTc2MTVmODhiYjA5ZTgzMjk2ZWI5MjYyMmVkNDY2OTZhMDkwNmI5NThkMGNlNWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYxODlkYjUwN2QyMTc3YjJjMTUzNDM0M2M5NmRkYjRmZGQ3YzM3Mjk4ZDczYWE5Mzk5M2IwMTcxYjA0NDQ5NDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM3ZjRlYWJiODI3N2QxZmEyMTk0NWY2OTk2OTBjMGU1Zjg2MDJkYWM0MTEyM2FkYjFkODVhMTkxMzZiYzZlYTkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_19067019c8164c43953bdab04dbb554a",
+      "statement": "The host ingress router verifies protocol authentication (signature, shared secret) before calling the adapter. Signing secrets are host-resolved and consumed by the constant-time verifier; the adapter never sees them.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_host/src/ingress/router.rs#L55-L82",
+          "version": "repo-lines-v1:sha256:def0431e9559f1365d7c440bde7dd98fd170ffe4233dbfd9a75d6e81edb6f67e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxMmE1YTUxMTU0NjAyZGEwNDVjMjE5Y2I2MmE5ZDM5MTI1NmRjMzYzMDBjOGMyODBhMjQzMWRjNzhkM2QzN2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkxOTlmNWQwMDQxZDQ1NjY4MDljNjViMDRjY2YzYTYwYzJlZjQ3ZGYwYzkyMDhmOTE4YmQ1MjIyMmVlMzU5YTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE5MGMwZDQ1MjE0Nzk3ZTIzMTE1NzFmYmNlOTI0OTM2M2FmMzY3MGIwZmY2OTZjNDZjMmFmYTU5MmQwZDAxNDQifQ"
+        },
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_host/src/ingress/verifier.rs#L1-L152",
+          "version": "repo-lines-v1:sha256:99563ad6683a2be93ca4a5c767cac6f84f7eb3952580cf41dc59cb6d93da361c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUyLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5OWVjYTgxODFmYmU0OTc0OGQwMGRhMmQ1NmQ3YzhkZjE1ZGFkYzVmY2FmMGRlZjZiZjY1MDc1NDc4ODQ3NzBlIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJlNmIwNDQ5MTQ2OTcyMmU4MzYzYTk0ZTQwNDQ1MzhlMDEzYTJhMjE3ZTM2YjFlNTY4YmE2MGFjYjdiNGM4ZjJlIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_59c15ca128ae4f2ba19a7d02e69a865d",
+      "statement": "VerifiedInbound carries only non-secret manifest-declared configuration. Secret material remains host-side. This prevents adapters from accessing signing secrets or API keys.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L227-L248",
+          "version": "repo-lines-v1:sha256:d8b8213c2974f3ffb7b52d0a9f6255a78dbe1b55926fd2b8749f537a43661253:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYyMDkzNmFlY2NjNTJlMzQxMmU5MGQxMzJjOGQ3NzU4ZTBjMGIyYTkxNTZjMGI0Y2Y0OTdlYmY0NzAyMmEwNGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE0ZDIwYjM2ZDA3MDM4ZTNkZGEyNTdhYzFlZjJkNDZhZWFiNTYxOWM2NDc3OTA5ZDBiOGY5MWVlYTdiNDA1YjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ1YzBhNDcxMTY4MjEwYjM1MjQyZjgxZWI0NWQxNDM1ODlmMTJlMmZmY2FjYzljMDc5NWNjMzI4MzBjN2QyZGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ed8a0c3a31824c56abe42f4eaceb2312",
+      "statement": "The host runs a durable admission transaction keyed by (installation_id, external_event_id) that records idempotency, resolves conversation binding, and commits turn submission. Duplicate vendor retries replay the original accepted message.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_host/src/ingress/router.rs#L83-L119",
+          "version": "repo-lines-v1:sha256:3c5d693090484cb49b732fe4b5a5db40e317a5e775652c79bc2cf9369905cee9:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkxODkyNDFiZjZiNGM2M2FiNzZkODFlOGE3YjI0NWY2MDFlNGZjM2U3ZjNhODJlZGIyOWUyOGJjMzU2OWQ5YTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI3YmM0NmI1MzdkNmVlMjczN2NiMDYzNDg0OTFjMzFiYjQ5Yjk4MGY1YjVhZTkxZDY3NDA4MmFkYjYyYjljMWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNiY2QwZjkxMjMwMjE0OTQ5MTEwMDBkMWM0YmY2ODliNzhkODE4ZjI3YzMyZmU2OGViZDg2NWFhNjEzOGVlZjIifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/conversation-binding.md#L115-L127",
+          "version": "repo-lines-v1:sha256:d4ffd9dc3c9bd623e906c964b1768cfc4133566b113f4efd30e96dc63c69c23f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4OTUwMmJlZGUyY2NlMGI5ZGY1YmU1NmFhYWVhMzAwNGFiNzU2YWEzZTJjNDkyNjkyNTJhNzg3ZmNjNWYxNjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQzYjEzMmJlNTg1MTk0Y2JmOWZlMmY3YzdlOTEzODc5NTc2ZWRhOTEyYWM3Y2JkZWJlM2RlZDA4MTk0YzBlN2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFiOGE2OWIyYzhiNzczNTg0ODNmNTk1OWIxNTY1N2U5YjU3NjE4MjE4NTljMDY1MmRhNDM3ZjU1NzQ3MDZjNjAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_af3e00bc14e94cb980e57af62c62c5ea",
+      "statement": "Conversation binding resolves (tenant, adapter_kind, installation_id, external_actor_ref, external_conversation_ref) into canonical (UserId, ThreadId). Bindings are scoped by tenant and installation; pairing on one workspace does not authorize another.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/conversation-binding.md#L68-L142",
+          "version": "repo-lines-v1:sha256:b769898f1abfae77001513181d723804094c7003252623209bb3b68db6b50773:eyJzZWxlY3RlZExpbmVDb3VudCI6NzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkxMDBjMDU5ZDFlZWU1NDAzNzQ5ZDMyZjFjNzJlYzAwNjBmMTgxZWYyYWQ1MmYwNDg3ZTZlMTEwZDA3Zjk5ZTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRkNGM1OGE3MmQ0MTE0NWRiODg4Mzk2Y2RkZmNkZmY1MmZkNDYxMTk4ZTMxZTJhNDNjYjEzMTFmNzRmNzQwNTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8df4e240a0794ad6b00c37d898846e47",
+      "statement": "Actor pairing resolves external actors to canonical UserIds through OAuth (Slack, Telegram) or operator configuration. Unpaired actors fail closed with BindingRequired; no message is accepted until pairing is established.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/conversation-binding.md#L117-L127",
+          "version": "repo-lines-v1:sha256:7929b9efcaa80219a51fa9f6002b50f382aab8b9023edf1064bf8d3b658c1d68:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxOTZlZmQ1MzFiNTIwNzMwYWMwNmQwMzg4NDFmM2I0MzY2MjM5OTc4M2RiMmYwOTE5ZDgxMDQwMGZmNTVjYmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQzYjEzMmJlNTg1MTk0Y2JmOWZlMmY3YzdlOTEzODc5NTc2ZWRhOTEyYWM3Y2JkZWJlM2RlZDA4MTk0YzBlN2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjZkZTM2MjY2NmJhYzc1OTdlZmVlNWNlOTRhNjAxNWZhZjVhNmU1MDNiMGZiZWM0ZWJiN2Q4ZWQ4NDNkYzNkZDMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFiOGE2OWIyYzhiNzczNTg0ODNmNTk1OWIxNTY1N2U5YjU3NjE4MjE4NTljMDY1MmRhNDM3ZjU1NzQ3MDZjNjAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_864a3e52a465419382c137370c2a94db",
+      "statement": "Shared conversations (Slack channels, Telegram groups) create one conversation-keyed binding for routing and idempotency, but fresh ephemeral per-event threads keyed by external_event_id. Each inbound ping owns its own thread; redelivery replays that thread.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/conversation-binding.md#L7-L26",
+          "version": "repo-lines-v1:sha256:44631f786656e286eda7952464c5d5f4a4b6e5e8d168179744aed1ee2f8ba713:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU4NzcwN2NmODkyZDYyY2VmNDI0MzViZWQ3MTc1MGM3MzE4MjQ0MGJhNWQ4OTNjZWZhNGY2ZTQ0N2FlM2ZlMWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZmFiOTYyNzM1NzQ1YTAwYTdkN2Q0NTY3YzkwNjEwOTZlYzI0M2I4MzJhMGVjNjQzNWI2Njc4ZDhjZmNmNzUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE2MjE5MTY1NjdlOTQ0MjMzNzA5NzhjMTg0NWM1YTM4ODljZGU5ZTk0MjIwZGZhNDJhNzQ1NTRjN2E2OTAxMDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUyZGJkNjA5ZGM5ZTJmNDIyNjBmNGRkYmM1ODRlYzM5ZWE2ZjQyZmQ3MjM0YTk4MDcxYjU2M2QyMDNhMGIzZGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1a93624a180a479083782fdc1985b13c",
+      "statement": "Shared conversation messages are admitted via fail-closed SharedConversationAdmission check: verified-ingress presence for the adapter's own installation. External channel membership alone is insufficient.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/conversation-binding.md#L129-L130",
+          "version": "repo-lines-v1:sha256:f418457ba505fba12385b302f48a5fa9671d31937365e8a532c349b2f971334a:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWM1NTZhMDczZTRiMDc1MGJhODBjYzNiM2Y5N2Q2ZWM5N2MwZDhkZDM0OGVkNzIwYjIwYWIxMDMyZWVmZDM3MiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZGY2ZmUyYTUzODE0YTQ1ZmU5YTBhY2QxMWFkZGMwN2FkOTg4NGE5NjBhOTE1MjQzNGMzNDc0M2I5OWJkZmY0NSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjQxM2FhYjI2YmFiOGVmZDY5OWQwZDYzMWIxMzU3OGNjMGI5OWI5ZTE2MzdlNTYwMmNiYzIzYzVjMGNkOGYzMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiN2RlNDJjNWQ0ZjQzNjI5NDk2MjA3MzI0YTMwZmM2MmFkMGRkZGEzZTIyZDdhMDJkYTc5ZDY2MjY1NmE0NjE0ZSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_fa794fbe461a4e03a2f1a313f27ea80b",
+      "statement": "Outbound delivery resolution returns a single candidate target based on intent (LiveSourceRoute for inbound replies, RunScopedTarget for background notifications). There is no implicit fallback chain; the caller decides the target before resolution.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/communication-delivery-resolution.md#L265-L298",
+          "version": "repo-lines-v1:sha256:f8f27dcb73f8352b1bf845008920c05acac7799d690966a53c9b3530b7d86fb9:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJjZTZlZTkxZDRmMDNlZGJlYWExNDA3OTE0M2RmMmI1ODIxMTIxNjg5MTAwMzE1NmY5MjNlNDlhMDE4Y2U2MTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNmNWFjODFlMDZlMWZjY2I3YTc3OTJiYzcxNWNjYjBkN2FkZWNlZGM3Y2E0NDJhNGY5MzdlZTg2MGQ3MTk1NjYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_21530911cd8947a495b54746c2961f0d",
+      "statement": "Source binding and reply target binding refs are distinct. Source binding is the conversation route used for idempotency. Reply target binding is the exact external route (with per-message anchors) used to address the reply.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/conversation-binding.md#L130-L132",
+          "version": "repo-lines-v1:sha256:e30e727b7ac4341de18984de34756aea49257271bf82014261712f322747a0c7:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZGY2ZmUyYTUzODE0YTQ1ZmU5YTBhY2QxMWFkZGMwN2FkOTg4NGE5NjBhOTE1MjQzNGMzNDc0M2I5OWJkZmY0NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDk1MjMxMmM0ZGFlYzgwOTVkYWU2ZjdhNzdiNmNmOTFkMDVmNTRhMGNmODJmNjkzNGZlZWQyNmE2ZDVjNmIzMSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWQ4Mzk3ZmIzNmRmMDk2ZDU0MjgzZGU4M2QyNTU1YjExYjM4YTc3M2U0ZWQ5NTFlYTc3YWY0OGQwZjQ5ZWY2YiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjFhYzQwNjQ4OTY5MmI3NTIyODM0MWNkOWFiMTdjZjJhNmNlZGVjYWRiOGQ0ZGU0YjY1ODc3NDMxZWNmYWZkMiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_d874baddae83474bb10bb643ef0a2289",
+      "statement": "SlackChannelAdapter implements ChannelIngress (parse Events API webhooks), ChannelDelivery (render to mrkdwn and post via chat.postMessage), and ReplySink (stream and message cadences for native threading).",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/packages/slack/src/channel.rs#L1-L50",
+          "version": "repo-lines-v1:sha256:5e03abb8595a10ef0131f4eb4718e40c1f6933406073ecf035ba65e03d177ea4:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQxOWQwYzJmM2Q1MzMzM2Q4MjRlNDE0NjMzNDZlYWMyNTkzMGNmMzA1ODYyOTgxMmU2NmY2MDUzOTdkZDUzODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3YzMxY2JkMGRjZmU3YjVlNjY5ODk2YTVlOTU2YTZjYmUxYTQyZTFjZTY5YmExNjYyMTgwMjMyODlkMWFlOTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzMGQ4YmE5NmYzZmRiNGQwNzFkODVhYmQxODEzMDlmZGE5Y2Y4OGI5YmYwNTc3NDU1YWNhMjgxOWQzNjc3YTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2ec620f139cf49ceaf421c4142feaa39",
+      "statement": "TelegramChannelAdapter implements ChannelIngress (parse Bot API webhook updates) and ChannelDelivery (render and post via Bot API methods). Reply is message-only cadence (no streaming).",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/packages/telegram/src/channel.rs#L1-L70",
+          "version": "repo-lines-v1:sha256:5daf1e7a0e070132bf380659500f3d1a7a79a8bad5fda58258e2548cdd9388e5:eyJzZWxlY3RlZExpbmVDb3VudCI6NzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3MjY0MzVlNDQ0OTE5NmUyNTNhYjU5Njk1ODIwMWI1ZjY0Y2MzZTEzMmE2Mjg3N2I4YzcyZDIxMWZkOWJkMjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBhNzE2NjI1NWVkZjNiNWE0MDc0NDYwM2FlZmM2OGJmMDdlNTliNTk1MjMwZGI2NmVlY2UzZmY3OGQ1NmE4ODgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2a6a060a578a47ddab5c6fe51426ae2c",
+      "statement": "The WebUI is a native host surface with no external protocol layer. It uses authenticated HTTP sessions (OIDC, signed tokens, CLI token) verified by the host, not webhook signature verification.",
+      "evidence": [
+        {
+          "resource": "repo://crates/product/ironclaw_webui/src/lib.rs#L1-L20",
+          "version": "repo-lines-v1:sha256:6b232d7ff0bc7e86683196d92bba76fb1b76061adcd9b9a1a0d5ba6cf8164765:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxZDc4NDMyNjNiYjRiNjE1MDJiN2FlOWQ5MmFjN2IxMjFiOGQ3MGU0ZjE0MjFhZmQ3MTliZmZjNWU4OThmNTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiMzcxMTE4YmRjNTc2MmY4NzJjNTljMTcyYWY2NDlkZTZjYTQxMmIxNTk4NGNjMDQ4MjE2MTkwOGE5M2U4MWIifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/how-to-port-channel-to-reborn.md#L18-L45",
+          "version": "repo-lines-v1:sha256:a559fc85c8278a3047fc1755b99d70ea4412642bd7a3f960ed625500707a803f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ0ZDYwYTY1MWQ0NWNmYmI3ZjAwYzE4ZWRkOGNjZGE5NmQ1NTM1ZDMyM2JmMDA5M2U5ODc0MmU5ZjA0NDhiZGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJhOGY2MzIwZGU2ZDg5MWI2Njc5OTE1NzZhN2U5YWFmOGE2MmMwNDM4MzNkOWZkZWRhN2Y4ZGFlNDdiODgzNjkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRmNDYxYWJlMjViM2RlYjJlNWNkN2FkYTI3NWJiMzM3YzNhMDQ2ZmE4NjE0OTRlZDY5MGQ2NTI3MDU3ZTM3NjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNjMDhiN2Y4NTI0NWY5YzRkNmYwZWFjOTdiZTA5YzZiYWFkMjA4OWFiYmJiMWJkZDMyYWY2MzJiZjViMzE3OGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_11a8851160ca4a60ab74ad2cbd20c632",
+      "statement": "ChannelDelivery::deliver returns per-part outcomes without touching the delivery store. The host records delivery attempts separately; the adapter only describes what the vendor did.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L567-L606",
+          "version": "repo-lines-v1:sha256:3597e7d820681ea122118399575c860653a0bfdecbaacac85c4eea5c8486ac86:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVjMGJkNWNmZTUzOTdiNTU5NDgyNWVkMzhhM2ViMTczYjBkZWQwNDQ3ZGU0NzRmYmNmMDEyYmNiNjcxMWI1MDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg0N2NmYTEyMTNhYzg4OWMzZWY5Mjg2NDJiZTU4ZTJiN2Q2YjQ1MTBkNGJiNTVlZTljOGMyZjBkNzA1YzUxODMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU0OTY3MmExM2JmNjdjYWUyN2Q1ODkxYzFkZDA5NmJkY2JkMTJiN2U1YjRlYjEwN2RlNTYyMDVlMjY4YTljYmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d51a45fae4c44681abff46a93bc53071",
+      "statement": "Delivery outcomes are typed: Sent (success), Retryable (5xx/timeout), Ambiguous (crossed transport), Permanent (deterministic failure), Unauthorized (auth revoked). Only Retryable triggers coordinator retry.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L590-L606",
+          "version": "repo-lines-v1:sha256:e54d7558d22377f6c2306d34cb9b371518f410e2b3d1e8c16b795ec7aa609c4b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjZTFhOWJlZmVlOTgwMDAwNzAzNGQ1MjQzOTU5N2RmZWQ3YzEyMzk3YThlODExZjc0ZWEyNjdlMGYwZWMwMTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU0OTY3MmExM2JmNjdjYWUyN2Q1ODkxYzFkZDA5NmJkY2JkMTJiN2U1YjRlYjEwN2RlNTYyMDVlMjY4YTljYmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fffb6e1d3792451a9ff344ab28f32e6b",
+      "statement": "Adapters call vendor APIs through RestrictedEgress, which validates endpoints against manifest-declared egress hosts. Secrets are injected by the host using SecretHandle references; adapters never embed credentials.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/packages/slack/src/channel.rs#L144-L148",
+          "version": "repo-lines-v1:sha256:1705d9963afa49963d2aa2b88601b9a4d1326b5ae4b24e458e9e7606fceca6d7:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTNmOTgyMTM2MmQ0MDhjZTNmZDRkZjZjMDI5Mjg0Nzg0NTFlNjFlYTFlM2Y3Y2Q5ZTQxYzFlNWJhNWJmNTRiZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmNhMzI1NmMyOTQyMjNjMTVlZjRlM2NkZmI1MzEwMGFmY2RjMWJkMzE3YmZkNGMzMjQxMjc4ZmJkZWFlMDg1YSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiM2FmNWZiM2MzNGU5Mzg1NjE3MGVjNDI3ZDRkZWQ2YmM4YjljNGFhOTM2MTc3MWVhNGY1YWUwMGEwOTFmNzc4OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTNlODdlMTVhMGY3MzNlMTQyMmFiZTJlZjVjOTdjOGM3OTg3NGQ3YzI5YzkxMTg0MjFjMzE0NTZmNzQzYzY1ZSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_8d5834175dee443bb6387458fcdc64b4",
+      "statement": "Host verification executes IngressVerificationRecipe (HMAC-SHA256, SharedSecretHeader, or None) using constant-time comparison and timestamp replay checks. At most MAX_VERIFICATION_CANDIDATES (8) installations are tried per request.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_host/src/ingress/verifier.rs#L115-L150",
+          "version": "repo-lines-v1:sha256:359546ba1f0f499813980f3225776332c639794d47be9dfed5757cadaebef791:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4ODJhZGU2NDNmMjQzZjBhY2JmNjI4YWE3NGZmNDlmM2U1YjJhYWMzMzY5ZWY0Y2FiM2U1NjI4ZThhYmVmYjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM2ZjIxN2Y4YTBlM2EyZjgxYmVmNzZhMzkyNjg0NTk2OGMwZTA4NDBmYjM3YTNjMzk0NDk1YWM5OWNlN2RkYWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc1Yzk5ZDc1Njc5MjIyMTk2NWViMjIwZjE1OWY4YjU1ODI0ZTk4MTNkYzAwZTc0ZDkyN2I5Zjc4NWE2YWQyMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_3fba6c21d2b64690822f60ca9387b4ec",
+      "statement": "Provider batch fragments are keyed by (batch_key, fragment_id) and settled within an adapter-requested window (1 to MAX_INBOUND_BATCH_SETTLE_MILLIS). Fragments are staged in host-private storage before the merged message is admitted.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L269-L305",
+          "version": "repo-lines-v1:sha256:ff260e4efecda6a0ed174467cddbe64c235c7881180878c70e83a2afe09f3e47:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE0NzcyNzVmY2Y3NWYzYjVmN2M3OGMwYzBhMzZlOTRjZmUyOTIzMTIyMWJmYTAwMGIzYmI5MDJmMzlkZDgwZjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFjYTEzNjZlYjcwMDg4ZDBmOWZkNzRlODU4NzBmMGQzMTRiMGIxNjVkZDYxN2ZlNzJjMDg2ZDFjZmEyZjU0ZDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI5OGY1YTQyYjRjM2QwZGE4MGIzMjU1MDY5OGVlNDEwMjY2MjYyYzE1NGNjNzgwNGY0YzE0OTBmM2YzYjcwNzYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5e0ab838676d4a61a3fdeac3fbc19de5",
+      "statement": "The adapter stamps every message with ProductTriggerReason (DirectChat, BotMention, ReplyToBot, BotCommand, LinkedThreadAction). This reason is carried unchanged through product-tier inbound DTOs.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L41-L49",
+          "version": "repo-lines-v1:sha256:21ce0957d59bcd123c69b0a3c2faf21e38f4f8005a6ecc319d50643dfd181644:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjBkZjZlMjUyNzllNjIwY2MzOTE3M2MwNTFhYjg4Yjc4NjgzMzZmNTkyNzU1ZDRhOWFhMjllYTU1ZThlZmI2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNzNlZGI2YmI3YWNmNjk2YzFlZjBiMmI0MGVlMTg0NWNkMzhkZjYxY2U1ODg2NzIyZTk2Y2NlOTdhNzBhMmM3YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZWI4OGFjNjllMjAxOGFlOGUyMmU3ZmFjYWUzMmFmODhjMDJkOWQ0YWNmNGVkNWFjMTA2ODIyMmU4YWI1N2Q1NSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_624e8f8a8a6c456386bb15bbbc4c2649",
+      "statement": "NormalizedInboundMessage carries optional opaque reply_context (≤4 KiB) that the host stores server-side. At delivery time, this context is handed back to the adapter for reply routing (e.g., to identify the vendor thread to reply in).",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L340-L344",
+          "version": "repo-lines-v1:sha256:2de2d0095c7d7939965c46ab7d3a69773b0fa2f9dd62b3b59ecc649c6f82999f:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZGU3MGE2NzczMTk5Njc3ODQ1OTM2ZDZiNmZmYmE1NzVkMTdhYjk4YTA0ZDg5OTFkYzQzNTlkNmVhNWExYjYwZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDMxOTdlODMxZTFmODMzOGVhMTJkN2E0ODk5NTY4ZDg4NjA0OGE3NzMzODc5MDJkMWQ0ZTVjNGU1ODAwOTI5MiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTU1YTlkN2Y2NTBlNmU5ZGJiM2M5YmU1YjYxOWEzZTM0YjdlNzZkMGU2ZTQwOGIwMWUwYTkxYWNkYjYwNzYyNiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_be09a6335a9344dc98964b7aae2e7330",
+      "statement": "ChannelConversationContext carries recent vendor-side history fetched by the adapter for advisory context. It is untrusted third-party content and must be framed as quoted information before reaching a model.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L400-L443",
+          "version": "repo-lines-v1:sha256:f8b5f8906c704a44741a690be2dab7679728186c115fba5f2783d6592d5f916e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjViZjFlZGZiMWVhMGJkYTdiMzFjNmJjZmRhN2U2YmYyZjQ1ODA4NDNkMjE1ODJmMTBlMWE0YTMxM2NjNTIyMWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUxZTJlZmI3ZTE2NTgxOTM1NTQ4OGM1YWM1ZWUwNzhiM2M0MGRhNjViOGM3ODFjZmM3NWYwNWM3M2E0ZDhmY2UifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f7f4c7788674412c80341710ddd04a1b",
+      "statement": "DeliveryRegistration carries host-minted registration_id, manifest-validated endpoint URL, and channel-opaque document (≤16 KiB). Channels declaring requires_enrollment gate delivery on non-empty registrations.",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L202-L225",
+          "version": "repo-lines-v1:sha256:6c717720196daba9c4bc2cc9725dfa20754dd95f70a58cdbb83d8dd4b79ef83b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3YzE4Nzk4OTAzNDUzYzYwYTUxN2Y0M2JhYTRlOTNmZGMzYTBmMWQ0ZGQ4N2FhMjNlYjY3MDA5NzNkMTM0MzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYzMTM1ZTcwOWE5YWQzNDZlYzI3ZTI4MjkzODAyYTVjNzQ0MWE5YjA2YTEzN2VlNzA5NGQ3MTE0ODViNGM4ZjIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ1YWM3ZWYwYjY0MjEwOTlmYzM5ODU5YzA3MGYyNzBjNmY0ZWQ1NjA5NDM2NzY5MGMyMDg4ZjliZmE2ZWY5YzkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ1Mzg4NWY5M2NiNDQ0MzBiYzNlNDk2OTYwNTRjNTc3YmQwMmQ3OWM3YmU1ZDJjODVmNTUyMWYzNzMyOTE0OTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6403c6fde3d44dfaa31a7a1dc048a723",
+      "statement": "OutboundVisibility (Public or EphemeralTo) is a hint for the adapter. An adapter that cannot honor EphemeralTo delivers publicly rather than dropping the message. Decisions depending on actual privacy must consult supports_private_delivery().",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L480-L498",
+          "version": "repo-lines-v1:sha256:de465775ba883491e70f36886b3a4b6f08676371dec3ed357e3d124b05852e2e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI3OWY4ZTBkOWNiNDhkZDY4ZThkOGEwZWJmMDhhNmZmNTE3NzI4YmY1ZTI5OWRjNDU0OGNkODhkZGVjODA5YzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY5MTk0NGEwMjMxMDg0ODU0NmNjYjZkYjc0Yjg0ZDNiYTRiOGYyYTkwMmM1YmVjNGU0OTZhNmY3ZjcxZmZlNjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM1MTJjM2Y0Y2JkNWM4NDExMzU1ZTAwZmU4NWMzNjg5NmMyZTMyMTlkYmI5OGNiZDNlYTNjZTM3NjdlOTE2ZGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e6c5b0ffab4f47b6a95d4cd931b8a1f3",
+      "statement": "OutboundPart variants are: Text (rendered to protocol), File (materialized before delivery), AuthPrompt (structured challenge), React (add/remove emoji reaction), Retract (delete earlier message).",
+      "evidence": [
+        {
+          "resource": "repo://crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs#L508-L543",
+          "version": "repo-lines-v1:sha256:5b6887b3fd1b0360038a150f1f3bb3072630d0b8c3f8f36e3b656254d87ccec9:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVlN2U5MTRhMzk4YjQ5Y2ZmMzI1MmY1YjQ2NzVjMTY3OGM3MTg5M2FkMjdlNWMyZmRmZTRhM2NjYTRjN2Y4OTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE4ZjM2YmJiOGQyZmUyYzkzNjI1Y2M2MmY2NDZlMGQ1MGIxMmQ2MWE0ZmY5MTI3YjcyMzdhNWI0YzdlNDRhMmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVkMDg0NTUzZWI3NDJiZTBkYzRjYzg0MDhmMzEwMWI0ZTI3MmI5NjgyMWNjMmRiNTQxOWZkY2ZlNDE5NDZmN2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4b17fa258b224dcda9dc10e0e2a77a05",
+      "statement": "The adapter contract explicitly states adapters must not own canonical threads, authorization, approval state, secrets, filesystem access, or mint trusted trigger requests. The host owns these.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/how-to-port-channel-to-reborn.md#L73-L76",
+          "version": "repo-lines-v1:sha256:7742796bfd2439eaa0b4119bd09bb855eeeabaeeaa5b12ce563e8c5a6c98638d:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzAxN2QyZTAwZWJjZGQzOThhNjJmN2E2NDVlYTI5MGE0MmNjNDYxMjU1ZmMxYWM2MzBhZWZlNTg1YzNhYjUzMyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMjRlMDc4OWZlMmU2M2FkNjkxNGM4NmYyM2VmZTVhYzc4NTI1MzM2YTA2Nzc0NDZhNTY0MDNjZDkyZjc5ZGUzZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjc4MzVlYzRmZDE3NDY5MWU3ZDQwMTk0MjI0MGMwOTM1OTRhMzI3Y2Q5OGZiYTg3OTcwYTcyNmJlZDBhYmUxNiJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

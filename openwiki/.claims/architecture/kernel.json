@@ -1,0 +1,424 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:4bfcd50d6882d30c5284da0fef15126339d3c41aa894a276d10260df3370185e",
+  "claims": [
+    {
+      "id": "claim_de7f45df313f4fa7836bc151d1aba59b",
+      "statement": "The kernel is a nine-stage pipeline where each stage is an independently consumed contract with its own fail-closed rule, owned by separate crates: admission (ironclaw_turns), claimed execution (ironclaw_processes), trust ceiling (ironclaw_trust), authorization (ironclaw_authorization), approval (ironclaw_approvals), reservation (ironclaw_resources), policy planning (ironclaw_runtime_policy), membrane (ironclaw_capabilities), and mediated execution (ironclaw_host_runtime).",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L1-L70",
+          "version": "repo-lines-v1:sha256:6c9db0f095b22783f2631f1a6d0f520e6c2ce035e35f4b1d7cbbde22b484ad64:eyJzZWxlY3RlZExpbmVDb3VudCI6NzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlMWZjN2Y1M2RjMTY1ZjI0ZGEzMjRlZTg5ZTk3YTY3MWE0M2M2ZWQzMTE4OTVkOTk1ODFjNGQ4NGU4Nzc4YTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcyODJiNTA3MThjYmQ2MjJmNDk4MDA4MWZhNTExZGUxZGZjNGUxZjE4YjQxMzQxOGYzYTllNGYwZDMzZWI2OTcifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/README.md#L1-L20",
+          "version": "repo-lines-v1:sha256:f673194dc6306c5a6edae489d6d98354d4811884b7a814302cbeb564bcd7bb8c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdkYWExNzUwNjU5Mjc3OWU1N2ViNDE1YjdkNDQ3OTcyYjc1MDg0ZjE1NjBjNzZiZDNlMjFhNzNjOWQ2OGEyOTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI2NWI5ZTgzMGFlYWRmNjExMTQ2ZDRhZTQ1NTA3ODA1YzM4MmY4OTc2YzcxOGI0OWMzOGE5ZjA0MjUxYmE1YmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk0NzQ5MDQzZWI2N2QxY2YwY2EzMmI2YjZiNzQzODhkYzExMjRhMWFkYjEwNmVhYzI3NjhlMmEyMWQ1NThiM2IifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/README.md#L1-L25",
+          "version": "repo-lines-v1:sha256:7f10c929d755a88b3845f7b17971a9350f62e26dc1c3828be5f134f435a9f96a:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxMjI3MDdjNDI0YzQwMWRmYzJkYjRmZTkyMDY3NDE3MmE0MmZiMTYzMTExMDRkYWZiNTgxYzgzMmM0NWY5NGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRjYWFlNjM5MGY1ZDYxOTIxZGFmYWQxNTlhNDZlNGI1M2Q4ZjE4YmYwNjZjNmZjZmM2ZjU4YjhhODQzNGIxZTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ5NzM1MzUxYWIwYzg0YWNiMTJhYzkwMWZkZTAxODJmMjcxMzc0Mzc1OTg2YTg1MTk3ZjgzMGIyMTFmNTFhNmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d4cd8e5d1b9b4ff3811d5b263475dbfd",
+      "statement": "The kernel is the security perimeter that every privileged effect must cross; no operation affecting authority, isolation, durable control-plane state, or sensitive data bypasses kernel-mediated ports. Products, loops, extensions, and first-party code all request effects through the same CapabilityHost membrane.",
+      "evidence": [
+        {
+          "resource": "repo://crates/Architecture.md#L223-L242",
+          "version": "repo-lines-v1:sha256:143d6b2dc327d64677c679b359b21f5446402cf7b84c9fbac88683cf6ee81483:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0YzRhOGIyZjc5NjMwYmE3ZjE2NGExNTc1NzczMjY2ZjlhYzk0YmY1MGZiMzVlMGU5Mjc0YzEzMDU5ZGY0ZDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA4ZjdkODljZjEyMDE2ZTUyNmM4OTkxMTg5N2UyYmQwZDBiN2M1MzA1ZTNlNmI4ODc4OTYyYmRjMjZjMjc1MzkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJlYmQ1OTYzZjY3N2ZjOTA3ODU4ZmFiZDJhZmUxMDA3YmU2Y2Y1Y2YzZTFjNzZiOTRiY2QzNGY1NjYzODAxYWIifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L1-L35",
+          "version": "repo-lines-v1:sha256:b4a3bbd72471e3bd49a24dfec39f12832f1fa635974a01da103492771e7a51b0:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlMWZjN2Y1M2RjMTY1ZjI0ZGEzMjRlZTg5ZTk3YTY3MWE0M2M2ZWQzMTE4OTVkOTk1ODFjNGQ4NGU4Nzc4YTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE3MjY1YTk4N2U4MWM1ZDJmMTU0NWRkY2NhZDVmYjc3YjBmNzE4MzFmNTAyODU0OTFkYzlkMjJjMzBkMTc4YzAifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/kernel-boundary.md#L1-L50",
+          "version": "repo-lines-v1:sha256:496a8bb6ca4605d4fe5d48b921aeb4324e22c0184ae4d063e5e648de35f75412:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwYjliNGE5NzgwOTFjMzZiNzI4NzI5NWMzYTg2NmY1NTAxOTA5ZGQ1YTYwY2NiODEwYTk2NDhmYmQxNTU5YTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY1MmQ3MTExMDNkNTBhNDM3ODMwYzZmYmNkMDRmYjRiYWI0OWEwZjgyZjZkMjZkMWM3OTFjNmU4NDg4ZGQwOTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc1Y2Q5ZTMxNzJmZDViY2FlZDU5YzAwNDhhMjAwZWYyYjUzOTc5MzRiMTJhNGM2NjM4ZjE5ZmQxZjI0ODUyMjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e88b990598ce417b820983f451a142b6",
+      "statement": "Trust class is a ceiling, not a bypass. FirstParty and System trust levels require explicit grants, scoped mounts, leases, resource budget, and obligation handling through the same pipeline every other caller uses. No stage may be skipped for any trust class.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L53-L57",
+          "version": "repo-lines-v1:sha256:5319d1b34e28ad5505576ad6ab252e4fb9a3161f2af412af5cc039c7fd42871f:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzI4MDg1ZWMzNDZjMzYxMzkxYTgyNTdkOGUwYWZlYTA3MzMwOTIyNzJkMGJmYjY2NzM1MGJmNjZmODBkZDc1MiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDQ4ZDIzMjEwNTk5ZTEwZDllNjBiNWRjZDIzZGVhMGFjNGUyMTU5MWM0NTM1NDZhNzA1N2M1Y2M0ZTM1NzFkYSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNzE4ZDIwYzBjNjYxMjYxYTU0MTc5YWYwYmYyYjE4Y2IyNmQ4YTNlYjc5NjZlMGIxYzMxOTI2NTZiNzg1ZGNhYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZGJiMjUyNzU0ZWUxYjBkZjliNWZmMTgyODEyNTk5NjhmZTZjMGVmNGYwZDgzM2MzZjY4MGIwOWZmMDUwYjM0MSJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_trust/README.md#L51-L65",
+          "version": "repo-lines-v1:sha256:d9be5d1d7abd9b4bea25d1a23fd40c449a388636be3b09916c4f2d3c5d9f965d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ2NDUwYjgyNzk2YzBjZmFiOWU2ODI3NjcyYTExZjA2NTBhNjY4OTI4MjViMDJhZmM3NGM4YTViNTRjNDdlNzkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/kernel-boundary.md#L92-L108",
+          "version": "repo-lines-v1:sha256:c31b268f65c1dac3569348287cf45f99cf2f3b97956cbe5e7cdeb9c673ef7e40:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU2NjE3ODJkZmUwMmJiNWM4NzAwNjViY2FhMDI5ZWY0NGI4MjRlMmEzYzE3ZTc0MTllMzNjYTNiZDQyZDc0YTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4NmViNWU0NDNlOWYyNjczNzk0MjRmMjQyMTBiNzliYzdhOGZjMGFmNTE5NTBkOTcxOTRmNDcwOTAwZjEzYTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e2b39a3535a042029b7d99a1d7820138",
+      "statement": "Four sealed artifacts prove kernel stages executed correctly, each with exactly one sanctioned mint: the Authorized witness (minted by ironclaw_capabilities only), EffectiveTrustClass (minted by ironclaw_trust::TrustPolicy::evaluate only), fingerprinted approval lease (minted by ironclaw_approvals into ironclaw_authorization, with decision persisted before lease), and verified-inbound evidence (minted by ironclaw_extension_host inside the conceptual perimeter).",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L59-L70",
+          "version": "repo-lines-v1:sha256:7cfbc789c59c960436a01dfa5880d7b5e19b024b33d98d1dab332d0c755e1ca2:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVjY2JjNjJjYWI0ZDY0NzU0MTU1NzU4NjU5MmVhOGNkMmRhMGZhNWI1OTEwMGM3MTJkNDM3NzU0MzY5YTVmMWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBjZDA3ZjU2MGMwOTAyMzkzNDBiZjNkNjE1NmUwNmQyMDdkMmMwOWM5NDUyMDMxMjBiOTBlMzBhNDJjMzY4OWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcyODJiNTA3MThjYmQ2MjJmNDk4MDA4MWZhNTExZGUxZGZjNGUxZjE4YjQxMzQxOGYzYTllNGYwZDMzZWI2OTcifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_approvals/README.md#L23-L38",
+          "version": "repo-lines-v1:sha256:7146073b0f3988b3a1c8a7dd7bf920d645abdf2b977990c54130c8faa73744f1:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJlZGY0MzBjOGNjYzExMDc4YTJiYzk5NjMyMWEzMzQ4OTJkOTUzNDVjNTA0NzE4Y2Y1NDkxMjRjNjFiNGE2ODUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY2NTFiOWZmNmNmMzg2YjliOWZhYjM5ZTI0NjJiZWM3MjIzYmE4MzU0YzI4MzUxMWZkMzhjMWNjMzUzYWZlOGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ5OWNkMmZlM2FiYTVjNDk1ODE0MDc4ZmQwNDVkMjQyNGU1NzQ0OGVmZDNiMjliODhhMTliMDY0ZjMwZTUyMjAifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/README.md#L22-L41",
+          "version": "repo-lines-v1:sha256:45d019c306e5dd2f110b2f77380d77d1209c3da881505d205f89537e45f8f2a2:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYxOWY5MTlmOTc5NzVjNjY1ZDUzNDE3YmIxZjJmNGEwZDYwNjZlYzEwMjEzODgzZjk2MTFhNmY4ZWY2OWE0MDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcwYjRlODkzZWUxZWVjZDc1NTAzYzc0ODFiODFmN2VhMWE1ZTlhNDhhZGUzMTEyNGFlNGQxYzMwY2QyMTg3NTAifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_trust/README.md#L21-L40",
+          "version": "repo-lines-v1:sha256:756691eeb0f3cff1d77bb303906a87a3da37e9da7a7171ce75487c6566ce4785:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJkOTNlOGYyZjE5NzYzYjZjODhhNTZkNjc0YjBkY2M4YmNkMGE2NjU1OTRmYWVjZDQwZjM0NGQ4N2YyY2VjMTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIxMTliZGZkN2QyNTMzMjhmMDJhODhjZDY3YmE0NjAyMjAzOTNkM2FjN2NkZTQ4ZGYyMzU3YWJlMjM0OTVhOGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ5OWNkMmZlM2FiYTVjNDk1ODE0MDc4ZmQwNDVkMjQyNGU1NzQ0OGVmZDNiMjliODhhMTliMDY0ZjMwZTUyMjAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_dd0147d50019408981b243e122d6b1a1",
+      "statement": "Authorization applies default-deny: no matching grant means deny; trust ceiling is required, grants are required, exact/encompassing matches are required. Fingerprinted leases are resume-only authority and never become ambient grants.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L114-L125",
+          "version": "repo-lines-v1:sha256:703a5ba3a087e3eaf873ab4515de6dfd8913ab31791e6c7907c359c18c83436a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFlZDUwMTAxZGE4NDViZDQwMDFjMWVkM2FkZjM5OGQ4ODY4ZWVlMmM2NTg2ODY5NWQ1MmRjM2VhOGViZmU1ZGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYyZGJhY2Q5ZjJiZDI2MTM4Y2M0YzkzMjBkZGZlNzdlZDJlNTkxMGJlYzBjNThjMDEyYzBiMGNjZDFkNjFhZTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM3MDMyZGViZTE0YTViZmU0NTczMjcyZjE1NTVlZjY1MzQ5OWI3NGE3NGY0ZmI3MTg2ZDcyNzFjYzNiMWZmODMifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_authorization/README.md#L48-L62",
+          "version": "repo-lines-v1:sha256:92bbdd13e91741fd570258e934aa00c8fc39bab6a1ac89390c0c4f1745f7ccd4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg1ZmQ2ODMzNDFhZTVhMWM0MTAyMjFjODQwYjIzZTUwYjdmNjlhZmU2YjNlZWU5YzU5MGYyNGI3Nzk1YjNlZDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_23c77341f9604abbb1b8ef94020d6962",
+      "statement": "Approval stage enforces fail-closed ordering: the approval authority record is persisted before the lease is issued. If the lease store fails after approval is persisted, the request stays Approved and the caller surfaces the lease error; re-issuance is recoverable.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L120-L120",
+          "version": "repo-lines-v1:sha256:9577c26679d8f86fa9e2101b57f16daa54badaeae7c679eaeaf432f94e3065f6:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTU3N2MyNjY3OWQ4Zjg2ZmE5ZTIxMDFiNTdmMTZkYWE1NGJhZGFlYWU3YzY3OWVhZWFmNDMyZjk0ZTMwNjVmNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTU3N2MyNjY3OWQ4Zjg2ZmE5ZTIxMDFiNTdmMTZkYWE1NGJhZGFlYWU3YzY3OWVhZWFmNDMyZjk0ZTMwNjVmNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYWVkZTNiZGExYjBjNzNjZjFiZmFkM2ZmMTkzNWNhM2E5YTAzNmFhMTg0YWY1MThiZmQzZGM4YWQ4Mzc0NTBlMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTAxZWRiNDI3NDc5Yjk3ZGE4YjUxNTU0OWJiZjQyMTM3MWEzMGQ2YWE1NDBlMzc3MjBlMjQ5NzRjOTA3NGQ4NCJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_approvals/README.md#L52-L62",
+          "version": "repo-lines-v1:sha256:31ea5113f10235c399488ec59ffcabd6c2589093c6a607920dbbeef3f3bc1e87:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1NGFmOWIyYjM1NDhlYTQzZWM4NGUxZGEzMDUwYzI3MzUwZTNhZDNjMWY1YmUzZDE4MGJlYjJlOGI0ZjhlYTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU3OGY1MjlmODMyZTQ0ZGIxNzE0MDM0YTQ2OWI0YjgyZGMwZGVhOGE1NWE5MTE2ZGFkNmQwZWExYjRiYWMwM2UiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU1NGUzZGY1NDMzNDRhNTYxZTJiZjBmM2QxNDY2Zjc0NDVmNjQyODEzNGU4MjZhNTc2ODVkN2Q4ODlkY2JmY2QifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f283ef3b170a4e3a8347e445c9ce8508",
+      "statement": "Trust policy evaluation produces EffectiveTrustClass, which is a ceiling that grants nothing by itself. Authorization must consume both an EffectiveTrustClass and an explicit grant. Trust downgrade/revocation publishes on InvalidationBus synchronously before the lower decision returns.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_trust/README.md#L21-L65",
+          "version": "repo-lines-v1:sha256:7582d48b4065f2e30af29579f6e10bde9cd0b6dc0e02b2f0643dd8ccef098dc0:eyJzZWxlY3RlZExpbmVDb3VudCI6NDUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIxMTliZGZkN2QyNTMzMjhmMDJhODhjZDY3YmE0NjAyMjAzOTNkM2FjN2NkZTQ4ZGYyMzU3YWJlMjM0OTVhOGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/kernel-boundary.md#L92-L108",
+          "version": "repo-lines-v1:sha256:c31b268f65c1dac3569348287cf45f99cf2f3b97956cbe5e7cdeb9c673ef7e40:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU2NjE3ODJkZmUwMmJiNWM4NzAwNjViY2FhMDI5ZWY0NGI4MjRlMmEzYzE3ZTc0MTllMzNjYTNiZDQyZDc0YTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4NmViNWU0NDNlOWYyNjczNzk0MjRmMjQyMTBiNzliYzdhOGZjMGFmNTE5NTBkOTcxOTRmNDcwOTAwZjEzYTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_79cd09fa883446d9823abbc8c9bc78fd",
+      "statement": "ProcessJournalStore is the single durable lifecycle authority for every piece of host-tracked work (agent turns, capability invocations, background work). Turn/run state (TurnRunState) is a typed projection over the journal, not a second durable store. Terminal status is written once and never overwritten.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L114-L117",
+          "version": "repo-lines-v1:sha256:991e301974e3a2025dc9ecd782c1192e2d3aca4597e7c24586ff968eff1d49c1:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYWVkNTAxMDFkYTg0NWJkNDAwMWMxZWQzYWRmMzk4ZDg4NjhlZWUyYzY1ODY4Njk1ZDUyZGMzZWE4ZWJmZTVkYiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDAwMjU4MzVhYjg2ZWJhMWEzNmNlMmI4ZDY0ZmM5OTE2ZDI3NTAxMDYyZTZlYjFiYTUxYjhiNTYwZDUwZmNlYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjJkYmFjZDlmMmJkMjYxMzhjYzRjOTMyMGRkZmU3N2VkMmU1OTEwYmVjMGM1OGMwMTJjMGIwY2NkMWQ2MWFlNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMzg2ZGJkYTUxZWRiZDlhNDMxN2U2OWQzMzM5ZDc4ODgzZmJkYzlkYjA2MzJlMGIxYjY1Y2VhNjI3OWJkZjIxMSJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_processes/README.md#L1-L20",
+          "version": "repo-lines-v1:sha256:572a0ee8a0410486d79cd1b31483c89d91f665babe5c1a176e047ccaaa6a06c4:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZjN2E3ODdiZWYzODY4NjMwODZhMDUyNTY2ODU5Y2JkOWVlZjQ5MzUxYzY2MGVkMWIwZDAwYjA5NDNhM2RkZGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhNjlmNDY3MjJhNmU3NTBiNzc0ODlhMmM0OTNmNjEwMWExODI2NmI0ZjE4NmQ3ZTk2NTkzMjI5YjNiYzczMDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFkNjQxMzdiZWUzZTI1MjlkOTJmMDNiMGQxNmI3OTJmZGE4NGM3YWMyYjQwNjM4N2YzMzgzYTQ2MjgwNTdkMmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0ab9d11dc6a745a29d75105e79834750",
+      "statement": "TurnCoordinator enforces one active run per scoped thread (tenant_id, agent_id, project_id?, thread_id) via an active-thread lock. Blocked/resumable runs keep the lock until resume, cancel, fail, or complete. One-active-run blocks concurrent work before any model/tool side effects.",
+      "evidence": [
+        {
+          "resource": "repo://crates/Architecture.md#L605-L620",
+          "version": "repo-lines-v1:sha256:84718bbe5a63b6091a387e905f5ff87991b18105d8daafead7239a277b6f3531:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNmZGM5OGQ0ZTY1YjQyN2I1MWFjNjkwNDMxNDk5OGJhMDUxNjNhMGU3OGNmMTk5NzIzNGE3ZTVjMGYwMmJhYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUwMzgwM2MzYmIwNTQxMWNkMTlkN2RkODFlZWYzN2IzODEzYWZlYmY1YTMxOWEzYjRjY2M5YjhkYjkxZjJmNzAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI1N2NhNmEzMmU4NjViYTJlZmNiZTA0NWI1ODI2NDdjN2Y0Yzk0Nzk1ZjJmNWY1ODg1MTBjYmY3ZTA0YTRmZWIifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/README.md#L65-L83",
+          "version": "repo-lines-v1:sha256:1cf6f698ec29a1a88ca93fd362a952273e2b78d891b17166288466d33cf60b5d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYzZjA5ZGJlZTJkMGZkN2M4MWM3YWRjNDQ0MjQ1ODRjZTQ4ODk1OTM1MGMxZTNkMThkZjVlNjQwMmM4MzM1YmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_86cec2b9000a451b950dc24ddef7b933",
+      "statement": "CapabilityHost is the sole caller-facing membrane for privileged effects. Six workflows (invoke, resume-after-auth, resume-after-approval, spawn-resume, spawn, resume) all route through the same authorize() fold that evaluates trust → authorization → approval → reservation → policy planning, then mints the sealed Authorized witness only if all stages succeed.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L36-L51",
+          "version": "repo-lines-v1:sha256:a5c23aa7ce98346850b9691793da8693a7af18c14b47b1aa57d91b6dd1439b73:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE2MmY0NWEzZDNlZTMxYzRjMDgwNTJkZjE1M2FhMGE0MzZiNWZlYmUyYzRhOWUyZjQwOTc3NmI2NzhkYjM0OGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI0OTcyMTQ3NDc2MWRlOGI2N2I3ODU1YzA4Yjk5YjQwMTgxODRkOGI2YWI4NTFiNDljODg5YWIyOThkMDQ1MjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI4ZTE1NTg4ZmQzNjE4Y2I0OTUyMzQ1N2M5MGNlMTMxNTI1OTIwOGE3ODQ3MWE1NDVlYjVjNWE3MjY1MmQwZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjZmMyMjExNzA1N2Q2NWY2MDVlNGYwMWVmMWQyOTQ4NTk4ZDRjMmIwMWZkYWMyYmRjMDJkMzk1OTViZmNiYzcifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/README.md#L1-L40",
+          "version": "repo-lines-v1:sha256:c3a26a1cc0e0f7639fcf6316aae9383e4c75fbb6291e6279f32645f986dd012c:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdkYWExNzUwNjU5Mjc3OWU1N2ViNDE1YjdkNDQ3OTcyYjc1MDg0ZjE1NjBjNzZiZDNlMjFhNzNjOWQ2OGEyOTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhiNzA0MTU2NDE3ODNlYjhmODdhNzk1MTEyMmI5OGRkY2E1NmRmZmNhNDQyYzMxN2Y3YmU5ZGE3MzAyZTg2MWQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ5OWNkMmZlM2FiYTVjNDk1ODE0MDc4ZmQwNDVkMjQyNGU1NzQ0OGVmZDNiMjliODhhMTliMDY0ZjMwZTUyMjAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0fa4d59f2409476ba35971338c2b91ab",
+      "statement": "The authorization fold evaluates: trust ceiling from TrustPolicy::evaluate, grant matching under the ceiling, exact/encompassing match requirement, and approval gate enforcement. Denial or obligation failure stops the pipeline before Authorized witness minting and mediated execution.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L42-L51",
+          "version": "repo-lines-v1:sha256:0e0b842a4461f19b143faf28ea6a227b0486bac860d3cbacd3f7552839894464:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVjYjA2ODJiYzVlZWM2YWY3ZDEzMzBjOGQyYjlmZDNhNGE1MGE1ODkxYmM1YWNkYzMxZjhkYTA2ZTIzMDhkZWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI0OTcyMTQ3NDc2MWRlOGI2N2I3ODU1YzA4Yjk5YjQwMTgxODRkOGI2YWI4NTFiNDljODg5YWIyOThkMDQ1MjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNjNjgwOTY1MWI4N2YwNGFlMDk0OTViOTIyZWQwNjNjMjQ3NGZkMDE5YjEyYTQwMTdjMjRiODM3YzA4MzkwMjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjZmMyMjExNzA1N2Q2NWY2MDVlNGYwMWVmMWQyOTQ4NTk4ZDRjMmIwMWZkYWMyYmRjMDJkMzk1OTViZmNiYzcifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_authorization/README.md#L21-L35",
+          "version": "repo-lines-v1:sha256:ac877a81e5a6351f28c1c8a2396c65f640fc1223000a22ff478b00f718e66c71:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM2YWUzNjI2ZmRlOGViZWZiZTk4ZTE3NGVlY2E5ODk0MTdiZGI1NDQ4NzEwNWM4YjYyYWQxZjkyZDkzMzY4MzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBiMzAwNTQ5M2IxMjVmMzBhNzAyZTc0NzFlYzBkNWYxMTI0NWM2MWJkMWJiYjg2ZDIyNTkxOWM5ZDFhNTAxNjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f94f0d3dd0e14a22a235fe4a0f17745e",
+      "statement": "Resource reservation enforces a reserve → execute → reconcile-or-release protocol: capacity is reserved before work starts, estimated cost is acquired, failure aborts the request. Reconciliation updates the tally with actual cost after work completes. Reservation failure, including storage failure, is a denial never proceeded with.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L121-L121",
+          "version": "repo-lines-v1:sha256:ff0ff5c47accd41716ff9905bbbbedf5ae876aa29b4de584a317bf73ba2d67c6:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZmYwZmY1YzQ3YWNjZDQxNzE2ZmY5OTA1YmJiYmVkZjVhZTg3NmFhMjliNGRlNTg0YTMxN2JmNzNiYTJkNjdjNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmYwZmY1YzQ3YWNjZDQxNzE2ZmY5OTA1YmJiYmVkZjVhZTg3NmFhMjliNGRlNTg0YTMxN2JmNzNiYTJkNjdjNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzg2ZGJkYTUxZWRiZDlhNDMxN2U2OWQzMzM5ZDc4ODgzZmJkYzlkYjA2MzJlMGIxYjY1Y2VhNjI3OWJkZjIxMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDhhNjA1ZDI5YjVmYTI1ZWExNjlmNjM5MDg1MTUxNWQyNjc2YWQ3MzM2MWFiMzNmYTk4N2I5OGFiOGFlMzk0ZiJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_resources/README.md#L1-L20",
+          "version": "repo-lines-v1:sha256:17a3702e93306198a525fef4b9ef5f098f48d3da8506a36c6a4a2c78d0bcd74f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJlNjdlZTUyZTljZDliY2I2NWZjNmRjMWMxNjI3ZjFjNDU0MTI0ZDg1Zjg1NTVmYmJlNWUyMjQ2NGQwMmM3NjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYxMzQ4YzI2ZWNjYmQzY2Y0Y2E2NzI3OWQwODRhMmQ2MzZjMmYzMDU5MGRmOTYzMWViYzlmM2Q4NDcxYmNlOTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_cc056d5ded724f3cb30327cc788942e0",
+      "statement": "Policy planning is pure and deterministic: (DeploymentMode, RuntimeProfile, OrgPolicyConstraints) resolve to EffectiveRuntimePolicy and per-capability ExecutionPlan. Invalid (deployment, profile) pairs produce ResolveError not silent downgrade. Process effects against ProcessBackendKind::None produce PlannerError. Relaxed (*Yolo*) profiles require explicit disclosure acknowledgment.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L122-L122",
+          "version": "repo-lines-v1:sha256:22b5cefabfc3648d8c75f9046f1bc151d72b36faa5a354d6f8be0bc9e48b8c65:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjJiNWNlZmFiZmMzNjQ4ZDhjNzVmOTA0NmYxYmMxNTFkNzJiMzZmYWE1YTM1NGQ2ZjhiZTBiYzllNDhiOGM2NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjJiNWNlZmFiZmMzNjQ4ZDhjNzVmOTA0NmYxYmMxNTFkNzJiMzZmYWE1YTM1NGQ2ZjhiZTBiYzllNDhiOGM2NSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzE1YWI4OWY2NGRmMDE1OTE2MDI0OWFhOTMzNmJhYTI1ZDliYmVjOTY1OWFjY2M4MjNiMDRlMjc1YTM0MDgxYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNWQ2OGExOGE1NWQ2ZjVkOTE5ZTlhNTJkNjc5ZmM4ZTk1MjYwYjdkMWE2MmQzYjczNzBmZmZkNjZkYjFiZmUyNyJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_runtime_policy/README.md#L1-L30",
+          "version": "repo-lines-v1:sha256:20e6299811a8349d56f8fc8f9873a28549b5d7b6b4c01c40f155fcfc2e887d47:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkOTdjZGFiODRiZDc1NDRlYmM2MjlhYjNhYWQ5MmUxNGUzZTUyYzQxMTc4MmZlM2YwNTVhMjlhMGU0NWIwMjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3YjdlYWI0OTlhM2NlOGYwZjljYWNmZjI1NmM3Y2NkNTM2M2JlM2FlYzI0NjFjZWI0OTYzOWMxZWUxYmEzMmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU2MTI2MTc3ODYzOWIwZmM2ZDIxOGI3MmZlOGU3OGRkY2VkNjc3MzU2NGE4MDQ3YTkwYmU4NWZlM2IyMjUxYzUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_65ba5bd73b514a59aa358a838e234717",
+      "statement": "HostRuntime completes obligations the membrane prepared: audit before/after, network-policy staging, one-shot secret staging, mount restriction, resource ceilings, output redaction and limits. It invokes only the lane the sealed witness names through RuntimeDispatcher, then sanitizes raw lane output into redacted evidence.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L51-L52",
+          "version": "repo-lines-v1:sha256:eb9f6b85c1878b21c6ddc2ebf0ab29b79155f65333b51f9c92b98f213c9babf1:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjQ5NzIxNDc0NzYxZGU4YjY3Yjc4NTVjMDhiOTliNDAxODE4NGQ4YjZhYjg1MWI0OWM4ODlhYjI5OGQwNDUyMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTgwNjU3ZWQ1ZDM5ZGI1YWE5MDFjYTRkZWFiM2IwZDA3YzFjNjM3ZGM5YzY0MThhZTdlZGQwZmJlNzA1Y2Q2MiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDUwYTE3NmU2YTY3ZTU3MGFjN2Y0NzYxNjk3ZWI3NmYwZGZjYzVmZWYwNzA2MDk2NjY1OWRjODkwYWI3Y2UyYSJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_host_runtime/README.md#L1-L25",
+          "version": "repo-lines-v1:sha256:0e01ffd67a85cab210dd7a8d93e5cd0bf4bd974fda9b5b8bb4a710cf78e81b45:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3MTQyYTM3YTlhMzZjNmY3ZmU1MTQ0MTA5MmY3MTI3YmZkNTRjY2YyYzZlOGMxYWU4ZGY0OTljNWYyMzBmNjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4ODMzODg4YWU2ZjZkN2RlNmJiMjMyNDJmYzE0YjcyNGEwNjMxYzViOWJmNzJiMDI2MDQzYTg3NmRlYzhhYTMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c3d021e0451441a1ae023e0aa79668a3",
+      "statement": "Credentials attach to outbound requests only over HTTPS or a literal loopback host (no DNS resolution). The egress filter (ironclaw_host_runtime) and ingress validators (ironclaw_trace_commons) share the same is_loopback_host predicate, verified by test pairs: host_http_egress_refuses_to_attach_a_credential_over_plaintext_http and host_http_egress_attaches_a_credential_over_literal_loopback_http.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L124-L124",
+          "version": "repo-lines-v1:sha256:d711c3fe10c5bdca68b676c1ddbb3e7a25b15fde737aa175a3ebea4803e7de92:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDcxMWMzZmUxMGM1YmRjYTY4YjY3NmMxZGRiYjNlN2EyNWIxNWZkZTczN2FhMTc1YTNlYmVhNDgwM2U3ZGU5MiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDcxMWMzZmUxMGM1YmRjYTY4YjY3NmMxZGRiYjNlN2EyNWIxNWZkZTczN2FhMTc1YTNlYmVhNDgwM2U3ZGU5MiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYTAxZWRiNDI3NDc5Yjk3ZGE4YjUxNTU0OWJiZjQyMTM3MWEzMGQ2YWE1NDBlMzc3MjBlMjQ5NzRjOTA3NGQ4NCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzYyYmRkOGZhN2RkNDI3ODkzMDhjYWVlZjU3NDZjYjg1OWU2ZDkxYWQ5YWE1ZTFiZWFjYWU5OWY4YWQ3NjFmMCJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_host_runtime/README.md#L76-L94",
+          "version": "repo-lines-v1:sha256:746431c35fe31cd3dd85101727239b84d2793c0f8a302ef88c039bcccfde7497:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjMTJkYjMzM2EyNTdkYmE1NDRkODVmMGVhODkwYjhhM2Q0OGI5NDQ2ODAyZmM2NDc1NjhlNzI1OTU5YTYyNzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNhZDFmMmYwZjkzZDg0ZjBiYjRkNzhjZWU4ZjZjMmUwMGYxNDk0Yzg0ZDg4NTFiMDExMDcxOGY1Y2Y1OWI5MmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE1NzA5MGQ4NDZhNTg4ZTQyOWFkYjQ5YWQ5Y2UxYjJkZGJhOTllOWUxNTcwODYyNDk0ODM4ODc1MWM4MDMyM2UifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_43264dded95144ebb97c2b1c89110ef2",
+      "statement": "If deployment does not include a verified tenant sandbox, the process/shell capability is hidden by the visibility filter (surface.rs) and refused by the policy planner with ProcessBackendKind::None error, never silently downgraded to a host process.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L124-L124",
+          "version": "repo-lines-v1:sha256:d711c3fe10c5bdca68b676c1ddbb3e7a25b15fde737aa175a3ebea4803e7de92:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDcxMWMzZmUxMGM1YmRjYTY4YjY3NmMxZGRiYjNlN2EyNWIxNWZkZTczN2FhMTc1YTNlYmVhNDgwM2U3ZGU5MiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDcxMWMzZmUxMGM1YmRjYTY4YjY3NmMxZGRiYjNlN2EyNWIxNWZkZTczN2FhMTc1YTNlYmVhNDgwM2U3ZGU5MiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYTAxZWRiNDI3NDc5Yjk3ZGE4YjUxNTU0OWJiZjQyMTM3MWEzMGQ2YWE1NDBlMzc3MjBlMjQ5NzRjOTA3NGQ4NCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzYyYmRkOGZhN2RkNDI3ODkzMDhjYWVlZjU3NDZjYjg1OWU2ZDkxYWQ5YWE1ZTFiZWFjYWU5OWY4YWQ3NjFmMCJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_host_runtime/README.md#L106-L111",
+          "version": "repo-lines-v1:sha256:105ac978a234f066cf03fae3b3f2de2b448c0ea0a1a03553cb4846d79d4170de:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMTMzNGNkYTM0MzkzYTVkMGJkMmRiZjZmNGJlYmIwNjU2ODUwOGE5NjM3MDQ2Yzc1MjY5Y2M4Y2IzNGZmN2RhNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZjc1YjIwODFhMTNjN2UzMzhhOGMwZTVjMzE4NzVlZWY5YjRiMmYwYzYzNGZhYzEzMjFmYjlhZmJkMDEyMzg1NSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODA4M2U1NDRiZjliZDNiMDA5YWFjOWRjNWVmZDI1MDczZTMwN2U5YWVlNTI5MDU5MjljODVlMWY3ZDYxNzNiOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTkwMGRiNGU2MzVmNDM5NjgxNTllYjBhZmQwNDU0Y2U3OTYzMWMxM2ExZGUxNTRmYmQwNmZlMjEyN2Q1NWFiZCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_ce294f34dc5a481199cf146cc6760385",
+      "statement": "Staged secret leases are valid for exactly one invocation. After invocation completes, the lease is consumed and destroyed. StagedCredentialProcessPort validates each placement target and consumes all requested handles atomically. Manifest declares placeholder environment variables on exact header-target requirements; authorization selects and stages matching requirements.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L124-L124",
+          "version": "repo-lines-v1:sha256:d711c3fe10c5bdca68b676c1ddbb3e7a25b15fde737aa175a3ebea4803e7de92:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDcxMWMzZmUxMGM1YmRjYTY4YjY3NmMxZGRiYjNlN2EyNWIxNWZkZTczN2FhMTc1YTNlYmVhNDgwM2U3ZGU5MiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDcxMWMzZmUxMGM1YmRjYTY4YjY3NmMxZGRiYjNlN2EyNWIxNWZkZTczN2FhMTc1YTNlYmVhNDgwM2U3ZGU5MiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYTAxZWRiNDI3NDc5Yjk3ZGE4YjUxNTU0OWJiZjQyMTM3MWEzMGQ2YWE1NDBlMzc3MjBlMjQ5NzRjOTA3NGQ4NCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzYyYmRkOGZhN2RkNDI3ODkzMDhjYWVlZjU3NDZjYjg1OWU2ZDkxYWQ5YWE1ZTFiZWFjYWU5OWY4YWQ3NjFmMCJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_host_runtime/README.md#L94-L105",
+          "version": "repo-lines-v1:sha256:16cb09f25a7301e36f82933c686371ef818bee79bce56c67f92815460b47b5cb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjMTJkYjMzM2EyNTdkYmE1NDRkODVmMGVhODkwYjhhM2Q0OGI5NDQ2ODAyZmM2NDc1NjhlNzI1OTU5YTYyNzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhOTljMDM0MTdiYWMyNjJlYTVhMzdlNDQ0ZmE1ODZjZTgwZTNmOTIyYzI0MjEwMjdhY2EwNWFiODE3NGJmYjgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVlNjUxYTFjYTZkZDBkMjk4Y2YzMmYwYTMyZjgxMDc3NDFlYWU4YThhZWRmZDEwYjRiODczOTM4YTY3ZTEzOWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc0MWEzZjZlOGQzYjU1MmJlOTM0MDU0NmM5ZjNkODE2MDVjZjBlNjExYThlN2I4NDUzN2I5NmQzMmU4MGNhNmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_13c5bc0d6cae48e193d2f0c0376513e5",
+      "statement": "A LoopExit is a driver claim, not trusted durable state. LoopExitApplier validates host-owned evidence before applying the exit: all referenced evidence (reply refs, checkpoint refs, gate refs, result refs) must be present and match host-minted facts. Invalid refs map to sanitized terminal failure (driver_protocol_violation or interrupted_unexpectedly).",
+      "evidence": [
+        {
+          "resource": "repo://crates/Architecture.md#L679-L692",
+          "version": "repo-lines-v1:sha256:8b812211f888dfb699f4a0c5079bfe62a36b760ec1e30a0dfd9e8c26ab8d12db:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlhMzZjNWY5MDgyOGJmMzc5NDE4NDQ3N2U5NmQzOGIzYWEzNGY1YjY5NzVhMDA2ZGQ0MTM0MTFlOWM0ZWVmZGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY1NGE3ZDI2MjE4YWY2ZGM0NDJlOGNlNjM0MmRmMzYyMzliODY3ZjUxODE3YTY5NzVjZDhjM2QwOWNkNjIwNmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE2YzA3YjIyODIyN2QwODExMjQ3OWY1NDFmMDljNjQxNDI5MWZiMDY3YTlhOGJkNTBhNTEzZGQ4MjBiOTQ2NWMifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/README.md#L65-L83",
+          "version": "repo-lines-v1:sha256:1cf6f698ec29a1a88ca93fd362a952273e2b78d891b17166288466d33cf60b5d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYzZjA5ZGJlZTJkMGZkN2M4MWM3YWRjNDQ0MjQ1ODRjZTQ4ODk1OTM1MGMxZTNkMThkZjVlNjQwMmM4MzM1YmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b798d76e357e460cba688017bda80668",
+      "statement": "Approval gate records are durable and model-visible. Models may request re-approval for a changed invocation. The approval gate matrix (origin_gate_matrix) specifies which capabilities are gated by default and freezes which capabilities may skip the approval stage.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L120-L120",
+          "version": "repo-lines-v1:sha256:9577c26679d8f86fa9e2101b57f16daa54badaeae7c679eaeaf432f94e3065f6:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTU3N2MyNjY3OWQ4Zjg2ZmE5ZTIxMDFiNTdmMTZkYWE1NGJhZGFlYWU3YzY3OWVhZWFmNDMyZjk0ZTMwNjVmNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTU3N2MyNjY3OWQ4Zjg2ZmE5ZTIxMDFiNTdmMTZkYWE1NGJhZGFlYWU3YzY3OWVhZWFmNDMyZjk0ZTMwNjVmNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYWVkZTNiZGExYjBjNzNjZjFiZmFkM2ZmMTkzNWNhM2E5YTAzNmFhMTg0YWY1MThiZmQzZGM4YWQ4Mzc0NTBlMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTAxZWRiNDI3NDc5Yjk3ZGE4YjUxNTU0OWJiZjQyMTM3MWEzMGQ2YWE1NDBlMzc3MjBlMjQ5NzRjOTA3NGQ4NCJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_approvals/README.md#L1-L22",
+          "version": "repo-lines-v1:sha256:ede01f7c2e8178d60d04e54f1ebad5479255bd86f00877da63b148ac86e6d0ce:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY4MDI1ZTk1NmMyMTllM2NiYWM1N2JiNjI3OTk1ODU0YzY4ZDJhMTk5OGNlZDAxMDU5MWFkYmRkYmMyZThjZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVmNGJlN2UyY2ExZmVkNGQxYmVjYWQzMTZiMTBkYWM5NjE5MGJiMjE5YmYyMjhhZWRhZjAxMWI4YTM1MWY2NmMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4b45b7e00e144cd59ae027940cf0f21a",
+      "statement": "ironclaw_trust is a leaf crate depending on ironclaw_host_api only. It has no BoundaryRule forbidding kernel siblings because the layer matrix and measured single-dependency manifest enforce its isolation. Adding a second workspace dependency is an architecture change, not a convenience.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L131-L144",
+          "version": "repo-lines-v1:sha256:da5f805df22e94a679e00c5f61116c63f860109faf7851526f93045d560bdc59:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhNzhiMzRlY2YzOGVkYWJiMTViOTM2NTk2MzE0M2ZkN2E0NzEwMjBmNGY1YWIyN2ViNmU3NTU1YTQ4Nzc4MjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYxYzIzMDJlYWZjMzQwOGRkMTAwMmJkYzM0YzQxYTBkZjA1N2M4NWE4MzA4NzNjNWYxNDdhOTQ1ZGRlZTExNWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk4NzM4MjcxOTdjZjU0MTQ3MWQwYmNiNmQ2ZTE0MmE0ZjdiMTI4ZjcyZDVjMjEzMzczNTc3ZTMzNTdiY2M4N2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBiNDk0MGEwYzFhNGZmOTRhNzllZDQ0MWI4ZjMxZGY3ZjEzYjZlODRjYTVlMTQxZGI1NGQ0MTI5ZmMwZDA1MmEifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_trust/README.md#L42-L65",
+          "version": "repo-lines-v1:sha256:d1749741805cbec4f880ddd1a9f13ea2525298741b6f4efc45bd31ce2f4bc994:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ1OTdiZmQ5YWNhZWMzZDg1MDI0MDEwMTI0OTc1OWMwNmUxNWMxNGZjY2VkNWJkZGViNzViNjQ5Njc0OTBlOTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA5ZDI1ZGUxOTlkZjA4ZmY3ZTExZjJhNjAyMzU5YmRjOTA1Mjg4MWUzNjMwOTI2NmRkNmRhNzU2ZDEyMjQ2NmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c625ea2a0c4444858513fb919126b609",
+      "statement": "ironclaw_runtime_policy is the kernel's only dependency-free stage, depending on ironclaw_host_api only (zero I/O, policy math). It has no BoundaryRule of its own; its leaf-ness is held by the layer matrix plus measured single-dependency manifest.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L131-L144",
+          "version": "repo-lines-v1:sha256:da5f805df22e94a679e00c5f61116c63f860109faf7851526f93045d560bdc59:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhNzhiMzRlY2YzOGVkYWJiMTViOTM2NTk2MzE0M2ZkN2E0NzEwMjBmNGY1YWIyN2ViNmU3NTU1YTQ4Nzc4MjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYxYzIzMDJlYWZjMzQwOGRkMTAwMmJkYzM0YzQxYTBkZjA1N2M4NWE4MzA4NzNjNWYxNDdhOTQ1ZGRlZTExNWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk4NzM4MjcxOTdjZjU0MTQ3MWQwYmNiNmQ2ZTE0MmE0ZjdiMTI4ZjcyZDVjMjEzMzczNTc3ZTMzNTdiY2M4N2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBiNDk0MGEwYzFhNGZmOTRhNzllZDQ0MWI4ZjMxZGY3ZjEzYjZlODRjYTVlMTQxZGI1NGQ0MTI5ZmMwZDA1MmEifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_runtime_policy/README.md#L1-L30",
+          "version": "repo-lines-v1:sha256:20e6299811a8349d56f8fc8f9873a28549b5d7b6b4c01c40f155fcfc2e887d47:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkOTdjZGFiODRiZDc1NDRlYmM2MjlhYjNhYWQ5MmUxNGUzZTUyYzQxMTc4MmZlM2YwNTVhMjlhMGU0NWIwMjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3YjdlYWI0OTlhM2NlOGYwZjljYWNmZjI1NmM3Y2NkNTM2M2JlM2FlYzI0NjFjZWI0OTYzOWMxZWUxYmEzMmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU2MTI2MTc3ODYzOWIwZmM2ZDIxOGI3MmZlOGU3OGRkY2VkNjc3MzU2NGE4MDQ3YTkwYmU4NWZlM2IyMjUxYzUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_37f1767052a749c2baa684ccc6ec2a01",
+      "statement": "No kernel crate depends on loops, products, or app. Higher layers reach back down only through ports the kernel defines (e.g., ProcessExecutor registration by ironclaw_turn_runner, CapabilityObligationHandler implementation by ironclaw_host_runtime). The port is defined low, implemented high, never the reverse.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L80-L85",
+          "version": "repo-lines-v1:sha256:91a585e636db04695bebd9b0f312a255119fe0f852c3583cc7f82249a9075bd7:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMTE2YWMyMGRlMjAyNzUyYjlmMWY4NmU4MGQ4YTNhMTRiMmU3YjljMjAxMDBmMTVjZGNkNTY3ODE4NTRmOGMxMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjMwYmE0NmNmYWRiOGYxODA2ZTNiOWFjYTVjZWQxYjk0NDY1MmUyZjNlOGRmYmZmMTJjNGI4YzkwMGU3ZGE4MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiN2RiNjZiMTc1ZjE1OTUyNTI2ZGEzY2IxOTY4MWExM2Y2NmY4ZTFjODk3ZDFlZDVjZDJjODdiZGVlM2U0YzZkZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDI4OTA2OGU4NmY4NWFlODVlYzM5MWVkMDljYmYzNzgxYTY4MGY2YmY4NjA0Y2EwZmJmNTU3OWFmZDZiNGQzYiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_94090f55b5454c2180099dfc1ae9c198",
+      "statement": "Four sealed artifacts prevent fabrication above the perimeter: Authorized witness (grant-gated construction + capability_authorizer_is_implemented_only_by_the_kernel ratchet), EffectiveTrustClass (crate-scoped visibility + serde skip_deserializing), fingerprinted approval lease (decision persisted before lease + boundary rules), verified-inbound evidence (sole-implementor census + retired-feature absence).",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L59-L70",
+          "version": "repo-lines-v1:sha256:7cfbc789c59c960436a01dfa5880d7b5e19b024b33d98d1dab332d0c755e1ca2:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVjY2JjNjJjYWI0ZDY0NzU0MTU1NzU4NjU5MmVhOGNkMmRhMGZhNWI1OTEwMGM3MTJkNDM3NzU0MzY5YTVmMWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBjZDA3ZjU2MGMwOTAyMzkzNDBiZjNkNjE1NmUwNmQyMDdkMmMwOWM5NDUyMDMxMjBiOTBlMzBhNDJjMzY4OWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcyODJiNTA3MThjYmQ2MjJmNDk4MDA4MWZhNTExZGUxZGZjNGUxZjE4YjQxMzQxOGYzYTllNGYwZDMzZWI2OTcifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/README.md#L61-L77",
+          "version": "repo-lines-v1:sha256:83bfadc5471ac13edaaad22cf0638aea6292f16f2353b960065835bc9f0ae78e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcyZWJmN2Q0OWM1ODhmNzRkYWJhMzkyZTQ4Y2UxNDRmNzQ0OWE0OGYzODVmMmU2YmFlZmU4NmE4MmI3NTE1MjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9a8022743c8d47a7936930b9d8d40a46",
+      "statement": "Turn admission is idempotent: resubmission of the same turn with the same idempotency key replays the existing run, never spawns a duplicate. Idempotency is enforced at the coordinator level.",
+      "evidence": [
+        {
+          "resource": "repo://crates/Architecture.md#L517-L542",
+          "version": "repo-lines-v1:sha256:4361cd9d07f10c6771404f92af9edc644fce574d8739d0f3a0745ff2ab53a041:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ3YzA2YzU2MWQ1YzMyNzM0MzY4NTI2OGE0NmIzMzkxZjM5OThlZWU4OTBkMmJlNTFmMGQyMWNjNGE1M2FlNmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVhZDRmZDNkYzcxYWYzNWUxNWEzNDE2YWZkMDc0MjhmOWVkZmVhMDNiNmE0NTI2OWJkZDVjZTNiOGNlY2Q1NjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBmMmM3MGVmNmI3OTYzOWViY2U3OTE5M2MwY2U5M2M1YWIyYzU5NTYwMWUxMWI2NDhkYmYzNjFhYTMyMDdhNzcifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/README.md#L29-L46",
+          "version": "repo-lines-v1:sha256:44b4f788f60d1e399c54e96681d5819793a32f03e6bc2cf20d87b1c5443467e9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjczN2E5MTI5ZDVlYjQxYjA0MzY5ZTI0OWNiY2EyMTVmNzJiOWZhYTZhNDRjNmJiZDA1YmUyZDM0N2ZiYTYwY2IiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ5NzM1MzUxYWIwYzg0YWNiMTJhYzkwMWZkZTAxODJmMjcxMzc0Mzc1OTg2YTg1MTk3ZjgzMGIyMTFmNTFhNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA3ZmU0Y2MyMjE1ZGMzZDVmZjg3YTk4M2M5MThmYjdiNGI4NGNjOWFhZmViMTVlMmQ3NmIzNzUxMjlhZTBlMjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2c3cb50a991849728c03a2a8d4e541cd",
+      "statement": "Capability leases use atomic compare-and-swap with version retry to ensure single-winner claim semantics. A lease can be claimed and consumed exactly once. Fingerprinted leases are only valid for resume of the exact original invocation.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L119-L119",
+          "version": "repo-lines-v1:sha256:a3b8a9913cc911ed0fdbe9614d97f81585d6ef0e4da60f8e7513c8bab2417ddf:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTNiOGE5OTEzY2M5MTFlZDBmZGJlOTYxNGQ5N2Y4MTU4NWQ2ZWYwZTRkYTYwZjhlNzUxM2M4YmFiMjQxN2RkZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTNiOGE5OTEzY2M5MTFlZDBmZGJlOTYxNGQ5N2Y4MTU4NWQ2ZWYwZTRkYTYwZjhlNzUxM2M4YmFiMjQxN2RkZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzU4MWMwNGM4N2JlNWZmZWE3YWJlYjBkMTU0N2E2NTU4YzFjZGY4NGE4N2VjMWRlYjJkYjU4MzRiOTU5MzYxZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTE1ZDZkNzYyNTRlZDZmNjg4ZTQ4OWE3NDNlMmI2OGYzMTkwNmViNzdjZGU3OWFjYmNhNTFhODAzNDVjYjJkZCJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_authorization/README.md#L26-L35",
+          "version": "repo-lines-v1:sha256:46847083d76a327e802846e10df591c36d3f90acc53b2e9373511789553d3978:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1N2I0NmM4NzNhYWM0MjVhM2VkMGZmY2RiZDdlMjVlMzdhOGFmMjFlOGM2MTk4MWZhZTY0MzY5MzJkNTlmNGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgwMmY2OTkzNzNhZjZiMDliN2NhNWMxZTcxNjQyZTJlNzZjODdkZDJmN2FlOTQ3OWFmY2YyNTEyNmE3MTY2N2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBiMzAwNTQ5M2IxMjVmMzBhNzAyZTc0NzFlYzBkNWYxMTI0NWM2MWJkMWJiYjg2ZDIyNTkxOWM5ZDFhNTAxNjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ca826026bf274fe5ba38eebafae16371",
+      "statement": "Kernel boundary rules are mechanically checked: seven-layer dependency matrix (contracts < substrates < runtimes < kernel < loops < products < app) with zero exceptions, per-crate BoundaryRule entries pinning stage order, same-layer edge inventory with 21 named kernel→kernel edges, witness seal ratchet verifying CapabilityAuthorizer sole-implementor status, evidence mint ratchet verifying sole-implementor census.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L126-L176",
+          "version": "repo-lines-v1:sha256:63f9403787025235dee39e3559fc91f325437213fbb2f8113a02a7513a74e426:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4MzBiZTAyNzk4MWE1NzE4ZTFhYmVjN2RhZTcxMjUzNzU1YWQ0OTMwZTljNzBlZmFjNDUyMTE3MjJmMjVmNDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVkNjhhMThhNTVkNmY1ZDkxOWU5YTUyZDY3OWZjOGU5NTI2MGI3ZDFhNjJkM2I3MzcwZmZmZDY2ZGIxYmZlMjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFlZmZkNDhiMjQxMGYxMWJjMzhiZWIxZDIxNmJhODA1NDc0YjJkMWEyMTdmYWZhMzY3ZGZiZmY0MjU0ZGVlODMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b63788af6dce4c62929b32adbc0963e2",
+      "statement": "ironclaw_resources has multiple production implementations behind one protocol (ResourceGovernor ×3: InMemoryResourceGovernor, PersistentResourceGovernor, FilesystemResourceGovernor). It is its own crate because platform-specific concerns must never leak into other kernel crates.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_resources/README.md#L1-L20",
+          "version": "repo-lines-v1:sha256:17a3702e93306198a525fef4b9ef5f098f48d3da8506a36c6a4a2c78d0bcd74f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJlNjdlZTUyZTljZDliY2I2NWZjNmRjMWMxNjI3ZjFjNDU0MTI0ZDg1Zjg1NTVmYmJlNWUyMjQ2NGQwMmM3NjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYxMzQ4YzI2ZWNjYmQzY2Y0Y2E2NzI3OWQwODRhMmQ2MzZjMmYzMDU5MGRmOTYzMWViYzlmM2Q4NDcxYmNlOTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_27128a2ce4b9435ba1ce096e2f613741",
+      "statement": "ironclaw_host_runtime is the single CapabilityHost construction site. It wires the entire membrane from kernel services (trust, authorization, approvals, resources, runtime_policy, processes, turns) plus mediated services (filesystem, secrets, network, event log).",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L34-L34",
+          "version": "repo-lines-v1:sha256:38ef17b12104d84b16b7035b604575830593d35d06d4a40157d4570e14983df6:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzhlZjE3YjEyMTA0ZDg0YjE2YjcwMzViNjA0NTc1ODMwNTkzZDM1ZDA2ZDRhNDAxNTdkNDU3MGUxNDk4M2RmNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzhlZjE3YjEyMTA0ZDg0YjE2YjcwMzViNjA0NTc1ODMwNTkzZDM1ZDA2ZDRhNDAxNTdkNDU3MGUxNDk4M2RmNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGVjODI1MWQ2YjY0MTkzNDcwM2NjZDIyZjQ4NjNlZDE5OGY2ODIwNTFkMmRmMWQ1Mzk0YTBjMzlkNDUwNjVjYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTRlYTRkOWEzNzUzOGM3ZGE5ZjI4YTFmMzQ1OTQ5ODRjYWNiZWNhNTg0MmRhNTA4ODhmNTM0YTYyOGIxZGM0NSJ9"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_host_runtime/README.md#L1-L25",
+          "version": "repo-lines-v1:sha256:0e01ffd67a85cab210dd7a8d93e5cd0bf4bd974fda9b5b8bb4a710cf78e81b45:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3MTQyYTM3YTlhMzZjNmY3ZmU1MTQ0MTA5MmY3MTI3YmZkNTRjY2YyYzZlOGMxYWU4ZGY0OTljNWYyMzBmNjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4ODMzODg4YWU2ZjZkN2RlNmJiMjMyNDJmYzE0YjcyNGEwNjMxYzViOWJmNzJiMDI2MDQzYTg3NmRlYzhhYTMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_bd08858fd50e46bb87083a9a4fe9602f",
+      "statement": "Process dependencies are tracked in the journal with idempotent open/settle/consume/abandon operations. Dependency records carry loop-tier data as opaque metadata so the journal stays vocabulary-neutral. The kernel never auto-settles or resumes dependents.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/AGENTS.md#L114-L125",
+          "version": "repo-lines-v1:sha256:703a5ba3a087e3eaf873ab4515de6dfd8913ab31791e6c7907c359c18c83436a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFlZDUwMTAxZGE4NDViZDQwMDFjMWVkM2FkZjM5OGQ4ODY4ZWVlMmM2NTg2ODY5NWQ1MmRjM2VhOGViZmU1ZGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYyZGJhY2Q5ZjJiZDI2MTM4Y2M0YzkzMjBkZGZlNzdlZDJlNTkxMGJlYzBjNThjMDEyYzBiMGNjZDFkNjFhZTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM3MDMyZGViZTE0YTViZmU0NTczMjcyZjE1NTVlZjY1MzQ5OWI3NGE3NGY0ZmI3MTg2ZDcyNzFjYzNiMWZmODMifQ"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_processes/README.md#L32-L56",
+          "version": "repo-lines-v1:sha256:2fd5c186206cbd125ca0b43a4e1c0241c2db1071d12f4edc584331e56e20509d:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM4NjMyNjVhNTQwNjQzZGE3NjY4ZjVkZDQyN2JmNzAyM2Q0MDVmY2UzNDRhZDRmNjc5NjJlOGRmZmE3Y2Y5MzEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMyMTEzMmMzYzMzOTRlNzU3Y2VkNDNmMWNkYjk4NjIwZjAwNjI5ZWRkOGQ2M2M4ZTIyOTBiYjJjNGEyNzI1MzAifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

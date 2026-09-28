@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:334676e416f06a9fe4821407c0d869f89a811fff77bac993d781d5800215d75e",
+  "claims": [
+    {
+      "id": "claim_8cc0e4eb3034462dad38a7926ddda105",
+      "statement": "IronClaw Reborn uses event sourcing as its primary store: immutable events form the source of truth, state is always computed from events via projections, and recovery is achieved through event replay.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/README.md",
+          "version": "repo-file-v1:sha256:8a986209c3e2d6dabe327ec95b70ac70f6d3c166c2f623f8fda20c478f976517"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/README.md",
+          "version": "repo-file-v1:sha256:4d8a9e3ae492b6b4e06def203f90e7ef70ee6d24212ccd0d2b32a4eb3c3cac13"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/events-projections.md#L1-L50",
+          "version": "repo-lines-v1:sha256:9230bd085fd132aecb63cbf32c804b37ebe2f27b0c2e45f0ff3462d7f6a163f1:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MWZmMjA2MGU4NTllYjgyZTM2MzA4MjQ2ZDZiYzMyODc2MWNhY2QyY2I5MmJjNmM2ZDVkN2M0ZGU1YjU3NzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZkYTUyNDIwZWE5NmJkNTk0N2U3MDQzMmM1MDAyNjIwYWYwNmViZDQyNTA2ZjQ3OGUxYjA0NGI5Y2ZkZjhmNTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI4N2M2YmQ0ZjU1OGMzNjVhNDgyNmFjNzczZDYzN2Y1ODRiZGMzNDYxY2ZjMmY4YTJkYWQ1MTk0ZmM3MDk5NmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_148ee0e9b44f4e0485853ada10685cc6",
+      "statement": "Runtime events carry typed event kinds (DispatchRequested, ModelCompleted, LoopFailed, etc.), are scoped by tenant/user/agent/thread/process, and include metadata-only sanitized details like duration, provider, and error kind without raw payloads or secrets.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/runtime_event.rs",
+          "version": "repo-file-v1:sha256:1997a3cd9650b724c839f648bb4b243a0ddb0e4a2f7e7d71947f0cbffccc0a2a"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/events.md#L25-L100",
+          "version": "repo-lines-v1:sha256:674c9022cf5f36fe1d10e217e8d9d46158d2afb20733c2fb6507e70b2761114e:eyJzZWxlY3RlZExpbmVDb3VudCI6NzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE3M2QzYmY4NTZhMjAyODA4NDc5MjkxMGU0ZTI2Yzg5N2QyMGI1M2NlZjNjODI5N2UyMzg2OWE5N2UxYzE1YWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ2MGRkMWRhN2QzNGIzNDYxOGZkYWY5ZTlhZDA0ZGRhNWM0NDcxMTJiMjY4MTk3M2NiNzQzNTQ1N2JmZmIzMTkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f67b90fdbd914e1d9c3e3c2035e2bb23",
+      "statement": "Events are redacted at construction time: constructors collapse unsafe error categories into bounded classifications and never store raw secrets, host paths, prompts, tool payloads, or approval reasons.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/README.md#L52-L66",
+          "version": "repo-lines-v1:sha256:11d0ad3d3eaec9be17f77e9efa462f3ea85e22967cc836366866aa29ebcf86e2:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4ZjY4MjQzMjZiMDUzYWY2NmZiYWJiNjE4ZTc2NzFhMjE0NTQ0MGVjMjM1NDNhMjMyNDllZDQ4YjJiNmQ3MjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNmN2IzNzE4NDlkZmVkZDlmZTJkNmU0OTk5YTliNGQzYzAxNGE2YmMxNzlhMjg2MzI0Mjk2OGU3ZGNjODQyMzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWMxOGM1ZWRlNzY5ZTk4ZTZhNmZlMGFjZjY5OGY3OTVmZjI5YzJmZmE2MzA4OWZjZDcyZWU2ODMwODUwYWQifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/lib.rs#L30-L38",
+          "version": "repo-lines-v1:sha256:14a133d13049ea1144ce61ef0850bba64b007b83f12246ecd4dbb5336dcebc59:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjk5MjQ5NGE5ZDkwMGNjY2VjMDE4YmRhMWZlMDczODg4NTUyYzAwNTQyZWM2OWE5OTQ1MWFmNWQzYjc4Mjc2YSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiN2VhOGIwOGFjMDU2MTFkZjYxYjNkMzU4YjhhN2NjOTljN2M5ZDU3MWZkMzliNTM2Yzk2OGZjMjJiYWI2ZGJhZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNTA4ZDQ5ZDAwNDM0ZWE2ZGUyYjRiYTQwZWVjMWZiMTQ5ZGIwNzU2Njg1MGVjNjI2MjQ3MTJjZmZlMjNiY2I2NyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjE2YTBiMWNiMDU1YzkwNjRiMzVhNmIwZjVjNzQ4Y2IwZjEwMmVhMGE4ZWU5NGIzNGFjNjBhNDQ1ZWEwMjYzOSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_73ba408e9c11487b809ad930efa1830d",
+      "statement": "Storage is abstracted across four layers: ironclaw_event_log (vocabulary only, no driver), ironclaw_event_store (backend selection and fail-closed policy), ironclaw_filesystem (RootFilesystem trait with unified dispatch), and concrete backends (libSQL, PostgreSQL, JSONL).",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/README.md#L1-L20",
+          "version": "repo-lines-v1:sha256:03db6bb2973114b1746ea918f3c2fb486decfb2b409918aa998adada7b962e86:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM3MzUzZGMzMTllNGUwZTcwNmQ0MGU1ZWUzNjJlZTI0OTA2ZmUyODA5MjY2ZTg0ZjI4MTBhZDY4N2RkMzk5ZjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3NDQyNjQyMzhhOTEyYWQzN2Y1ZDc0M2ZmYzNkNzZiMzkzYjI5OWI4MGFmZTdhZTgzNGQ0MTljOGYyYzVmYmIifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/README.md#L1-L35",
+          "version": "repo-lines-v1:sha256:1b73ca91bc3a57e4f139e33f128f6e72df1bfe02edd841597ea733bf57ecd91f:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiMjBlNTg5NDgzZTFlMDhmMDZhNTFlNTE2NGViNmM0ZjI0MjgwZTA4NmI4NjQwMDZhOTdlMTcxMGMzZGNkNWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU4YmQ3Y2Y0ZmEyZTY0YzJmODE2MjY3YmI4NTgzYWZkOWQzYjFlNmFjYzMwM2NmYzYzYjg4MjZjOTRlNzRlNzgifQ"
+        },
+        {
+          "resource": "repo://crates/substrates/ironclaw_filesystem/README.md#L1-L40",
+          "version": "repo-lines-v1:sha256:0151597492975c97ce7c5b5bba0369fae547a1d6a34491603cdab11df717d506:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBmY2RmMzZmM2QyOWM1M2M4NjFlMTJlMDM1ZWY1ZjE5MjVmNzU4ZDQ3NWIzZWEwYzgzNTIzMmU4ODJiYjNhODUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5NzJhMmQ4YjllMGY1NDYwZTA3NjZiNWEzNDIwYjg0ZDFjNGJkMDk4ODk0ODAyZTFjYzRmMDYyNzMxOTIzMjMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fc218dcd63d8433d88d1a4650d67327c",
+      "statement": "libSQL (SQLite with WAL) is the default backend: single-node durable, built-in with Reborn, uses ironclaw_libsql_runtime which provides one reader pool (8 slots, query-only) and one single-slot writer lane per database to enforce the SQLite single-writer invariant.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/src/lib.rs#L150-L157",
+          "version": "repo-lines-v1:sha256:92e2367d6c5f781ec33951a5fecd10b35d8c0dd82a939c36181208b847a85796:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZTA2NGUxYmQwNDA1YjZkNjI3NGYxY2I0OTM3YjBlMGNjY2UyM2QwZjQwYWE3YWY0NDkyNjYwYTM5NGY3ZTFkNCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWYwY2RiOTcyYTdiZmI3ZWQyNDZmOWZmNjcyMzg1ZTU1ZjQ5NjhmYzExMDQzZGM1YjY4NGQ1MWRmYTMxZGJjYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOTY5ZmNlYWI1ODAwMWE5NjFlNmI2MTEyOTQ2MWYxNTNiZTE5YjNkMzQzYWRkYjJjYmEwOGM3ODhhNjdhYjJmYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjA5NGJlOTE0OTdjMjczNzMzNjVhMjQyODc0MTA5MDAyZmRjYjhjZGE0Mzg0MmMwZTg3YWM2YjExODE1YTI2MSJ9"
+        },
+        {
+          "resource": "repo://crates/substrates/ironclaw_libsql_runtime/README.md#L1-L45",
+          "version": "repo-lines-v1:sha256:6d0a6191950a3a71a4d2ffcf21faf1b6bd43c788ab1f8ff7cadf1420a6e004e9:eyJzZWxlY3RlZExpbmVDb3VudCI6NDUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJlOTIzZmIwNDI3N2Y3M2MwNjg2NGE2Y2QwYWQzMzA0YzM2YjFkNzAxNGM5OTA1MDFhMzcwYzAzYmNkYzg3MTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQyOTBkMGI0NTIzYjRiN2E2ODcxOThlY2ZhYzJiNTM5YmM3Mzg0ZjczYmE3Y2I1YTA3NTI3MDVmZjk4YzFlY2EifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fa2b6d70098a42d7a706bac26d6160e9",
+      "statement": "PostgreSQL backend supports multi-node high-availability deployments with ACID transactions and replication; remote connections require sslmode=require; fail-closed policy rejects cleartext unless explicitly allowed; driver cone isolated to ironclaw_event_store.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/src/lib.rs#L141-L144",
+          "version": "repo-lines-v1:sha256:72de26348ebb67cfdb722d63bb13e8decb5d65cd6f6cb562133d404fe2e53a44:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGZlNzNjNzUzOWJmMTZhN2YxMzQ1OTZjZGY4MWQ3MmQ1NDAwZmI4YmUyNDdkZDc4NDliMDdlN2VkMGM4YWVlZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWYwY2RiOTcyYTdiZmI3ZWQyNDZmOWZmNjcyMzg1ZTU1ZjQ5NjhmYzExMDQzZGM1YjY4NGQ1MWRmYTMxZGJjYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzdhYWQyNGM5YjQwM2JjZDQyNmYyYjA4ZjY4YmE1OTZlODI1MjlhZTAwY2YxMWU4NGQzMjc5MzNkNDkyOWRhNyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjk3NTNjZGU2MGQ2OGNjYzdlZTgwYzgyMDkyYzgxMGUyODA4YTAyODUzOTllYzE2ZTNhNWRkMTJiYmY1M2I3MCJ9"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/src/lib.rs#L68-L115",
+          "version": "repo-lines-v1:sha256:e7c94f2027129b8918d91898e48705e29751ecf60a7c2ccd75e3fad72b946ac0:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI1YTRhYjg1NzcyMWMyN2YwNDMzYjJiNjE1NmI3YjI4Nzk0MjQxYTg3YzI1ZWM5NmM3ZmRmMDdmODZkOTdjMGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1MzViNjE4MmZhNTI2YmZlZGQ0MzZlNDU3YWE2ZTIwN2FjZDAwYzI3YTAxMmFkOTlhMzg5NGUwZDY4NmNjZjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIxYTEyYzZhYzllMjk5NzAzNTk1YjA4NDc2MDE4N2ViNGI3ZGYzZTg2YTViNDI1N2YzY2U4MTRmZDY2N2E0MTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_94557a1efcfb4aecb7d4664415eeba3a",
+      "statement": "Projections are computed read models (thread timeline, run status, capability activity) derived from events via replay; they are deterministic, side-effect-free, rebuildable, metadata-only, and scoped to enforce access boundaries.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/README.md#L1-L30",
+          "version": "repo-lines-v1:sha256:3eca1a4799f07a81cb87853dda769d0b71fcae5628afa94be00c2ca157bb54b5:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhOTA2ZjZhZjQyYWNmNzQ5MzdjNGMwNjg5NWY0NzQ0YjNkOWMxMDRmOTkxNWNmNTVlOWIyZWU1Njc2NmI5YjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM5NjM2YmRmMWQ3MDMzMjc5ZGEzZDRkMmE2ZTE4Nzk2NTUzMTFmMTIyZDM0MDE4MWVkNjBiNjkxMTk3ZTA5ZGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkxYTY1YmI1YmI3NjIxZTI2OGEwZTE3NGUwYmEyZWNjMTdjYzdmY2NlN2YzOTU2MTY3NTU5YmVhMjg4MTkzODgifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/src/lib.rs#L1-L60",
+          "version": "repo-lines-v1:sha256:79d460e645af9211bb1aa7006cf9ed82201db137d221efa77410e5ef53c3b027:eyJzZWxlY3RlZExpbmVDb3VudCI6NjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY4ZTcxYTBmMjBhZjIzYzEwMjc4NjQwZTgwMzc2YjdjODQ1Nzc4ZWFlYzk1YTY3N2ViZmZlOGVlMjNlODE4NDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzNDI0NWZiZGQ1YTYzNzhkNTQwYzk2MGEwYzFmYThhMmE5Yjc5ZDkzYjE5Y2YxZjM0Y2JlZGE2NDhmYjgzMmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2922d29627ba4d919716742923afbf4c",
+      "statement": "Projections use cursor-based resume (not byte offsets): snapshots rebuild from origin cursor, updates fold events after a stored cursor, replay gaps trigger rebase required, and cursors are scope-bound to prevent cross-thread contamination.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/src/lib.rs#L98-L140",
+          "version": "repo-lines-v1:sha256:c397f9220aa086b7b049d840968e76e7e57f22a8edcd982bd9423b85c625079e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxOWJlMjA4YjQ3MmNmMDM2NzUzMTNjMmFiODFjNWVjODA1M2JkZmQwYmFhODkzOGY1YzE2MjhhOGJmYmUzOTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3MDI4YzNmYmE5YjY4NGIyMTQ5M2M2MjRkMjhhYjU4ZjkzMDlmZGVlOWIxMTI3NDIxY2ZhMTA4YjVkNTM0ZjcifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/src/durable_log.rs#L23-L36",
+          "version": "repo-lines-v1:sha256:dacfdb2ed3944a91b4f6aef60ae2ade433e3d1f245f3ffb8302f843b1ecca41e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzNDUwODlhYzhiYTdkMjA3NGY0MjBjOWE3NThkN2NmZWE1ZTY0YTQyNDI3YzU2OTFhYzY1M2U2MGY1ZjZmZjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlYjkyYjM3NDRlNWI5NDFhYTc1ZDM0ZmU3OGY2ODdlODAzOWUyZTVkMTg2N2QzMTdjMWY3NWQ3MzQyYjI5OTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNkMzFjZTdiMDY1ZTVjZTJiNGJmZTBkYjQ5M2VmNGViYTVmZTI4Y2FjN2JiOTE0YTA4NjQ4MDVmMWZlMjM3MTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhjMTU0M2EwMzY2NzU0OGJkNzI5ZTM2NTk0MzNjNDIwNDY5M2IyNDg5ODY2Mzg2NmJjZTJmYTZhZTgzOGVmOTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_28d5156ae89c480ab5523ec9808de40e",
+      "statement": "Turns (user messages) are durable before execution: turn runs store status, checkpoints, and lease metadata; runners mint leases with expiry time and heartbeats renew it; expired leases emit recovery events and converge to stable state (queued, cancelled, or failed).",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L26-L103",
+          "version": "repo-lines-v1:sha256:05e5a25bed59e9333e8598c5ab8a9c7ee764cadc8a17de044832e48b920f31c2:eyJzZWxlY3RlZExpbmVDb3VudCI6NzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ0MWMyOTZjNjQyMmIyMGViMzVlYWMyMGI0MDUxNWFiNmMzODNjMTdhMjg1YTE5MzQ0ZTIwNGIxM2RjZDBhNGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRiZWU2MWIxMjg2ZGMwYzMzZWJmMjliMjZiNWMzYTk3ZTdiM2UwZDFjYzRiMTZhNWIxZWFkYzVmNjUxMjQyYWIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b5ba229056704fb8ae7ebd0fdcfa3e5f",
+      "statement": "Turn admission reservations track capacity usage per tenant/actor/project/agent; all configured buckets are checked atomically with turn creation; reservations are released exactly once when run reaches terminal state; missing limits mean unlimited.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L71-L83",
+          "version": "repo-lines-v1:sha256:1a5932d646e1014241a35a0203e1d61c2e9a11259067bbc474eac902af095f0d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE2YTU4NDRlNjFiY2EyNDNiNjM5M2NhNWUxMTZkMzA5ZTljZmIwODQ4YjczNDFiOGRhYTNhMzhiNmNlNzNjZjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzNDNhN2Q1ODk1NWRkMjMzMDM1YzYyZTQ0YmI5NWEyNDNmMTBhNmY2MTI3NmNhMmI3NTEyYmU2NWIwYzY0MzYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_002f5f258e494cffb08f11955cf7a827",
+      "statement": "Released migrations are immutable; changes to production schema require new migrations (never edit released .sql files); all migrations must be idempotent and preserve multi-tenant isolation.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/migration-compatibility.md#L23-L32",
+          "version": "repo-lines-v1:sha256:16edd65af69f86aea930ffe2d5068cbfec67c0d288badd73a0ea98d74bafd970:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFmYjFiOWI2MmU5NDg0ZWFlMTVjYjI3Nzk0Mjk5NjNkMWIxNjA5OTU5NGM2NzExMjU2ZmI2Y2YwYTc4YjYwOGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQwM2UxZjAzM2JhMmU3ZWM1NzM2ZjY2ZTZhMDMxZWNlNjU0Y2RkOGFlZGEwNWQ0ZTIzYzcyZmQxOGU4NTUxZDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b369ce199f2f43439cd3bc5bd58b9f98",
+      "statement": "Production migration policy: libSQL and PostgreSQL only; in-memory and JSONL rejected; remote PostgreSQL requires sslmode=require and explicit allow-remote-cleartext setting; TLS and durability validated before opening connections.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/src/lib.rs#L173-L218",
+          "version": "repo-lines-v1:sha256:0e4efbcd4d48f66c5d7b25c84448df85eb5f6d419e211e16f1b5c2c4008b3f3a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ3NDhlMTQ3ZGM5N2NiNWM0ZDc2NGJmN2JmYmYyZDU4MjI2MTAyYzhmODFiMzhjYjZiNjQ2ZDhmYWVlMmU1MmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMxNzExNDg5NTZjMDliMjdlY2ViYTVlMzFlOWI1MGUwNzcwNzg2MjQ2NmRhNWMzMzU5MzZlMDg5NzRiNmNkNGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI0ODExMzE3YWNiNmZhNDBkOGQzYmY3MzhiZTQyZWUxYjA0OWUwYzY5NTliYzFjODNkNTFlN2ZmZDhkNDVjNWMifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/migration-compatibility.md#L1-L50",
+          "version": "repo-lines-v1:sha256:52b8e082c3c5760fe04e72bf6dcb6759f53e5481d90323a4a45d5967fa2ba567:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxMTExZmU4ZmM5ODFiN2NlMjJjN2MyYTRkNGFkYjUzMWI3NmQ0N2RjNTFjYmZiOWU5MTY5MjdmZTE2MzBmYWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBhMjc1M2ZlNzJlMGM1MTY4Njg5MTk0ZGVlMzAzNGZmNmMzMmE0NDljYTAwY2VjM2Q0M2FlMzJhYTExZDYxY2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFjYWQxNmQxYWQ3YWI0ZGI5M2M1ZWE1YjI3MjAxYmMzYjdmOGFhZjE0YTY5OGI1NzIwYTdkZjZmM2U1OGJiYjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ef7ac139315f4eae8e684f401e6c5bbe",
+      "statement": "ironclaw_filesystem provides RootFilesystem trait with unified dispatch: one virtual path space, scoped access with mount grants, compare-and-swap floor for transactionality, and multiple backends (libSQL, PostgreSQL, JSONL, disk) implementing the same observable contract.",
+      "evidence": [
+        {
+          "resource": "repo://crates/substrates/ironclaw_filesystem/README.md#L1-L40",
+          "version": "repo-lines-v1:sha256:0151597492975c97ce7c5b5bba0369fae547a1d6a34491603cdab11df717d506:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBmY2RmMzZmM2QyOWM1M2M4NjFlMTJlMDM1ZWY1ZjE5MjVmNzU4ZDQ3NWIzZWEwYzgzNTIzMmU4ODJiYjNhODUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5NzJhMmQ4YjllMGY1NDYwZTA3NjZiNWEzNDIwYjg0ZDFjNGJkMDk4ODk0ODAyZTFjYzRmMDYyNzMxOTIzMjMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ba82d667311c4c91973deb8edbdbc872",
+      "statement": "Events are partitioned by per-stream scope (tenant, user, agent) for isolation; event paths follow /events/<kind>/<tenant>/<user>/<agent> layout; projections filter within that stream by project/mission/thread/process to enforce read scope.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_store/src/durable_log.rs#L12-L36",
+          "version": "repo-lines-v1:sha256:ddd00809254e84d2fcee35d2f980eb8b8e96925d57ce11dc4b9addaed967df3f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY5NmYwODQ1N2Y2MTlmNmYwNjYzNGViMTYxN2ZhZWM4YTk4YTE5MzY1Mzk2ZjUwMmJkYjk5NjViNDZmNzM0ZDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlYjkyYjM3NDRlNWI5NDFhYTc1ZDM0ZmU3OGY2ODdlODAzOWUyZTVkMTg2N2QzMTdjMWY3NWQ3MzQyYjI5OTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY5YzllYzg4N2EyMDUwYWJhY2QxM2I1YmFmZjgxNzNlYzQ2MGY5Y2U3ZjY4MGUzYzVhN2ZhNWM0MDA3YzhmZjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhjMTU0M2EwMzY2NzU0OGJkNzI5ZTM2NTk0MzNjNDIwNDY5M2IyNDg5ODY2Mzg2NmJjZTJmYTZhZTgzOGVmOTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_273cdbe2aab5472d813a4292716e34b1",
+      "statement": "Approval decisions are recorded as AuditEnvelope with ApprovalResolved stage, including decision kind (approved/denied), actor, timestamp, and approval request ID; audit records are redacted (no approval reasons, fingerprints, or lease contents).",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/events.md#L104-L135",
+          "version": "repo-lines-v1:sha256:a46e7971ef3f883f52e988687535f14747f1997bba5b4b88158206a368814360:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ0OTY1NWFjNzE2MTMyM2NiZGEyYWFjMjk4OWM1NGQ5ZTIwYjJiMWUxMTE0N2E0ZDEwMTlkNTBjNGFiZWMxM2IiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU0M2NmOWNmOWY2YmY1YzA3Y2ZkNzM2NDViMzk0ZDQyMWYwM2I0YjM4YmEzZGM1Yzc3NzI0ZGFjMjZlNzUyOTIifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

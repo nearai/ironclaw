@@ -1,3 +1,47 @@
+---
+type: "Reference"
+title: "IronClaw OpenWiki: Quick Start"
+description: "Entry point for understanding the codebase structure, navigation hub through all documentation, and onboarding guide for new contributors."
+tags: ["quickstart", "navigation", "onboarding", "architecture"]
+verified:
+  - by: openwiki/0.6.0
+    at: 2026-09-28T08:16:43.565Z
+sources:
+  - id: openwiki-source-651d1fb6c9e49916a916ab51
+    resource: repo://Cargo.toml
+  - id: openwiki-source-fed88a738aecd1503ee95163
+    resource: repo://crates/events/ironclaw_event_log/Cargo.toml
+  - id: openwiki-source-9d8e91361abe7c88bab33dad
+    resource: repo://crates/events/ironclaw_event_projections/Cargo.toml
+  - id: openwiki-source-6fd632108375bdd8d105f70e
+    resource: repo://crates/extensions/ironclaw_extension_host/Cargo.toml
+  - id: openwiki-source-56e3e1eef5264db26e2fcfee
+    resource: repo://crates/extensions/ironclaw_extension_manager/Cargo.toml
+  - id: openwiki-source-a8cfc172494c5642e13c6090
+    resource: repo://crates/extensions/ironclaw_extension_registry/Cargo.toml
+  - id: openwiki-source-48d3512743eb6790a1abdf21
+    resource: repo://crates/kernel/ironclaw_approvals/Cargo.toml
+  - id: openwiki-source-04c94a2dcef5440f2a3d519b
+    resource: repo://crates/kernel/ironclaw_authorization/Cargo.toml
+  - id: openwiki-source-dd86b966081c0e6edfa9ab74
+    resource: repo://crates/kernel/ironclaw_capabilities/Cargo.toml
+  - id: openwiki-source-5364365116523441ff79facc
+    resource: repo://crates/kernel/ironclaw_host_runtime/Cargo.toml
+  - id: openwiki-source-a91131dae24525c5c6743ce3
+    resource: repo://crates/kernel/ironclaw_processes/Cargo.toml
+  - id: openwiki-source-dfdd05c1a3cde02b22859523
+    resource: repo://crates/kernel/ironclaw_resources/Cargo.toml
+  - id: openwiki-source-3f68f05f34c4a7b1658c6c54
+    resource: repo://crates/kernel/ironclaw_runtime_policy/Cargo.toml
+  - id: openwiki-source-3296dc0c286a9be8da857f86
+    resource: repo://crates/kernel/ironclaw_turns/Cargo.toml
+  - id: openwiki-source-8b48c59964e6201efb95adcb
+    resource: repo://crates/loop/ironclaw_agent_loop/Cargo.toml
+  - id: openwiki-source-23775c3de52f3ab95a13cb8b
+    resource: repo://README.md
+generated: { by: "openwiki/0.6.0", at: "2026-09-28T08:16:43.565Z" }
+---
+
 # IronClaw OpenWiki: Quick Start
 
 Welcome to the IronClaw repository documentation. This is your entry point to understanding the codebase structure, how to build and test, and where to find help.
@@ -46,8 +90,8 @@ ironclaw/
 
 - **[Architecture Overview](architecture/overview.md)** — High-level system design, four-layer model, crate organization
 - **[Crate Reference](architecture/crates.md)** — Detailed breakdown of 68 crates, their purpose, and key types
-- **[Data Model](architecture/data-model.md)** — Events, runs, threads, turns, capabilities, and state flows
-- **[Security & Safety](architecture/security.md)** — Kernel/userland boundary, policy enforcement, threat model
+- **[Kernel Authority & Security Boundary](architecture/kernel.md)** — Nine-stage effect pipeline, sealed artifacts, authorization and policy enforcement (essential for authorization and security changes)
+- **[Turn & Execution Data Flow](architecture/data-flow.md)** — How user turns flow through the system, from admission through execution to event emission
 
 ### 🛠️ Building and Testing
 
@@ -55,20 +99,17 @@ ironclaw/
 - **[Testing Guide](development/testing.md)** — Test tiers (unit/integration/e2e), patterns, standards, and CI/CD
 - **[Common Workflows](development/workflows.md)** — How to fix a bug, add a feature, review code, deploy
 
-### 📚 Domain Deep Dives
+### 🧩 Integrations and Extensions
 
-- **[Agent Loop & Execution](domains/agent-loop.md)** — How turns flow through planning, execution, and checkpointing
-- **[Capabilities & Tools](domains/capabilities.md)** — How tools are registered, approved, and executed
-- **[Memory & Persistence](domains/memory.md)** — Event store, snapshots, recovery, and indexing
-- **[Product Workflow](domains/product-workflow.md)** — Missions, projects, skills, routines, and approvals
-- **[Channels & Integrations](domains/channels.md)** — Slack, WebUI, Discord, and custom channel adapters
+- **[Extensions & Integrations](integrations/extensions.md)** — Guide to building, installing, and maintaining extensions (tools, channels, memory providers). Document the extension manifest, registry, and package structure.
+- **[Channel Adapters & User Interfaces](integrations/channels.md)** — How conversations flow through channel adapters (CLI, WebUI, Slack, Telegram) and how to build a new channel integration
 
-### 📖 Reference
+### 🚀 Operations and Deployment
 
-- **[Glossary](reference/glossary.md)** — Key terminology and concepts
-- **[API Surface](reference/api.md)** — HTTP endpoints, WebSocket events, CLI commands
-- **[Configuration](reference/configuration.md)** — Startup options, environment variables, and config.toml schema
-- **[Troubleshooting](reference/troubleshooting.md)** — Common errors, debugging tips, and support
+- **[Deployment & Configuration](operations/deployment.md)** — Build, deploy, and configure IronClaw across development, staging, and production
+- **[Persistence & Storage Backends](operations/database.md)** — Event sourcing architecture, multi-backend support (libSQL, PostgreSQL), and schema migrations
+- **[Observability, Debugging & Logs](operations/observability.md)** — Event sourcing audit trails, structured logging, debug bundles, and troubleshooting techniques
+- **[Security, Secrets & Sandboxing](operations/security.md)** — Secret protection, sandboxing enforcement, and threat mitigation
 
 ## Key Architectural Concepts
 
@@ -96,7 +137,7 @@ Kernel Layer (Authorization, Safety, Approval gates)
 Substrate Layer (Events, Filesystem, Memory, Threads)
 ```
 
-**Core Principle:** The loop is NOT the security perimeter. Loops request effects; the kernel decides what's allowed.
+**Core Principle:** The loop is NOT the security perimeter. Loops request effects; the kernel decides what's allowed. See [Kernel Authority & Security Boundary](architecture/kernel.md) for the nine-stage pipeline and [Turn & Execution Data Flow](architecture/data-flow.md) for end-to-end execution flows.
 
 ### Crate Organization (68 crates in 7 groups)
 
@@ -116,13 +157,20 @@ Substrate Layer (Events, Filesystem, Memory, Threads)
 
 ### I want to...
 
+<!-- openwiki: broken internal link [development/workflows.md#fixing-a-bug] heading anchor "fixing-a-bug" does not exist in "development/workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **Fix a bug:** Jump to [Workflows: Fix a Bug](development/workflows.md#fixing-a-bug) (test-first discipline required)
-- **Add a new feature:** See [Architecture Overview](architecture/overview.md#where-to-build-new-features) and [Crate Reference](architecture/crates.md)
+- **Add a new feature:** See [Architecture Overview](architecture/overview.md) and [Crate Reference](architecture/crates.md)
+<!-- openwiki: broken internal link [development/workflows.md#code-review] heading anchor "code-review" does not exist in "development/workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **Review a pull request:** Read [Workflows: Code Review](development/workflows.md#code-review) and the [Testing Guide](development/testing.md)
-- **Deploy to production:** See [Configuration](reference/configuration.md) and Dockerfile patterns in `crates/ironclaw_cli`
-- **Understand a capability:** Visit [Capabilities & Tools](domains/capabilities.md)
+- **Deploy to production:** See [Deployment & Configuration](operations/deployment.md)
+- **Build an extension or tool:** See [Extensions & Integrations](integrations/extensions.md)
+- **Add a new channel adapter:** See [Channel Adapters & User Interfaces](integrations/channels.md)
+- **Understand capability execution:** Visit [Crate Reference](architecture/crates.md) and [Extensions & Integrations](integrations/extensions.md)
+<!-- openwiki: broken internal link [AGENTS.md#code-discovery] file "AGENTS.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **Query the codebase:** Use the knowledge graph (see [AGENTS.md: Code Discovery](AGENTS.md#code-discovery)) before grep
-- **Report a security issue:** See [Security & Safety](architecture/security.md) and SECURITY.md (if present)
+- **Debug agent behavior:** See [Observability, Debugging & Logs](operations/observability.md)
+- **Modify authorization or approval logic:** Read [Kernel Authority & Security Boundary](architecture/kernel.md) and [Turn & Execution Data Flow](architecture/data-flow.md)
+- **Report a security issue:** See [Security, Secrets & Sandboxing](operations/security.md) and SECURITY.md (if present)
 
 ## Important Rules & Practices
 
@@ -159,23 +207,20 @@ openwiki/
 ├── architecture/
 │   ├── overview.md                  # System design, four-layer model
 │   ├── crates.md                    # All 68+ crates explained
-│   ├── data-model.md                # Events, state, persistence
-│   └── security.md                  # Kernel boundary, threats
+│   ├── kernel.md                    # Kernel authority and effect pipeline
+│   └── data-flow.md                 # Turn submission and execution flow
 ├── development/
 │   ├── setup.md                     # Build, dependencies, quick-start
 │   ├── testing.md                   # Test tiers, patterns, CI/CD
 │   └── workflows.md                 # Bug fixes, features, code review
-├── domains/
-│   ├── agent-loop.md                # Execution engine
-│   ├── capabilities.md              # Tools and extensibility
-│   ├── memory.md                    # Persistence and indexing
-│   ├── product-workflow.md          # Missions, skills, approvals
-│   └── channels.md                  # Slack, WebUI, integrations
-├── reference/
-│   ├── glossary.md                  # Terminology
-│   ├── api.md                       # HTTP, WebSocket, CLI
-│   ├── configuration.md             # Config.toml, env vars
-│   └── troubleshooting.md           # Common errors, debugging
+├── integrations/
+│   ├── extensions.md                # Extension architecture and building
+│   └── channels.md                  # Channel adapters and integrations
+├── operations/
+│   ├── deployment.md                # Building and deploying IronClaw
+│   ├── database.md                  # Persistence and storage backends
+│   ├── observability.md             # Logging, debugging, and observability
+│   └── security.md                  # Security, secrets, and sandboxing
 └── .last-update.json                # Metadata (auto-updated)
 ```
 
@@ -197,16 +242,22 @@ openwiki/
 |----------|-----------|
 | "What does this crate do?" | [Crate Reference](architecture/crates.md) |
 | "How do I run tests?" | [Testing Guide](development/testing.md) |
-| "What's the security model?" | [Security & Safety](architecture/security.md) |
-| "How do capabilities work?" | [Capabilities & Tools](domains/capabilities.md) |
-| "Where do I add a new feature?" | [Architecture Overview](architecture/overview.md#where-to-build-new-features) + [AGENTS.md: Where to Work](/AGENTS.md#where-to-work) |
-| "What's this error?" | [Troubleshooting](reference/troubleshooting.md) |
-| "What's a 'turn'?" | [Glossary](reference/glossary.md) |
+| "What's the security model?" | [Kernel Authority & Security Boundary](architecture/kernel.md) and [Security, Secrets & Sandboxing](operations/security.md) |
+| "How do capabilities and tools work?" | [Crate Reference](architecture/crates.md) and [Extensions & Integrations](integrations/extensions.md) |
+<!-- openwiki: broken internal link [/AGENTS.md#where-to-work] heading anchor "where-to-work" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
+| "Where do I add a new feature?" | [Architecture Overview](architecture/overview.md) + [AGENTS.md: Where to Work](/AGENTS.md#where-to-work) |
+| "How does a turn flow through the system?" | [Turn & Execution Data Flow](architecture/data-flow.md) |
+| "How do I debug agent behavior?" | [Observability, Debugging & Logs](operations/observability.md) |
+| "What's this error?" | [Observability, Debugging & Logs](operations/observability.md) |
+| "What's a 'turn'?" | [Crate Reference](architecture/crates.md) (glossary section) |
+| "How do I build a channel?" | [Channel Adapters & User Interfaces](integrations/channels.md) |
+| "How do I build an extension?" | [Extensions & Integrations](integrations/extensions.md) |
 
 ### Direct Code Exploration
 
 When these docs don't answer your question:
 
+<!-- openwiki: broken internal link [/AGENTS.md#code-discovery---query-the-knowledge-graph-first] heading anchor "code-discovery---query-the-knowledge-graph-first" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
 1. **Use the knowledge graph** (faster than grep): See [AGENTS.md: Code Discovery](/AGENTS.md#code-discovery---query-the-knowledge-graph-first)
 2. **Read subsystem specs** in [CLAUDE.md](/CLAUDE.md) (detailed architecture per crate/module)
 3. **Check crate README/AGENTS files** (many crates have their own docs in `src/` or `Cargo.toml`)
@@ -215,8 +266,11 @@ When these docs don't answer your question:
 ## Next Steps
 
 - **Beginner?** Start with [Development Setup](development/setup.md) and run `cargo test`
+<!-- openwiki: broken internal link [development/workflows.md#code-review] heading anchor "code-review" does not exist in "development/workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **Reviewer?** Jump to [Workflows: Code Review](development/workflows.md#code-review)
-- **Architect?** Read [Architecture Overview](architecture/overview.md) and [CLAUDE.md](/CLAUDE.md)
+- **Architect?** Read [Architecture Overview](architecture/overview.md), [Kernel Authority & Security Boundary](architecture/kernel.md), and [CLAUDE.md](/CLAUDE.md)
+- **Extension developer?** See [Extensions & Integrations](integrations/extensions.md)
+- **Operations?** Start with [Deployment & Configuration](operations/deployment.md) and [Observability, Debugging & Logs](operations/observability.md)
 - **Seeking a specific feature?** Use the navigation table above or grep the docs
 
 ---

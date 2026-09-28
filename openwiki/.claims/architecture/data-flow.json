@@ -1,0 +1,300 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:d06e38230ed061198403a7cc03e96be15a3e122380d3011a2d3e9bd56c5258b9",
+  "claims": [
+    {
+      "id": "claim_33ec9d511cd842fb8e539b78efff83ef",
+      "statement": "TurnCoordinator enforces one-active-run-per-thread locking at the canonical scope (tenant, agent, project, thread), checking idempotency keys and admission capacity before acquiring the lock and creating a queued TurnRun record.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/README.md",
+          "version": "repo-file-v1:sha256:6298ca13b78c78857661b815c93c8e99cfa43c96d723040568403ad75059468e"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L47-L55",
+          "version": "repo-lines-v1:sha256:12cf64ed2741ff3dcd9ad735fa9c298e2ff931729bb83ce09b176e38840cb9f2:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjJlNmYyMjRkMGExOWUxNTdmNGM1YzBiNjQ1N2Y3YmU3ODkxMjY1M2M2M2RjYWE4YjJkZWY3NGM1OWZlNGNmMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDAxZjJlYzE3NTkzYzEwNTRlYjQ2MzY3ZDg0NTNlZjI0YTE3M2NlOTZiNzExN2Q5MWY5YTY4ZDQ0ZmVmOGIwMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYjY1OGM5MjE4ZjQ1N2YwYWFlMjE3Y2EzZTE4M2Q5OWExNmJlMGI2NTE3M2VmMmJiMzYzNzdkM2RhYTNhNTdiNSJ9"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L88-L93",
+          "version": "repo-lines-v1:sha256:bb8c01b15c333c76ed0404d79173a8bdd3fb9442e61aa9558127b59503625a39:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjJmNzA1ZGJiYzc2ZWMyMzk3NDNlOGY3ZDYzNTFhOGViYTBjM2E2NGE5ODgzNzlhOWZiNTllODNmZTcxYzlmNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOWU3NzhlNDlmZGI1MGUwMjI5NWZiYzZmNDEzZTIwZWZmNjdhYWJiNjhkMjkyMTdiNDk5ODIyM2RlODQ2MmExNyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDMxNTljMmU1MjJkZGQxNjgzZGVkZTgxMGIyYTZlYzA2MDgwN2NkZjBmMzkxYWY1NTE5MGM2YTBhMTVhMThiMCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_a01fb9fb33634180a4dc25eec211f060",
+      "statement": "A claimed turn run progresses from Running through optional Blocked states (approval/auth/resource/dependent-run gates) to terminal states (Completed/Failed/Cancelled). Each lease-backed transition requires runner_id + lease_token validation; terminal transitions release the active thread lock exactly once.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L86-L103",
+          "version": "repo-lines-v1:sha256:4217d0e9599605d6f34400e8ba26617d9eb964949179bbbbe8d1c3390d154648:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVkOWI4NDg3NGM5NjY0MmU3OTFkN2MyM2U2Y2FjMjVhNmI3NjRmOGYwZTBiMTNlZTg4OGU3M2ExMzVkZmY0YzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRiZWU2MWIxMjg2ZGMwYzMzZWJmMjliMjZiNWMzYTk3ZTdiM2UwZDFjYzRiMTZhNWIxZWFkYzVmNjUxMjQyYWIifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-runner.md#L17-L41",
+          "version": "repo-lines-v1:sha256:28f71b5a48d7098b5628cf027bd4753fca3dc54a0973285f6a84834cf60ebdcd:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMyNDhiNWRkZDgwNGNmNzM3YmE5ZjM5NGFhYmU5N2FkNzRlY2QxNWE0ODc4ZTRkNWRjMjZmYzE3N2U2Njg5YWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZjNzg2OTBlZDgwOTM0MzY2NzdlMDJkY2I5NjllMDA0MDZmMGRjOTUzZWI4NWEyYzE4YTBkNWY4ZTM1MTdlYTgifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L98-L155",
+          "version": "repo-lines-v1:sha256:81cbb7874768607a74079a2bd534cb3f8fe53f568216d8c0f7f4f15f10db6f91:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhOGFjY2QzNjllZTkyMGQ3MTNlODVlYzQyNTBmY2U3MDJhZWJlYzg4MmNhMjJlYzYwMDcyOTkxM2Y0NWJkZTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU3NTkyMmVhMGRkYjEzYmI5YjNiNTAyYzAyNzBjOTZmMDNjMmNmNTgwY2FhYWIxMDEwNGIxMzJiNzE4MGRlNWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d524871947bd4c099087171555f4418e",
+      "statement": "TurnRunExecutor sends periodic heartbeat(runner_id, lease_token) calls during execution to renew lease_expires_at. Heartbeats require exact runner_id/lease_token match and fail if lease has expired. Once cancellation is requested, heartbeats no longer extend the lease.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/src/runner.rs",
+          "version": "repo-file-v1:sha256:c8a3cfa10f378aa80bc618cc1331bf1de52395f552cdf7b75b9a66df88d614b2"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-runner.md#L22-L22",
+          "version": "repo-lines-v1:sha256:bd674cfd5dbe3b2f9aa6addb89e5f69174cec29dd837c4b9820e29dce50a558f:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYmQ2NzRjZmQ1ZGJlM2IyZjlhYTZhZGRiODllNWY2OTE3NGNlYzI5ZGQ4MzdjNGI5ODIwZTI5ZGNlNTBhNTU4ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYmQ2NzRjZmQ1ZGJlM2IyZjlhYTZhZGRiODllNWY2OTE3NGNlYzI5ZGQ4MzdjNGI5ODIwZTI5ZGNlNTBhNTU4ZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMmI1ZGFiNTk3ODEzZjY1ZmIzNDQwYTgzODBkNmQyZjZjYTEwMjdhOTUwZWU2NWE2NThmYTRiZGI0Y2Y5YzRjOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZGVlMjg1YjllYzhkMDJhOTVhNTY3YTQzODJiYTRhY2E4ZDYwYzZhZmIyNzcyODAyNDFhZTQ4YzFmNjljN2RkMyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_69d6d9b342cf4612964fbf8528794837",
+      "statement": "A reconciler scans for expired leases (lease_expires_at <= now). Recovery converges an expired lease directly to settled state: Running without checkpoint or BeforeModel checkpoint → Queued (after grace window); CancelRequested → Cancelled (no grace); BeforeSideEffect checkpoint or unknown kind → Failed (lease_expired); claim_count exhausted → Failed (crash_retry_exhausted).",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L87-L92",
+          "version": "repo-lines-v1:sha256:2160c53874a35fa411860c782ab8e620e58c99178ed42b5ec76195529e71cff9:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMTUyNmU2MmFhN2Y4MjljNDljMzRiNGUyYWYxN2ZjZGIzYjU5NzEwNGYzNDhjMGQwNmNhZjE5YjBhMzI4MDkxYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjM0M2E3ZDU4OTU1ZGQyMzMwMzVjNjJlNDRiYjk1YTI0M2YxMGE2ZjYxMjc2Y2EyYjc1MTJiZTY1YjBjNjQzNiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjE1ZDY0NzBhM2E1NWQ2MjBjOGU3ODcxZDZhYWM0YWQ3M2FiM2FlNzcxZjkxNjU0OGUwNTI3ODFlZTA5YmI3YiJ9"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-runner.md#L28-L41",
+          "version": "repo-lines-v1:sha256:bbe29e117172a0e7119ff3abb1b2d8eca4fdfd7e6aea0f4adc67745354dade79:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViNThiZTQxMTg5YjZjMzNhNGNlZGJlNTc5NzZlMjJjMjlhNDQ3MGI0NzI3NDQwYmRhYjFiNmY5YTM5ZmUzNGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZjNzg2OTBlZDgwOTM0MzY2NzdlMDJkY2I5NjllMDA0MDZmMGRjOTUzZWI4NWEyYzE4YTBkNWY4ZTM1MTdlYTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b312e172ec31406bbfd1d7011ab87d1a",
+      "statement": "CanonicalAgentLoopExecutor runs an ordered pipeline (Input → Prompt → Model → Capability → Gate → Reply → Checkpoint → Exit) through sealed loop-family strategy composition. Loop families are registered and consulted per planner invocation; strategy internals never escape as public API.",
+      "evidence": [
+        {
+          "resource": "repo://crates/loop/ironclaw_agent_loop/README.md",
+          "version": "repo-file-v1:sha256:eb62484facfb73364026f41d459218123c402132b6f4c767faf2c2cc2d00b65d"
+        },
+        {
+          "resource": "repo://crates/loop/ironclaw_agent_loop/src/executor.rs#L1-L100",
+          "version": "repo-lines-v1:sha256:899415b9413c14555c36db46c1845ff29c15f7e51d007c8f24ca2fb1f8ffba8a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIxM2M5Y2JjYjczMWZmNjliZjM5NjFmMjkzYmI2M2VmMDJhYThjZGZjOTBkOWRiMTM2ODc4MGJkODcwNTEzYmNmIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJmMmViMTJlZDVmY2IzZDQzYTllZDYwNTc3YWNlNTdkMjc4ZDk5NWMxZDAwYjM5NGJlMWI4NmFjZDY0MjcxOGQ2IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI0Nzk3NWIwMTc2NDdmZjhlZTBlOWQ3MTE3MTM0MmNlMDMxOTIxMjcyYzFkNTRlNDI0NzZjMDIzMzRiM2M3YjdiIn0"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L33-L39",
+          "version": "repo-lines-v1:sha256:d080b7526458d4e42463d471fea58920af1420c13e5788eaf097faf8308139ef:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZWM3YTdjNWFkMjNlZDY1NDFjNWMwYzg3ZjFmMDA1NTg5N2MyODZmNDViZTMzMDM3MDczYWJlYjhmNGQxZTY5ZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTlhY2JlNzE3MTlhNmE5ZGUyODIzNjdiZWFlOGRjNjk2OWI4NzYyNjcwODBmOWJlNjYxZDgwNzc2YWY1MjM5MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjlhZWI4YzYwMDNjMTMxOWZmZjUwZGNlYmMwZDYzYjcyMjE4ZGRkNzNiZDMwYzU3MWU1MzA1ODY3ZjE5ZTgwYSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTdlZWViNGIwNjc5NWVlZGU2MjJlMmQ2ZjYwMTFjMDkxY2YyYTU0MTMzNzYxZDZhNjkzMjIzMWMyMTAzMzZkOCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_167be868056f4299a63c1942b3959da3",
+      "statement": "CapabilityHost owns a single six-workflow authorization fold (invoke, approval_resume, auth_resume, spawn_resume, spawn). Each workflow runs the same sequence: trust ceiling → authorization grants/leases → approval gate → auth gate → resource gate → obligations → seal Authorized witness → dispatch. Authorization denial or unsupported obligations fail before dispatch.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/README.md#L1-L10",
+          "version": "repo-lines-v1:sha256:b98d3a91cac129762280732b7a1731b2b7ac5ed29201775762a248ce2cbbf7e9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdkYWExNzUwNjU5Mjc3OWU1N2ViNDE1YjdkNDQ3OTcyYjc1MDg0ZjE1NjBjNzZiZDNlMjFhNzNjOWQ2OGEyOTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZkMjg4NzhlNDYwMTg1ODIyMWU0NTNhM2VhNDlhZDc1ZWE3MDkzMzk1MzgwNDE0NTM4NzBkZDQwYWQ4Zjg4YmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE1ZmY5MDNkMjE1YmEyZGRiOGRiODI1MWFkMTAxMTlmYmJiZDRmMTliNzcxZTkxYWQ5OTIwZTNhNjY5MzQxMDUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/capabilities.md",
+          "version": "repo-file-v1:sha256:9efe2124645a6d0a1a7a9e2406cb03dd0386bb4ecd0eef1c1d88ede141c6aa9f"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/capability-access.md#L13-L56",
+          "version": "repo-lines-v1:sha256:52588e6f3ec32663493ea8d0cde498a8fe6b3be1d594a0899040688a1a54a439:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImExMDQxNWUwMGUyMGI1MDlkMzQ1OGJhMjRjYTgzMDJhODFkMDNiYzA2YmE4ZDFkOGVjZjhiYWFkNDI4NDUyNWQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNkNmI1ZjQ4MjliYmQzMGY1ZDMyMTk0MzE3YjMzMDQ5YmVkMWVhYjNiODNlOGQ3ZTliZTEwZjk5NjFkOTE0YzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e09a9bbef0814ad7bdd3295efd239d34",
+      "statement": "CapabilityHost raises BlockedApproval when approval lease is required; BlockedAuth when auth gate is required; BlockedResource when resources unavailable; each writes a durable gate record and returns to the loop driver for checkpointing. Gates are resumed separately through approval_resume or auth_resume_json.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/capabilities.md#L33-L61",
+          "version": "repo-lines-v1:sha256:af52845fc7774bc27da8882b99a713667f1c598e616798a4daadd7c52ff1dd27:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiMjhhNTFkMjBlYWRjNjM2ZWFkNTI2YTM4OWY1MDA5NmJmMjQ2MTQ0NzRkNDhmNmZlOGNkOGY3NDllOTgyZjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMyMjg5YjQ0YWYwODU5ZGNhODQzMTEwODEzN2E2MjIzMTAzNWNjNjRjOWM5ODRjNDc3ZTZmZTQyYmY1YzNhMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlhYzkwZmZmOTY0N2VlM2Y0ZTc1ZWZkY2Y2N2JlMTFjZDMzYjRiMDQxMDE3ZTFjNjg3ZjdhZDE0ZmIyMmMyMzcifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L201-L211",
+          "version": "repo-lines-v1:sha256:9a03e16df83c66004ee1ff9758cc65068077e59f181996645cda7e6e7744afc1:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc3ZjlhNGVhMjYzZmM4MjQwYjNmYzA2YTBmOTRmM2UwOWI4YTBmYWYxZWQ0ZTUxZTM0MzlkZTAwOWNiNjhmZDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5YzBiZjg2ZjQxNWRjMTI4ZWIwNDYxYzc4N2FkZTI3NGI0YzA3NTkwZGQzMWVjZDg1YTViNWRhYzhlYmNlNDgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9b41e61eaa1b4d71a869f0505c6ad5a7",
+      "statement": "LoopExit is a driver claim carrying only durable refs and sanitized summaries, never raw payloads. TurnRunner validates each exit variant against host-minted evidence before mapping to TurnRunnerOutcome: Completed requires reply/result refs verified in transcript/result store; Blocked requires gate/checkpoint records verified; Failed requires failure safety evidence; Cancelled requires host cancellation observation.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/src/loop_exit.rs#L24-L103",
+          "version": "repo-lines-v1:sha256:e8f53311563425a2651541551d75e0167f8bc4bda89529cf7b1aa9938239863e:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4NzljYzRmODA2MTIwYWU4OGQyMGM5YTAwMjlhMjI1M2JkNzFjN2JmMjQzMDZjNzQ1YzFlMTIxYjAzYWI5YjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg0YzEzMWU4ODhmNjhlOTE1OGUzMWE5OTJjYjhmNWYwMGRjODQ0M2JlMjkwN2ZhYzgzOGVkMzk0OGUwNjcwNjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM1Nzg1MjE0NGMzNjkwOTE0OGViYTIxZjZjNzkxMTk0YWMwMDgxNmE0OGZhOWQ0ZWRjM2EzMjQ4YTU5Zjk3NmYifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/loop-exit.md#L70-L95",
+          "version": "repo-lines-v1:sha256:0794c223d723aae9318633a6c2f9ab1cdf74753b5bce23b0a6000e20514f575f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRiZWRjNDU5NDZlYjFjZTMwMWY1ZjIwYWU4ZDU4OGMzNWEyOGMwNGQ3OTZhZjQ3NzhiN2U3NmE5NTEzZmM1ZjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk1MWNiOGE2NmY1Mzg1OTQ3MWFiMmI4NzU5ZmNhMjA1ODZjNzNkNWZmNjM3ZjUyNGVhMjQ1YTFiOTcxMTJkMGQifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/loop-exit.md#L9-L15",
+          "version": "repo-lines-v1:sha256:dd69f5b7f7c0495ed3bbe90ee56635fb9f0a8ec00e50af6386c0de62d65c1acb:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTEwMGMwNTlkMWVlZTU0MDM3NDlkMzJmMWM3MmVjMDA2MGYxODFlZjJhZDUyZjA0ODdlNmUxMTBkMDdmOTllNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzU1NjNhZGY5ODM2MzNhY2NhNjNmMWU1NWY2Y2NlMzg1OTM4NjhkODdiNzFiMzMxYzMyNmJlY2Y0ZTMwNWRmNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDAxZjJlYzE3NTkzYzEwNTRlYjQ2MzY3ZDg0NTNlZjI0YTE3M2NlOTZiNzExN2Q5MWY5YTY4ZDQ0ZmVmOGIwMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDAxZjJlYzE3NTkzYzEwNTRlYjQ2MzY3ZDg0NTNlZjI0YTE3M2NlOTZiNzExN2Q5MWY5YTY4ZDQ0ZmVmOGIwMSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_553c5c99b3004889ade7594d21ab3469",
+      "statement": "Turns emit durable lifecycle events (turn.accepted, runner.claimed, turn.blocked_*, turn.completed/failed/cancelled) to DurableEventLog. Each event appends to an append-only log with a sequence position (EventCursor). Clients resume from EventCursor for replay and forward-progress, enabling safe reconnection and event streaming.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/src/events.rs#L17-L29",
+          "version": "repo-lines-v1:sha256:79ec209ca139913659a3c20ae3b6dc868e770618c9a8f2c5087d351b43ab98c5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3YzE4Nzk4OTAzNDUzYzYwYTUxN2Y0M2JhYTRlOTNmZGMzYTBmMWQ0ZGQ4N2FhMjNlYjY3MDA5NzNkMTM0MzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM0Mzc5OWMwN2U1NzJmN2Q2ZWY5ZGYzNDg0MjQzZTUyODIwOWExN2VjOTEyYjkzNWFhYTBhNmIxMTVjZTQ3NGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFkYTVkYjY3MTM5MDY5YWFjYzhhYjhhOGFjN2JkOTVmOTM2ODRhMjZmZWI5NTVjZmJkMjBjM2FjYjUzY2RiMDcifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/events-projections.md",
+          "version": "repo-file-v1:sha256:d04cdef6b5c427559dbfeaa435f9bbe8fd90c3e20691d16b27606b18d363ba43"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L214-L242",
+          "version": "repo-lines-v1:sha256:f8a9b20d5c144586706bcbbd6512e8961176c444e61db56cbfa7bec45a806972:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRjYjY2Njk1YWMwMTA0MzY3NGZkZTk4MTVkNzRiY2JmNGU2YWQ3YmNkNGUzYjc5NGU4MTQ3YmY5MGJmNTc3YTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIwODY3OWE5NTU2OWJlOGZlYThmZDBlMDcyN2VjODczNTZiYzBjNGUxNzZkMzczZTQ1MzNkNzdmZmEyNDQxYzYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fd3b7b53aaf542cca3710d20c8b18bce",
+      "statement": "submit_turn persists sanitized idempotency outcomes keyed by (scope, idempotency_key). Duplicate submissions with the same key replay the prior accepted outcome (run_id, status, cursor) without re-running admission, lock acquisition, or side effects. Same-thread busy is transient and never cached as idempotency outcome.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/src/coordinator.rs#L125-L170",
+          "version": "repo-lines-v1:sha256:4a0d334d8bc80d3a7719283b75f97fc1bf35929b3a3975d0a21aa32db17b237e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZlNGMzNWM0ZTJkYTIwMTczYjlkYzAxMzgzZjQ1NmUzYTExZGJiZDhiY2I5ZTJmNDc2Y2ExZjY4YThlMDYwMWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlYjMwMGE1Yjc5NDMzMjk3OGQyYTM4MmRkNTM4ZDE0NWNjZTZkNjI0NTliZjJmYWI0ZGY0ZTY1ZWRlYTU5YjUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L58-L68",
+          "version": "repo-lines-v1:sha256:211a577b29383edab8aa587ed89c1a4265be30f886187a326ffcf0fc29e092fb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNjODE5ZjcyNWZjZjkwYTg1ZDU4Y2JkZmY4NDdhMDA5YzFhYTY1ZGFhZmUyMjI3ZjMyMzJmZjU5N2ZhMzRkMDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg1NzI2M2E0ZjQ1MjdjNGFjMDk1OGIwNzZmZjJjZTk4MTY3ODBkMmNkMDljMDlhNTdlNzI2ODk4YmEwY2M3NDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_94228646abc749be9640ff3ea993ce02",
+      "statement": "Turn admission atomically reserves capacity across configured tenant, user, project, and agent buckets. Reservations are held by non-terminal runs and released exactly once at terminal transition. Limit changes do not evict existing runs; new admissions are denied until active reservations drop below configured limits.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/src/admission.rs",
+          "version": "repo-file-v1:sha256:d218c021aa377636f3b3f53d9ac4d089381a9616677493a8b2faa5739d2ef148"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L72-L82",
+          "version": "repo-lines-v1:sha256:4e7e78ae38e7cee7eee5fed70b42dd069175d7a937efbf26dcf47298d1991067:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhMDc5YWVkNDA1YzQ5MzM5ZjJjNGI0OTA4ZDAzNGU2NTg0ZjA0NjViMTBiMzBjNzYyY2RhNTgyOWU0OTljZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0ZDRkZWNkZWI5MWU1NmYyMWFiZDIyNDkzODdkMmUzNjdmMzgyM2NiYzZhMGY1MmM2NjlmNGRiMzlhMzc4ZjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6b9f711df8514707bcead87f67fd0b27",
+      "statement": "Checkpoint records are keyed by scoped run identity and persisted in process journal. Reads with foreign scope or run ID return no state, preserving tenant/thread/run isolation. Checkpoint payloads are bounded and debug-redacted, never exposing raw prompts, tool input, secrets, or host paths.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/loop-exit.md#L96-L112",
+          "version": "repo-lines-v1:sha256:df3f14754991691825b1d7dc90b503c44d46d171bc02126d6d75b8112d3d39b3:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYwNWJjNGI2MmI0MjE0OGMwZmJjOWI3YjEyYzhkMjMzYmFiMDMxNjBkNzBhNDk4NmZlZjhkOTViZGU1NDc4MWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI5NjJiN2M1NWI2NGU2MjEyZGY4NTQ4YTZjNjBkNGQ0NjAwYjQwMWRiZTlmODNmYTlmYzQ1M2MwNDkwZDdhOWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIyZjFhMjkwYWJiOTExNWFkMTBlNWY4MzBhMTlkZjE1YzNhNGYxY2RhZjg0NDRhOGEyNjlkZDk3ZjZjMmZjMTkifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L93-L101",
+          "version": "repo-lines-v1:sha256:b5bdc09ba058f279180a170a26d482118c756b648d1011299dec215e2f9742fd:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNTBjNjZhOWNiN2E3NzljZDJmZmYzYTk1MzQ2ZjQ0NTI2MWUxMzhlNTBhMzM2ZTVhOTdmYTQ0ZjJiODhlMjA5YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjhiOTRlMGQ3MDJiZDdhNTI2MjRmMTc1MGEyYzFlYmExZGEwOTQyYTQ1MzUzMmU0YzJlMDgxMGEzM2EyYzdhZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzFmZDIxZjNhZDUxNDY4MDVjNDYyOTdiNjZjZTMxYzUyYzZlMjY2YjRhNjFiMGQyMzJmNGMwYzQ2ODc2Mzg5OCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiN2Q1M2EzMmZjZGUwNDI5MzU5N2RkMmE4NTljZTE1ZjUzZWI4YjcyYzEwMDBjZWQxMTlhZDU2ZWZhZTBjMTE3NiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_f5cf4c45c11a4e77aab687f8b47faad4",
+      "statement": "Only CapabilityHost mints the sealed Authorized witness that dispatcher accepts. Authorized carries the frozen descriptor that was evaluated for authorization, prepared mounts, resource reservation, and deadline. Dispatcher consumes the witness and rejects expired witnesses fail-closed as AuthorizationExpired.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/README.md#L29-L32",
+          "version": "repo-lines-v1:sha256:d2e13ee956c802ff936d7042accbac1215eb8504b2af4ee3b97656e211a0a301:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNDQ5MDE1MGQxNmI1NTRkZWJkODY0ODRiYWQ5MThmYjkzOWVlZTRjODlhMTYzNDllODk1ZWExMzNlNWU3NDg1YSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiN2IxNDI4Yjg4ZWQwZGYzNmIwMjQ0ODI5Zjg3ODVmOWE2MTUyZDA0M2ZlYWMwZTIxZDI1NDNiYWFmZmFkYzk0ZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZWM4YTFhNDU0ZDYzYmViNjdjNTVmZDBkMGNjYTAxNjQ4ZDBlM2JlYjg0YThiODgxYmJmMDVhM2EzNGYyMjZmYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNmYxN2Y5ODYxNTZkYzA1MTZiMjZlZTM4OTIwYjc0YWNhMTFmZDE4Zjk1OWNhN2MwNmVjZWUwNWE4YzYxZTYxMCJ9"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/capability-access.md#L120-L137",
+          "version": "repo-lines-v1:sha256:0cb910a64eee98f80f1313eeb528cddf8109059fa49cd53c3be92d5b6c02e740:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ3MDRjNWMxMzM2ZTU4ZDdkOWQ2MDk2OTY2YzdmOTRlODc2MzgxMTE3YmQ3YzMyOTg3YWQ2MmE5ZTU2NzliYjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWM1Y2RjZGIzZGM2NDU1YzQ4NGJmODlhMzkyNTlhZTZhMDRiMDJjMDA4M2UzN2M0M2ZiODk1MGU0NzkxYmQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_046cb9cc5675441e9d7cc2dd69881ed4",
+      "statement": "ironclaw_agent_loop depends only on contracts (ironclaw_host_api, ironclaw_loop_contracts, ironclaw_common). It does not depend on any substrate, domain, kernel, lane, product, or app crate. This contracts-only boundary is machine-checked by BoundaryRule.",
+      "evidence": [
+        {
+          "resource": "repo://crates/loop/ironclaw_agent_loop/README.md#L30-L37",
+          "version": "repo-lines-v1:sha256:bd50285c85295768b7f462b8b968c37e1f61f70aa4c3607c3f16c73b7f7695bf:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNDU5N2JmZDlhY2FlYzNkODUwMjQwMTAxMjQ5NzU5YzA2ZTE1YzE0ZmNjZWQ1YmRkZWI3NWI2NDk2NzQ5MGU5MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYmZmNDQwMWQzNGEwMWM5YjliNTIyZmNlNDMyYzQ4NDU1ODE3ZTVhZWIxM2FmNTJjMTBjN2I4YWFmMTFlY2UzOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjA2ZjBjYTdkZTI3ZTEzNTdiYTY1MmJmNGI2YmYyNDkwMTkxNzhlOTNiODRhYjM4ZjQ4OTliZTUyOTMxODhkMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDVkZDYxMzIwMTg2ODU4YTk0ZWVhNjc4OWE2NmVjYzA1MDFiN2Q3OTc4Mzk5NjliMDY2ZmNkYzFhZTMwNDY2NyJ9"
+        },
+        {
+          "resource": "repo://crates/loop/ironclaw_agent_loop/README.md#L39-L43",
+          "version": "repo-lines-v1:sha256:0a6efeab95afd01a7408d9cf0b7a3da0f4e234d31f84ee8f9b5dfd7b1473a3a5:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNDhmNjgyNDMyNmIwNTNhZjY2ZmJhYmI2MThlNzY3MWEyMTQ1NDQwZWMyMzU0M2EyMzI0OWVkNDhiMmI2ZDcyNCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmZmMTRiZjY2NWFmOGQ0NjVhZjNjOGY5Nzk5ZGE5YTRkYjA2M2U4NjdhZTljMzk5YWM3NTNhZjljMGE0OTQzNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOWY2Y2RlNjlhZTZiOWM3NGU1MzE4Njk5Zjg4ZjU0YTE1YTBjMTM2ODFhZGIxMTMwNjFmZDBjNDg4Yzg0NWVkMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTQ5YjkxZWZiOTE4MzI0OGNmMTU5OGNmMWIzZTI1MDg1M2NjODgwYzIwZjg0MjNmOTUwMzhhZTkyYjc4Y2QyMiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_11c01be811894fe29356f671f96f77a0",
+      "statement": "RebornTurnRunExecutor binds a claimed run to its registered AgentLoopDriver (PlannedDriver or fallback text loop), creates a scoped AgentLoopDriverHost port set, invokes the driver with turn context, captures the LoopExit claim, and passes it to LoopExitApplier for validation and transition.",
+      "evidence": [
+        {
+          "resource": "repo://crates/loop/ironclaw_turn_runner/README.md#L19-L42",
+          "version": "repo-lines-v1:sha256:424cde6bbd7cb9da635dd01233daa6d646db46b326b4ed9da6de7230a97566d3:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0ZTcyOTk0OTQ3YWY2NTQ5ZWJjZTFkNDlhYzgwMzUwZTNhMzI2ZTNlNDVlY2I0YzQ5MTZiMDFkMzFhMGJhZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdjZDMzNzkxNzg4YmEyODVmOTBhMjYwMWYwMWIxYzZkNTgxZmZlZTNiNDE5OTA1NTk3MTZjM2VlMGFmYzk1NmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI2NGRhOWVkYjE1MDEzMmUyNGVhMTg1ZTNmZjNhYWYzN2Y4NTNkNTVkZjQzOTQyMmEyNjM1NDE3YmZhMTViY2MifQ"
+        },
+        {
+          "resource": "repo://crates/loop/ironclaw_turn_runner/src/turn_run_executor.rs#L1-L10",
+          "version": "repo-lines-v1:sha256:c0b4eb4dc4c917bca3987c07e970996362abd8e79d211501375f0d6c21c59661:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdmNmE2NDYxNzMwNmU0YzQ0NjFmZTI3NTQ2YjNkNWE1MzUzNTQzZjQwNjEzNDg4ZWRlYWZhODIwOTA0ZDMwNmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFhMWQxYTYzMzkwMjI5Yzc5ODM0N2U4M2EwNDA1NDQxYzk0MDAwMzUyODRhZDE2OGMxYmY2Y2RmMWQ3MGEzNzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjgwMTEzYmU2MmIyNDMyYTJlNjFmYzRiMmVhMTQ2OWU1OWQ4ZjFlYzIwZmMwYTY1ODZjYTNhOGY5NGFkNjFmYTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f8fcd524856d4fc7aa95893a15444f05",
+      "statement": "AgentLoopDriverHost ports (prompt port, model port, capability port, transcript port, checkpoint port) expose only scoped access constrained by the claimed run's ExecutionContext (tenant, agent, project, thread, user). Loop requests are not authorized by the loop itself; each request is independently gated through CapabilityHost or memory authorization.",
+      "evidence": [
+        {
+          "resource": "repo://crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs",
+          "version": "repo-file-v1:sha256:2b7c578463dfff338427b1bef8148090e8cb1c990f5a0234648864f07008f315"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L89-L94",
+          "version": "repo-lines-v1:sha256:1ec4862c3f53c28a517f5ce983fffb148f61d49dfd7c6c654547a5e5053f2322:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjY0NTI3NzYxYmRiYjk4ODA3NDFjMmQxMWY1YzViNjI3YWZlMjkxZWRmZTBkZWQ3YTdkNGIyZTllNzdjZWIyMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWQ0YzcxOTllOTc4MjY4M2I3MzVjZThjMDdjNmQwMjE3OWU0NzlmMjAzZjEzZTdmMjg4ZjNkMjVmZjBhMmY2ZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGM0MTgwMWFkMmI2NzEzOTc4ZTQzMDFjOTk5NTg5MzBmYWY5YzRjN2I5MjM0NzczMWZkODQ1ZDJjYjZlODlhNiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDAxZjJlYzE3NTkzYzEwNTRlYjQ2MzY3ZDg0NTNlZjI0YTE3M2NlOTZiNzExN2Q5MWY5YTY4ZDQ0ZmVmOGIwMSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_caa46e51bed84ef689433c66eb61554b",
+      "statement": "Turn admission and state projection are not a second durable store. ironclaw_turns projects turn/run state over the process journal owned by ironclaw_processes, ensuring a turn's lifecycle and its process's lifecycle can never diverge.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/README.md#L10-L16",
+          "version": "repo-lines-v1:sha256:1df9aec84d8d3209d6cab1f13b29fb58322b774616ebb1a808c6ee4886e161eb:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTJhNTFkNDBlMmQxNDliMTNjOTQzY2Y4ODBlNGIxMTljZjZmMDJkMTJmNjY2ZmMyOWE5ZTlmNGU2ZDcwZTA4NiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiM2VlNGY3OTMxNTFmODI4ZTVjZDdjZTE3OGRhZTVhY2EyNWE0Y2FjYmE5ZWYzNDM0YTZjODQwOGQxNGVjOWIwNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDE4NWJiMjUyNTkzZWU0Mzc5M2UwZTBjNTMyMDljZWEwYmVlNTY1NTM1NDQxYWRkYWVlY2MxN2YxZWQ5ODQ4MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMGNhOGVlZmUzOWJjYzZjNzlkNWEyZWIzOWJmNzUxNDE4ZDMzN2ZiMWI5ZDlkMzI4YmQ0NjQzNjc2YjY2MTFkZSJ9"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L27-L43",
+          "version": "repo-lines-v1:sha256:299a7e0a7b648294786a1aaa7276aafdf76a4d6738b640f2e901f63d0e472205:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxZTgzMjcyYjZmZjdhMTdhY2FhZTczYzAyODcxOGQwNGY4Y2NjZDhiZTZmZGMwYmUwMGIxZGZkODE2MjNhNTUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMwMzA0ZTBkNjAzMTUyN2UyNzlmMzA3Yjg4YjkwMGJjMWVkMTM0MThmNmIzNzFkYTQ1ODY2OTVlZWZkYjNiM2IiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e02817bc4d154b8387d026542f601151",
+      "statement": "TurnLifecycleEvent projections carry only metadata and durable refs, never raw prompts, assistant content, tool input, secrets, or host paths. Failed events may carry a secret-scrubbed model-visible detail field for recovery diagnostics, sourced from the failure category.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/src/events.rs#L70-L100",
+          "version": "repo-lines-v1:sha256:5e15942d425ad7b9a769064f38bd9c68ff687a6f69071d90847238ac25d60c91:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ5MWI1YWVjMmJkNTdjYWRiYmQ3MzgxMmY5ZWI4YWQ4NmEwMWIwN2QzNjI1ZDViNTQzZDk0NjA5MmIzODc4MWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjOTc2MDQ3ODgwMzczM2JhMmViMTk1NzFkZTVhZDQ2YjcxNDI1NmI5MWI1ZjA3ODRlOWI0ODJlZDRlMTQ2YjkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU5OTk4YzVmOTllY2U2MzY2MTQ3YjkzNDE1YzYxMjRlY2Y0YTAwZGZlZmNjZjkzNTU1NjU3MzVlODc2NmM3MGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI4NzY0ZmVjZjg3NDlmZWQ2NDU5MTU4ZTc1OGE3NjY4MTZlMmU4YjAxOWU0ODI2YTM4MGMyOGI5ZjFhYmJlZTYifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turn-persistence.md#L107-L108",
+          "version": "repo-lines-v1:sha256:50f727b0dc5ba19089ff330591aab6a20ca79a53900e32c080a088022862d157:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMmJjODVlNGMyYWYxY2JlZTQyNzA4NjM4ZDMwOTAyOTBiM2YwNDM4Zjc3ZWIzN2M0YTJkYTMyYWEyYjliNDMzZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZGJlZTYxYjEyODZkYzBjMzNlYmYyOWIyNmI1YzNhOTdlN2IzZTBkMWNjNGIxNmE1YjFlYWRjNWY2NTEyNDJhYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_f0b7f5e1182d4e0699bce48e03db79f2",
+      "statement": "Product-facing channel adapters (CLI, WebUI, Slack/Telegram extensions) normalize transport-specific messages into scoped IncomingMessage records and submit through TurnCoordinator. Adapters own transport-specific auth/webhook checks before submission but do not own prompt assembly, tool authorization, approval semantics, or durable thread state.",
+      "evidence": [
+        {
+          "resource": "repo://crates/Architecture.md#L195-L207",
+          "version": "repo-lines-v1:sha256:bbd9bb54905aed7bec9f48c56c4e33b1f648b05b391bd894bdfb175e6298e662:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM2YmM5OGM2NTViMTU3NTFlOGY5NTI1MWZhMjFmODRkOWM0ZDU0MmI3OGQ1ODkxZTA4NGJmMDMxYjdlM2M0YzUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYwMDQ5N2IzM2NiNGMzYmVlN2M4MzFmYWQyNzc1ZjQzNmYzNDFmYjdjMzdlYjhiZTRhNzNmZDRjZjNiYWE3MDYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc5NDNiMzY4ZTUwZmM0YTdlYzU1NmUxNzY3ZWMxOGMxNWJiMmM5MmI1MmFmYWU3NmU4ZTIxYmU2OTZkMzZiY2EiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI3ZTQ2YTcwYTg5NjFmZjA2NmVjNDUzNDg2MzkwZjBhNjBiNzEwMzQ0Y2JjM2ZlMTExZmZjZDllYjRkMDM3YzMifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/turns-agent-loop.md#L256-L274",
+          "version": "repo-lines-v1:sha256:6179d83fbae0d746e25c8645cd7d53821eed5d2b907772bb92e0006239ec7a09:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJmZjgxYzBlMGExY2IwYjE0N2JiYjJkOTM3ZjRmOGQ3YmRhZjExM2U2NzhmOThlMzg2NjExZWQwZWNmZWFlZTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQwYWI5MjkxY2E0NDc0NDIxNTY5YzJlMjYzMzc3YTA1NzI5YTFlMjVhMjlkYWZkYzkxZWRhMTE3YmQwZTY5MjkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

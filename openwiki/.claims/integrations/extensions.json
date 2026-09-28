@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:5b54987ed8880adcd2053106d0d12e284e4b03bac072fbaa2f626203554ebcea",
+  "claims": [
+    {
+      "id": "claim_5eb0cf4f423d43939ffb3af0f225db84",
+      "statement": "Extensions are the sole installable product object. Each extension declares capability surfaces (tools, channels, auth, memory providers); the generic host manages installation, credential binding, lifecycle, and multi-user membership without naming any concrete vendor.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L1-L42",
+          "version": "repo-lines-v1:sha256:9f7ea57327adfbdcbc1e97067771e9e4503e110c45a0449f7bd5b5470a10bcf3:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM2ZmU3ZTVhYzY0M2M2YjllY2MzNzEzMTE1YjE4ZGRmMjM0YjMxMGM2NTI5NGJmNjQzZGYzYjBiNzQxM2M5NTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwNGEyMzhmNGI3ZTkwODA4YTU2NTk3YjQxNTZiOWI1ODgxMTUwYmY1Y2QxNjQ1MGJlZWE5MzE3ODFmNzE4NzciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEwOTNmMmNhNmI5YmYwZjIyYjViNjM3ODQwMjE2OTAwODI3NGJjOTA5NjA1NDVjOTA0NjRjNDkxZTIxMDNkYzkifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L15-L60",
+          "version": "repo-lines-v1:sha256:35c0587b546907693e59db8083fdfbb484028154f042374a6a61f7dd163049f5:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiOTgzM2UwZGZjMTk0NTI1NzkwYWIyZmYxOTFjZTA1NTlmYzE1OTA4MjhiYjdhZDgyNzQ2YWU4ODQ1YTExZmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE2MmU3MWEwZWMyYTE4ZGQxM2U0NTNlYjc3NGU5ZDQzOWM2ZTllMjc2MTBkZGY2NTAyYjdmMTEwZTYzYjNjYzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZkYzEyMzhmODYzMWIxNGE5NWFjMDU4Y2JiOWU1MTI5ZDI4ZTk4ZjFhMTk2MGNmYzA4OTljYjRhMmE3ZTkxMDMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_011f0ad33d4f4e8096b5d95cdc66c4ee",
+      "statement": "Each extension package is one self-contained directory under packages/<id>/. Every package's manifest, prompts, schemas, code, and built-artifact sources live together; a package's assets never split across multiple crates or directories.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L56-L85",
+          "version": "repo-lines-v1:sha256:a2abf7b92ada6e93c2a0b5a99ab6de2565977637fabfe581e1de029f7c54d322:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ5NzYzYmJmZjUxMmM1YjQ1ZDBlZjU2MWZjMWY1YTg5ODQ3ODFjOGIzMjAxNWEzMTU5NGMyZjI4MGRlMDIzNmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgxYTU5OTZhODgwZDJhZTQ5NTg2MjM1OTkzY2RhNTgxMDVjZWU2NzRhYzczOGYxYmExNWM4ZTVkZjc5OTNkZjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjgzOTNhNWJkZDFhYzVjMTYyMDk4MzZiODE2ZGY5YzZiNjdmZjY5ZGVlOGE0YTg5OGNkMGM2NjIxOGFhMmQ0YWQifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/contracts/extensions.md#L171-L194",
+          "version": "repo-lines-v1:sha256:9bb63d4825370a7e9d7fd0a8d9bfd10c7928d8155a224f886658b06fed0011c3:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc4YzE2NDY1YjJiNmRhYzRkNDljMTM0MDYyYTIwZmIwOTYyOThjYjRiNGU3NzIzMzYyNTEwYjIyNzZmYjdmZjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUzYmY5YTJmNWQ1YWQ1OTQ4MWQyZDg1NzJkNjkzNTIxMzNiNjUzMmE2ZTkwYjNkNDdjNjEzM2IyYjEwZDUyY2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRlZDA5ZDRiYjNmNTUwN2Q1MGNlODQ1MDgxYTgyNGUyOWNmZDkzYTVlZjNlMjc0MzE3ODMzZDMzMDc3NGY1MGEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e745d439d4514cd7aa246ecef98af49a",
+      "statement": "A package earns its own crate (linked only by the binary) if and only if it implements a channel adapter, memory provider, or carries a heavy isolated native dependency. Otherwise it is manifest and assets only; native tool logic lives in the shared ironclaw_extension_support crate, registered by manifest extension ID.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L69-L75",
+          "version": "repo-lines-v1:sha256:73ba47e63d0179a9d889dedda928478d616df38e48758b7cffa74cefd46d764b:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNTYxOGYzZWU5OTEzNTRhYjg2MDcwYTc4NjQzZTVhNDMxMDQ0NjY0YTEzNzNiMmM4NzYxZjI5MTZlMWIyNTMzZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzAwMTMxZmRiZGM5YzYxOGY0YjM3ZjYwOWM0MDYwZjQ1YzQzOTg4OWU0ODg0ZTA2MDdhZGI0Y2NlNTYyMTgyMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmFiYmFmNmY4NDIyZmY1MTZjMmYzYjc3ZmZiN2U3MTgxZDc5NTRlNDQ2Y2Q2YmNhZmFhZTg1ODYwYmVhOWI3NiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_c70d948a5d7c48c9b24bcd396410df95",
+      "statement": "The manifest is the single source of truth for what an extension declares. Capability surfaces are derived from the manifest at runtime, never stored as a parallel taxonomy. Production code never reparses raw TOML; the manifest compiles once per install into a resolved, digested ResolvedExtensionManifest record.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L27-L31",
+          "version": "repo-lines-v1:sha256:3075e18f14b793ab52d6499df75b0ad062379ae76a5f041a789e48e8df93e9f8:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzAzMGUzNGM3OWM5ODBiY2RmZTEwOTg2YzU1YmMwZGNkMGI3M2YwYjIyNTQ1YmY2YmVlMjRjNjVmZjc5NGU3YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTQ5NDI5YTliNzgyNzZlOWMwZThiZDY2MjhiYjhhNDZhMWEzMzI0ZWE2ODQ1ZDkyMGM4NmIwOTBiYzE4ZWVkYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzQzZTk1OTM5MmIyNjM2MDk3YjE0NzI2NGMzYjU5ZDJhY2ZkYmIyZjZmMDBmYzAxMGZkMDNlNGI0OGM1NmQ3NyJ9"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L337-L350",
+          "version": "repo-lines-v1:sha256:003c1f9e882e2aab84f6e1a74b35d3a60aec3640ff59da1947b7720a37e9a8a3:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwNjE5ODY3NzhkZGIxMzgzMDEyYjE0NzE2MjgxYzQzM2NkMzIyYzE1MmJkN2FlYTFhNjQ1M2RmMWQ3YzM5MTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1ZmIyYmJjZWZiMzE1MzkxZTBhY2FmMzU2OTJlYjI4OTdkOGRlZTQzMzI2MjM1Y2MzZDY3MzE0YzBjMDExMDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU3YWNhMDYwOWYwMWFiM2IwOWM4ZmQzNWRmYTVjNmI3ZGE4YmExYzQ1YzIwYmZhMGE2NmQ1M2M4NmU5YTE0MWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEzODBkYzYzNmNlYmJiOWIxNGU4NzE0YTI3NWVkOGNhZDkxMDQwZjczOTYzNTMzNjVhNWViMmZkNzUzNjJkZjgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1f240da21cd64a8b80e791786408683f",
+      "statement": "No generic crate, function, or module names a concrete vendor. Vendor-specific code and configuration data live exclusively in packages/ directories or ironclaw_extension_support::native_executors. This rule is enforced by architecture gates (reborn_extension_specificity.rs) that run on every commit.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L129-L133",
+          "version": "repo-lines-v1:sha256:62f666bdf9f764fa63dfc47387bf8a55b4c82db833296cea59cc44f1535b9431:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiN2FjODgwMDM1NDljZjkyMjA4Njc5ODQwYmYwZTAxMTQ2ZjNkMzkzZGYzNGVjYzg2NGVlOWQ5MzY5NjVhMGNiYSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNmE3ZDY2NTRkYTI1NTBhYjRlYWJiODUzZWY0YzM4Y2VkNzBjYjliZTc3ZjIxMzk0YWY0Mjc0OTQyZjNjNWQzNCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiN2U1ZjYwNDY2NzMyYmU5NjI2MDMzMTNhODk0Nzg3NjA0NzBkNmVhMTg3NGQ1MzkwY2FmZmYwODA4ZmU5ZDU4ZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTJmNDU4NDE3MjY2MGU1YzU1OGJiZTQwMDhiM2Y3OGQ5MGZkYmRhNzAxY2Y4ZGVhNTlkZWUyNTY1ZWZhNTZiZSJ9"
+        },
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L145-L156",
+          "version": "repo-lines-v1:sha256:57f356a9a6d1c76482d990227c9417f9ffc5e7889528a601ca9ca163ffef631d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM4ZWM4N2NlMmQ5YjNhMDJhMGE1ZjAzMmE0YTc5Yzk2ZTk2YjRlMzhjOTNkNzFkMDBkNjFjNTAxNGUxYjVhZGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBmMGFhNGU1ODBlYTQyMTcxMjdjMzBlOTM5MWIzOWMyODNkY2ZkZWU4NmRhOGNiOWJmNzVjYmU1NDkwNGRiZjgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVjY2QxNDE1NjdmODEyMDcxNmM2YTUxNmZjNDI5YmZiMzg3NDM3ZDZhNTI0OGFmOTJmMzQ2YTk5YTg0YTMyYjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhNzk5ZmI1NDI5OWFmZTA2MGNiNmM2YjE2YTBkNzdmZmZhYmQ1NGM4MzhkYzNjOWE2YjI4N2I5OTVjOGQ3YWYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7b2492052b564088b7c331c9f62896f9",
+      "statement": "The host's ingress router owns all verification: signature verification via declarative recipes, replay detection, bounded payload size enforcement, and rate limiting. The ChannelIngress adapter receives only VerifiedInbound payloads and never handles verification secrets.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L160-L180",
+          "version": "repo-lines-v1:sha256:5bc063e3ead9c0a21cfca7ae5cc3ca09be23dbc815caf57f07140a42090c8cd6:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjEwNmMwNTA1ODJkMGQ2ZDg3MThiYzIyYWNkYzE3ODJlOWMwMWY5ZDg1ZjVmMzFkNzk4Yjg3Yjk5NjZlOTllOWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE4YjU3YTAyYjQ3YzdjNzZjODJmMzFhMzQ4MmJmMGIxZjY5NTI5M2ZhNjk3YmMxODA3NjEwMTFhODNhYWU3OTUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L539-L561",
+          "version": "repo-lines-v1:sha256:b222d090ec819e337b96d6d4d9c0af058c6bcc31b471e60c5828adbfb397cd43:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5ZGVjYTdlOThiYzdlOTY1NDQxNzE0OWJmMDNjM2FiNzE5ODVkYTQ4MWIyZTQ3OGI4NWM4ODg1MTU5YTkyMjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM2MjM1NTM5ZjliZGM5NzhmMzJiNGMzOTk1ZDgwNmZjNTQzMTRjOTdlY2EzODM0MDQ2OGY4NWViMmQyODBiYzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlmY2Y1NGU2ZDlhODU0NDY4Y2Q5M2NjYWFiYmQwYjFlMWI4YTg5OGU1NTdkN2NkZGM3MDRkZDhmNjMxN2QzNzYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_3b261c755d614a51929efc09a44cc149",
+      "statement": "ToolAdapter has one method (invoke), ChannelIngress has one method (receive), ReplySink has one method (reconcile), ChannelDelivery has one method (deliver). Each adapter implements only the protocol translation needed; the host owns semantics, authorization, retry, persistence, and crash recovery.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L432-L462",
+          "version": "repo-lines-v1:sha256:a6d9616bb17ab34c69e7eeb5ed37bcf923a369b0139bfd222bfc07333472f6b5:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0YWY5NzNiNGE3OTFjMGY5ZmIxZDQ1MjMzNTY5Y2JjNWQ1M2RkMTFmYWI1MTgwOTdmOGJiZTU1NzU3OTliMWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlMTU3YmI1ZGY1MDNkZjU4ZjYzMDhjYTE5MDg3MzJlYmJmMTU5OTFkMmM5OWYxMmI4ZjZiY2MyYzAzNzFiMjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc3OTIyMWFhMjA1OTc4ZTdkY2UxY2QyZjFmYTE1M2RjOTMxMDhjNDJiYWRjNDI2ODNhZTEyMjQ1NjA1OTE4NzAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNjODA1MDQyNGQ1YmZjNjI2MzA2OTQ2Njg5ODRhZGRkOTNhNmFlZmZkNmU4NzU2MjNiZTIyYTUwOWM2NWVmZGEifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L486-L523",
+          "version": "repo-lines-v1:sha256:261a8901a6a1e4b975b8d6d7be7155c37f72bd263add8b03dd798ce991933eaf:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA4YTE4NTVjMjYxMzYxN2NiMTU2MzAzMTQ1OTY2NGU4ODJiNjI1ZmZiMmE5NGE0ZTljOWI0MmIwMjYzNzU4MzMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEzMDY0OWE2NWFkOGU3MDZlOWQ0NWFjOTUzOGY4YzI1N2EzOWIxM2Q4NGFjNzVkNWRlMzE5NjdmNTljNDFhM2IiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjczZDA1ZDRkOTE1YjVjYTNmY2M4MTUxMTk0NTNlZjg3NWU5ODc4NzA4NzUzYjZhN2EzZTFjY2NlZTk0YzhiMGQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_49d81c4023864dfba2e713714fb81ea9",
+      "statement": "Auth has no adapter trait. The host implements each auth method once (oauth2_code with PKCE, api_key). Vendors differ only in parameters (endpoints, scope names, response fields); the AuthEngine executes every recipe identically and no third-party code executes inside an auth flow.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L582-L625",
+          "version": "repo-lines-v1:sha256:d38279a0f5533ede8073b2e850d45a190722072ba47662233446cd7b13df0fc7:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0OTNjNTI4ZjJjN2FjZjEyMjY3ZDNlYjFjYjdhMjVjNTVmOWNiMDAzYWZmMGViY2I4NzI1YjFlMTg4ZGYzODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA0YzNhYTlmMTQwZGNhODlhNmE4MGZiMjkyNjYyZDQxMGE3ODNiYTY0MWM1NTJlNmJjYzc5Mjc2ZDIzNzdkZjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI3ZjVkNzYzYmNlNjNmNmUwZjUxZWJiMDk4YzYwZmUxNDcyNDg0NGUxNWI5MTIwMGQxYjRkYmJiOTViMzdmNDMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1767caa3c5284e79b239eedbefb8d5f6",
+      "statement": "Credentials are opaque handles inside adapters. The host injects credentials at egress time through RestrictedEgress; adapters never hold, inspect, or store credential bytes. Credential handles are paired with vendor IDs and resolved by the host.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L392-L395",
+          "version": "repo-lines-v1:sha256:e9d005963f2d9768d71d06a52e1f8dbb0d45ffc49d8390c49b0390997c3361d4:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiM2JkZTU2MThkZjYzNTMxNzczMTU5NzIyNDI5ZmM4MWZhZjM1MGYwNWI5YWIxOGEzNDcxZWNlOWU0YmI3MGNjMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOWEzODk0MThmZWU4ZTVkY2I2NThjNDEzYmU4MDEzZWMzMTc5YmM3YmI4MGU1OTI0M2I1MDdiZDQ3YTA2MTc4MiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODgwOTE4YWM2NDMwNzA0MDMwMDQzMjc4YWJiMTY3MDAxYzY4MzQzZmM1YTNhZGY3ZjgyYjYxNjk1MjliODRhZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOGQ0NzlmMTA3MmI2N2Q3MWY4YzFiNjBjYTAzNmY0MGE5OTRmYmEzNTE5N2ZlMjhmZGI5OTc5ZmRlMzNjM2RjMiJ9"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L694-L696",
+          "version": "repo-lines-v1:sha256:a3a5bcabacde4cbdc5e17e520067f7582b891200baee5fb7d7c73948cac4243a:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYWQwZjM5OGQzNjY5MTY4MjVlZDJhYjI1YTg5NThhMDBiMGM2YmQ3OTA1NmMzNDBjOTc4NTM0MmQ0YjQ5NjljYiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZjZiYzIwMDVkZTU1NDJlYTYwYmFlMDcyMDI0NDVkNWJjMjI3NDc0YWVkMzllMjA2ZDE4MzFiMjFiNDI2MDY4ZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOWRmYzQwNjczZTM3ZTM2MjcxMDM1OWIwYTYwMzlmYTVhYjhlYjNhMmFjNzI0ODU5MmM0MzM3YzhhZGUxNTdkZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTYzNzQyNjYzMGU4NDJjYjBlM2RhMGY3NmY5NjhjZGZkOGI5NjkyN2RjMzVkZDliNTVlMjBmZDU5Y2QzZDJlYiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_f2ae6842ed9c48b0aeea6780c6f93333",
+      "statement": "Installation is membership: joining the extension's membership set. There is no separate Activate action or activated toggle. Public state is: uninstalled (not member), setup_needed (member + missing requirements), or active (member + requirements satisfied). Membership + admin configuration + personal auth determine readiness.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L654-L676",
+          "version": "repo-lines-v1:sha256:31a5076b4ec9e573cb22b908bca431129658efcfc8fd61b1d78e5ed361bd50f8:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkZGY3M2EzMjEzNWNiZGRiOGY1ZjM1OWUxNjhjZjBkYzJiOTRhMGNlOGU1OTkwMDYzNWIzOGIxOTUxODFmNGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdkZTkwYWYyNGI2MzhlNTRjMWIzMmExMDU5NjY1MzI5YTNiODgyYzcwMjczNzhiYWNmYzk0MjM0YzdlNmU0Y2QiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNlMjBkOWRlYWY1NzQ4YTcwYzFkMTMxMjFhMWI1NTdhMDQ4MzViNjcxOWZmMGVhNzU0NmQ4ODM5Yjk3MTM5NjUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L879-L901",
+          "version": "repo-lines-v1:sha256:c06fce24902c1bf2e30646f8a83f90638e65e8bd949c57783d2dff48618a371c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUzZjNkNDNiM2Q1YjkzMzczZGJlNmYxZWE4MDg1ODhlYWFhNDM0MzMwNGU1NGI5OTM0M2M3NWZmOGJhZDMzZjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNkZmUwYjAyMGJmNjBlMTdmMmUzZTc4YWI0ZmI1Njk4MTBjOTE3YmYzNGQzNDlhM2Y4ZWMwNGQxMDQxZjU2NDMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIxZmZiYWEzMGVkOGIwNzcyMWViNzlmNGM1OThiYzVlYTU2Y2RkNWQyNjk2NjlhY2ViYWNmYmY5N2NjMzBiY2UifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a30037c7b7a94322bb61d266417ffcae",
+      "statement": "The delivery coordinator is the sole writer of delivery attempt state. It persists attempts as Prepared before any network call, then updates to Sending, Delivered, or Unknown. Adapters cannot mark attempts as sent; they return per-part reports only. This sole-writer rule ensures crash-safety: if the process dies mid-attempt, recovery finds it in Sending and reconciles safely.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L743-L823",
+          "version": "repo-lines-v1:sha256:91dd1de7b8294e0b374bbe653fe590cf3084df3ce3b62fa6b474e96d09399487:eyJzZWxlY3RlZExpbmVDb3VudCI6ODEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM2NjM1OTlmNjg2NTkyM2E5MWQ5MzRjZGMxNDMyOWU2MDgzNzY2NTcxNDk0YjE3YzJkNWFlYzhjODZiMTc3NTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1NWY5OTc2ODMwOGM2YTRjYzJkODFmZWUwMmU2YTA5YmUzZTc3ZTU2ZTM5MGE4YjIzOWUwYTk3Y2NlZTIxYjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE4Njg2YjY3OTgwMGEyMTdkODQwYTZmZjI4MDNmNWM5MWI5ZTFmN2Y0OGFmNTU4NmIyNDNmNjM4NzUzZmMxYTAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a02083f44ca741c0831b220812a8c8c5",
+      "statement": "Removal is a single host-owned operation with fixed order: (1) remove from membership, reject new work, drain in-flight; (2) delete only their grants and accounts, cancel pending auth; (3) if members remain, keep shared runtime; (4) when last member leaves, cleanup hooks then drop runtime row; (5) admin config persists. There is no removal-pending state; the operation either completes or fails loud.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L902-L927",
+          "version": "repo-lines-v1:sha256:a4178a517d7e316e5238acbfe35981ca762ddd1156ca69e3836c1d0776054d1e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA2YzQ4MTA0ZWI3NzU0N2Y5Yjc3MDJhYThkNDc4MWM5ZjE0ZGFmNzRiNzJiYThlZDUxMmI2NmZiNDI2NmFhZmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRlMTk1N2YxMjBiNTJlYWNiODcwMGI4OGZlYTk0NTFlZjk5ZDI2NzY0ODkzZmEzODUwOGIyOTQ5MDJhNzhkNTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIwZmFiNTgzYjRhMmFiYTNmYmQwNDUxZmNmNGYzYjBhNzNiY2MzOTJhYTgxYWZjNGY1MDJlMzI1MzM0OTEwMTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_63ea8ee0317b428f95f50b950fc05763",
+      "statement": "Committed WASM artifacts are built out-of-band (./scripts/build-wasm-extensions.sh --first-party). The wasm-src/ guest crates are excluded from the workspace build graph. CI verifies artifact freshness: each committed .wasm file is keyed to a digest of its wasm-src/ source tree, recorded in scripts/ci/wasm-src-digests.toml.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L79-L84",
+          "version": "repo-lines-v1:sha256:43b03cc11ea39c1c9f08c2d9cf1988e583480c04f0356bcdb9b019f4c9e4a6b5:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjE1NmUxYzJjOTM1YTg4YmIwM2EwMjliNWYwZDYyYjFjZjdmYWZkNjQ3Mzc2NzU0ZjA5YjYzYjE3MDM1M2Q1YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDMzZDY2Mjg0ZmUxMzIwMGQwNjliYjkzMTIyNGY1ZTM1MzYyNjQ2Mjg0ZThjMGFmMjRiOWU0YmM1ZGM4NWQwZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYmFiYmFmNmY4NDIyZmY1MTZjMmYzYjc3ZmZiN2U3MTgxZDc5NTRlNDQ2Y2Q2YmNhZmFhZTg1ODYwYmVhOWI3NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjBkYWQyNDE4ODcxNDkxYjBjYjZiNjYyMDE1NmE1MWYyMzRjODc3OGU4YjgxM2VjNzY2OTVkOGRlMzljMWFiMyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_f6a20efaf9a940fea13f6a0221bbcc17",
+      "statement": "The registry has four core responsibilities separated by crate: manifest schema + validation (ironclaw_extension_registry), generic hosting and lifecycle (ironclaw_extension_host), product-facing catalog and commands (ironclaw_extension_manager), and concrete vendor behavior (packages/).",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L32-L41",
+          "version": "repo-lines-v1:sha256:c61820a15d09c68448a89579dd9a0737edffeca8eb4217075bc2b4dfc6c46a5a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVlYTM0ZDI3ZjBiZDI1OGM5NDM5Zjk1NjY3YzRkODRiNGUxODZlMWE2NjUzZGYxZTdmNjQzNTJkODVhNjg5MDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ2YzRhMGRkYTUwMzE2ZmIzOWVlZGExZGYxMDQ3ZGI1Yjg5YjA0YTdjN2M3OGY5ODJiNmNmYzU1NDhkNTY1NGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQxNDc4NWRlMjBmMGNmYjRkMmZlZWEzNGQ3MjA5NDdjMTg0NzVhOGNjMTY3YjcwOWM3MDdkN2Q5N2UxM2MzOGQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_65e314c727fe4411a157f719980ba7dc",
+      "statement": "Hosted MCP servers declare discovery via [mcp] section instead of static [[tools]]. Discovery runs at readiness reconciliation and explicit refresh. The host validates every discovered tool against declared ceilings (namespace, count, schema size, effects), publishes them as ordinary tool surfaces, and orchestrates each server call with the connection credential injected. Past readiness reconciliation, there is no MCP in the dispatch path.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/extension-runtime/overview.md#L263-L320",
+          "version": "repo-lines-v1:sha256:3a47fc40bffa34b7638b5be204bc5828a3286ba6ba041f3481d1d587b49c5b9e:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI4ZGY4NTI4NmE3MzlmMTU3MDIwNzFjOTgxZGQxYTA1YzA4MWI4MzQ2YTg4N2JmMjA5MmI1NWViOTgyYTUwMDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZkOTdmM2RhMTg4NzU3ODc1MjI3NTEwYzM5YmJjYzllMTVhM2EzMjdiOTYyZjkzZjQxNDA1ZmE5OTYyZjAxNzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjViNzQ4NDVkZTJjYzZkZWRlM2VkYzFhNjE3MTM1MmQ4YjVlOTA0NGY3YzljODJhZDY5OTRlZGUxMTM5YmY3MjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_88aefbf5e9924020a79ea05da5477a8a",
+      "statement": "Installation records live in /system/extensions/.installations/v2/ with typed record kinds: installations/, memberships/, and credential-bindings/. The installation record is both the stable package-instance identity and the deployment's install pin, embedding the validated manifest wire. Membership and credential bindings are independently mutable records. Lifecycle state is derived, not stored: a record with removed_at is a tombstone.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/contracts/extensions.md#L53-L92",
+          "version": "repo-lines-v1:sha256:9844eec446fdfda6033aef302bcb00aaa90f26baab87420dc69bf8346db81b25:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhmN2ZhMTE3NzUzN2ExMTEwOGY3MDdkMmI3ZDQ4ZDg4MGYxYWU0ZGUyNDQxNTNiYmIyYmE0YzFmODhlYjgzN2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAzODA4MmZkMDllZDRiZmY0MGMwM2E0NmYyZmRhNDdjNjZkOThmYzk3MjEwODIwMzI3ODQxYWUyZWU1ODIxNjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNmMjZlMjM0NGIwZTc3Njk2ZjM1ODM1NTM4M2FkNjkwYTMyMzMyOTYyNzZlZmIyYWU0ODI2MWQxODNmOWVlYzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_246f97fb6a7a4aca95618a7a121cb15e",
+      "statement": "Data-only packages (github, gmail, google services, web-access) ship through the PACKAGES inventory in ironclaw_extension_support/src/packages/, embedding manifest and assets via include_str!/include_bytes!. They have no Cargo.toml or src/ directory of their own. One exception: nearai-mcp is deliberately not in PACKAGES because its [mcp].server is patched by the host from operator LLM-admin configuration.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L107-L114",
+          "version": "repo-lines-v1:sha256:fc79b89f7fade649f08297d7826ce25f7633179908e36d237da6409032f3683d:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYWVlOGZlMDQ0NjAyOTNlMmVlZGZjZGZhNzhmZDMwMmY1NmIzYzY3NzA4NDcyODU5MjE4ZTMxNWNjZWI2NmVjNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjRmZWU4YWMyNzFjYmU2MDAxODVhZThkZGIzNmVhZmIwNTNlMzM0MDBjZWU0ZDJlNGY1NGExNmFjNTg5ZjRiNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTAxMTYzYjM1NzZkMzg4ZjgzNTliMDNjOTYzZDYzZjBjMjg4OGNiYWJjYmNlNGI2MzE3ODg0MjE2NmQwMzk4OCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDc0YjdkN2NhYzRjNDQwOGZjOGEzNTEwNTliYzJlNGFmNjc0ODdmOGU4MjMyNDQ5YWQ2Y2E4YTI3OWVkZjlhNCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_eb7a3ab27db24197ba293e68ba2e7288",
+      "statement": "The bundled catalog includes 15 packages across tools, channels, and memory providers: Slack and Telegram as full channel+tools; web-app for push delivery; GitHub, Google suite (Gmail, Calendar, Docs, Drive, Sheets, Slides), NEAR AI, and Notion as tools; memory-native and mem0 as memory providers; and web-access as tools.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/AGENTS.md#L88-L106",
+          "version": "repo-lines-v1:sha256:9b2c438c9bf79233c701f1a9f70c0156deba6e10b600ef7613da65ef6bc6e534:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIwZGFkMjQxODg3MTQ5MWIwY2I2YjY2MjAxNTZhNTFmMjM0Yzg3NzhlOGI4MTNlYzc2Njk1ZDhkZTM5YzFhYjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRkZjFhYTMzYTRmNzRmNTg5YTNhMDY2YjgyZWYxMTc5NmNiN2JkZWZhYWIwMDgxZDQ3YjUxOTE5YTQ2ZGE2YWIifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

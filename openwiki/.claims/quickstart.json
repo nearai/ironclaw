@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:ec4f2eaa33a02ea4ae8b5e753f41630c2b7824bb34a67dab0da35c7fa9a087b2",
+  "claims": [
+    {
+      "id": "claim_ab735f20397d43fa9a7412810dfd7857",
+      "statement": "Reborn's architecture uses a four-layer model: Products (CLI, WebUI, Slack, Telegram), Userland (Agent loops), Kernel (Authorization and policy gates), and Substrate (Events, Filesystem, Memory). The kernel is the security perimeter; loops request effects and the kernel decides what is allowed.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_authorization/Cargo.toml",
+          "version": "repo-file-v1:sha256:4405818ab64fa6b1c8afa400233c1f6967053fe4a7cc6d5c12aae9c8142df4ca"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/Cargo.toml",
+          "version": "repo-file-v1:sha256:971f55a3bd3b12c56ea19a355d39aad35e2452382ca21bd018776070864d1254"
+        },
+        {
+          "resource": "repo://crates/loop/ironclaw_agent_loop/Cargo.toml",
+          "version": "repo-file-v1:sha256:87a32885210ddd76304028b740aeddc0776b58e76365f3f40f11544644aa20ca"
+        }
+      ]
+    },
+    {
+      "id": "claim_1ae40d9690df47ea9fcac28c0dc3bb78",
+      "statement": "The kernel security boundary is a nine-stage pipeline (Admission, Claimed execution, Trust ceiling, Authorization, Approval, Reservation, Policy planning, Membrane, Mediated execution) that every privileged effect must pass through. Each stage is owned by a separate crate with its own fail-closed invariant.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_approvals/Cargo.toml",
+          "version": "repo-file-v1:sha256:9a158dcb45535508158c9afbec8b2fe1ad870472bdf9e5cb6ef4e086543d42d2"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_authorization/Cargo.toml",
+          "version": "repo-file-v1:sha256:4405818ab64fa6b1c8afa400233c1f6967053fe4a7cc6d5c12aae9c8142df4ca"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/Cargo.toml",
+          "version": "repo-file-v1:sha256:971f55a3bd3b12c56ea19a355d39aad35e2452382ca21bd018776070864d1254"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_host_runtime/Cargo.toml",
+          "version": "repo-file-v1:sha256:96c348b5b3120d191e7fa7977f84fda874d3d7eef699cdfc3d90af1e30d7d8de"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_processes/Cargo.toml",
+          "version": "repo-file-v1:sha256:d12f75a3a2b71ae06aff8ff974d7c2ea1cde173cc7a4065db8d29c23bb26d26c"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_resources/Cargo.toml",
+          "version": "repo-file-v1:sha256:fee166509101fbc7a9b4618c9c09de2da8d0258a9c64c956eb26ca457cb2b357"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_runtime_policy/Cargo.toml",
+          "version": "repo-file-v1:sha256:4ba12e13bb636e0b037e18b499fad74ddf68873310e0237824e38788de09af78"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/Cargo.toml",
+          "version": "repo-file-v1:sha256:2fab7cf79dc5354f47d7acd3124ab4b691036b3cfa906258ef8c6b50646eb6ed"
+        }
+      ]
+    },
+    {
+      "id": "claim_98b09fa4b7a8405bb2acaa2f5940a78e",
+      "statement": "A user turn flows through the system from product submission (CLI/WebUI) through TurnCoordinator for admission, TurnRunner for lease and scheduling, AgentLoop for strategy execution, CapabilityHost for authorization, and Kernel gates for policy enforcement, finally executing in Substrate with durable event emission.",
+      "evidence": [
+        {
+          "resource": "repo://crates/kernel/ironclaw_capabilities/Cargo.toml",
+          "version": "repo-file-v1:sha256:971f55a3bd3b12c56ea19a355d39aad35e2452382ca21bd018776070864d1254"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_processes/Cargo.toml",
+          "version": "repo-file-v1:sha256:d12f75a3a2b71ae06aff8ff974d7c2ea1cde173cc7a4065db8d29c23bb26d26c"
+        },
+        {
+          "resource": "repo://crates/kernel/ironclaw_turns/Cargo.toml",
+          "version": "repo-file-v1:sha256:2fab7cf79dc5354f47d7acd3124ab4b691036b3cfa906258ef8c6b50646eb6ed"
+        },
+        {
+          "resource": "repo://crates/loop/ironclaw_agent_loop/Cargo.toml",
+          "version": "repo-file-v1:sha256:87a32885210ddd76304028b740aeddc0776b58e76365f3f40f11544644aa20ca"
+        }
+      ]
+    },
+    {
+      "id": "claim_12b8fc2faf844f21b96d471d720afa11",
+      "statement": "Extensions are the sole installable product objects that declare tool capabilities, channel integrations (Slack, Telegram, WebUI, CLI), auth integrations (OAuth2, API keys), and memory providers. The generic host handles installation, credential binding, and multi-user lifecycle without naming concrete vendors.",
+      "evidence": [
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_host/Cargo.toml",
+          "version": "repo-file-v1:sha256:f8e094f75e37406504c36455ccc015fcd8a7729b9593a740b9ac97e3a36a5cfb"
+        },
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_manager/Cargo.toml",
+          "version": "repo-file-v1:sha256:a5018f021eade3bef7d9b5e696d3dca2180b6be305e8110ce9f3dd8c25a057b8"
+        },
+        {
+          "resource": "repo://crates/extensions/ironclaw_extension_registry/Cargo.toml",
+          "version": "repo-file-v1:sha256:f878c71504faafcaf0813b49f24ca57488dbe558f842f955905058201f4aa7ac"
+        }
+      ]
+    },
+    {
+      "id": "claim_8c4fade851024b6b92c8ab9455b88f94",
+      "statement": "Every meaningful state transition in the system (turn accepted, run started, capability invoked, approval resolved) emits an immutable event appended to a durable append-only event log. Projections replay the event log to compute read models; the event log serves as the complete audit trail and enables deterministic replay.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/Cargo.toml",
+          "version": "repo-file-v1:sha256:24128d7f07d8b97f75e1104cdb383afb82bca93f42b252e8cf9a1cfc6bbc9ae4"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/Cargo.toml",
+          "version": "repo-file-v1:sha256:bbb749aa19f4e993d638bd5b149b2bc4494da8057ee4aa31d378159f868390b4"
+        }
+      ]
+    },
+    {
+      "id": "claim_866db7bb00b54a43b3dc1cd69451a4c5",
+      "statement": "Reborn consists of 68+ crates organized into 7 groups: Core Contracts (5 crates), Authority & Gates (9 crates), Capability Execution (11 crates), Durable State (9 crates), Products & Loops (27 crates), Storage Backends (8 crates), and Utilities (7 crates). Dependencies flow upward only: Substrate ← Kernel ← Userland ← Products.",
+      "evidence": [
+        {
+          "resource": "repo://Cargo.toml",
+          "version": "repo-file-v1:sha256:4a5d8c9717a53892aec7a768dae0d866a3656dbb7b039399326c858440ae5172"
+        }
+      ]
+    },
+    {
+      "id": "claim_1dcab0ff78e444759a4a20db8b962f53",
+      "statement": "IronClaw runs two parallel architectures: v1 (maintenance-only monolith in src/ with ~10k LOC) and Reborn (modern modular development target in crates/ with 68+ focused crates). New features must be built in Reborn, not v1.",
+      "evidence": [
+        {
+          "resource": "repo://README.md",
+          "version": "repo-file-v1:sha256:a36ba13918cf2653d7687b147f968790e6b34559b5c8ab05f5b7c61b7599b6e7"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

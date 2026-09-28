@@ -1,0 +1,276 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:1ca304785a9cec86d5018584343e4878554edbc8e5ba671c67d56688458ff055",
+  "claims": [
+    {
+      "id": "claim_83bc5c6ca1064cd8a19d81d6adacb35b",
+      "statement": "IronClaw uses a three-layer configuration model: Catalog (providers.json), Selection (config.toml), and Runtime (composition-resolved). Field precedence is compiled defaults < config.toml < environment variables < CLI flags.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/config_file.rs#L1-L34",
+          "version": "repo-lines-v1:sha256:1c20d3d73ec462204e07a167386ee3b05e988dd7cd3a6d57aa25174133ceef65:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI2NGFjNzI1OWQzZWZjM2M5NTBkZjk0NzA0NmU0MzJmMjMzOTdiZDc2NTZhYTNmYzI1NWIyZjc5MjQ4MjdjOWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxNTQzZjZjMTMyZDE3NzU1M2QyYjNkNmI3MTM5OTI5YjRjNGJjZjgwMDliMjIyZjM1Mjk4YzA1YTZkMGQzZjYifQ"
+        },
+        {
+          "resource": "repo://docker/reborn/config.toml",
+          "version": "repo-file-v1:sha256:93f57c7efb65f21d748763fc536f43939ae751052fa6488505e5636798d08d27"
+        }
+      ]
+    },
+    {
+      "id": "claim_b4bedf5569694c5ebd3f1da2c02768a2",
+      "statement": "Eight runtime profiles control deployment mode, storage backend, and resource limits: local-dev, local-dev-yolo, hosted-single-tenant, hosted-single-tenant-volume, hosted-single-tenant-volume-sandboxed, hosted-single-tenant-volume-sandboxed-railway, production, and migration-dry-run. Profiles are selected via IRONCLAW_REBORN_PROFILE environment variable, defaulting to local-dev.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_composition/src/deployment.rs#L90-L120",
+          "version": "repo-lines-v1:sha256:52d690d3752abf93c6775763e8888b320410924663677d366ca5b031cfefa7d8:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhNDliYTEyNDllYzRlMGU2N2YwMmNjNzZjYTY4ODAwNDBhOTMzYTE4NTBkNDNhMDdlYzk3NjI0NjJhZGZhMTYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIyYmYwMzdlODUzMzQxZDY5ZDJjYTRkODNjMDE3NDZkYTNlMDAwZTNmOTM1OWNlZWYzMmE4N2UwNjlhMjA4ZDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMwMWVjZmQ5Zjk0NjJiYzY4ZTEyMzc1MzEyMDY5ODNmZTNkOWU4NzU0ZWYyNjA2NzY4ZWQ4ZTgxMjQ1ZGMzMGQifQ"
+        },
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/profile.rs#L1-L100",
+          "version": "repo-lines-v1:sha256:a84ab4abbe722ccfaae5dea04a5aaf5f7dbf8584e5a07d4ae51616b9599e42da:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiYjM5YjU5NDYzMzI1YjgxOGMxMzNkNzgwZTc5M2Q1MTMyMmUzNjIyZjYwZWI4NWMwOTVmZjRkN2NhNDhjN2NmIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJlNDhmMTZiMDQ4NGJiMjM3OWU5M2E0YTczMDRiM2Y2Y2QyY2RhMDZjZjRmZWZkOThkNDNmYWYyY2ZjZWY0YzUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJiOTJhMjU1NmNmOGI5MmI4NWVjMGIxN2Y0YzVmZDU4NzQ5ZWM1N2I1MDNlMDE1NDdjZjhmN2U3ODMxYTUxYjUyIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_ee0e303fe52e42739f6def8a60e39e15",
+      "statement": "The production Dockerfile uses a five-stage build pipeline: node_toolchain (Node 22.23.1), railway_cli (Railway CLI binary), chef/planner/deps (cargo-chef dependency caching), builder (Rust compilation with --profile dist), and runtime (minimal Debian with SSH, PostgreSQL client, SQLite). The binary is compiled with dist profile using CARGO_PROFILE_DIST_PANIC=abort and CARGO_PROFILE_DIST_CODEGEN_UNITS=1.",
+      "evidence": [
+        {
+          "resource": "repo://Dockerfile#L1-L160",
+          "version": "repo-lines-v1:sha256:cc8e17ed9494df2434b32713024528502c62f6c5d73d1cb5a6d123b1cc0e9ab1:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI4MjVmM2JjYzA3YmZlNjk2YjdmNjI1MjY0ZTYxYzIwNzEzZTMwNDkwMTVhZTFmYzY0NmI0OTU1NTQ3N2IxMDllIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJiMTdlZDY2NTJjNzEzZmZmMWM2Y2NmOTI1ZmIyOThlMzcxYjk2NjMwOWJiZjcyZTNjYTU4NjgxYjhhOTkyZmQwIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MCwiZm9sbG93aW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_6c1549e3ce2842a99ba69d1cef56bd4f",
+      "statement": "The Docker entrypoint (/docker/reborn/entrypoint.sh) runs as root at container start, resolves IRONCLAW_REBORN_HOME, creates and chowns directories to uid 1000, installs default config.toml by profile, migrates legacy [llm.default] stubs and [slack] sections, optionally starts SSH on port 2222, then drops privilege with gosu and execs ironclaw serve.",
+      "evidence": [
+        {
+          "resource": "repo://Dockerfile#L154-L160",
+          "version": "repo-lines-v1:sha256:611eda5ff7544f3d1efd9cb70f823f12da6aea30e1407ea57aea0a5ef7acf362:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiY2E5ZDI3MjZjMGJmMDE2ZDRlYTY5ZDc0MGRjNzRkMDRhNDMyNDk1ZjViODE5NGRhNDQ5OTZjMDA5YzBkMTI3OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjE3ZWQ2NjUyYzcxM2ZmZjFjNmNjZjkyNWZiMjk4ZTM3MWI5NjYzMDliYmY3MmUzY2E1ODY4MWI4YTk5MmZkMCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDJkMzI1Mzg2MzU4MTNmYjQwYTExNzA2MWVlY2EzZjJhMzg3Y2FhZjA4MzZhYjExOWIyYmRhMzZmYTc5Yjc1NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://docker/reborn/entrypoint.sh#L1-L150",
+          "version": "repo-lines-v1:sha256:8d3366ae88ac2f64e53fc00424b6fe57bbeb941d9b7d408cf31f38fd3eeac45b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJhODA3NmQzZDI4ZDIxZTAyMDEyYjIwZWFmN2RiZjc1NDA5YTYyNzcxMzQ0MzkwMjVmMjgyZTM2OGUzMzA1YWJmIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJhMjBkYzllYjkxODZlZWRmODIzNGEwM2JkMWY1NmUzNDIyZDU4OTBmOGUxYmQ5YTBjYjY5NTk5OWZmOWM4NzI2IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIyMTYwYmNmZGVlZGZjZmQ1NTcwZjk2YzVmZWJkYmMzZTIyM2JlYzQ3ZDM5ODc3YmE5NDViNTAxMjQwM2IzMzEwIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_ed974bd18b2b431bbbc77b26a275efce",
+      "statement": "SSH on port 2222 is disabled by default in the Docker image. Setting IRONCLAW_REBORN_SSH_PUBLIC_KEY enables sshd; the public key becomes the sole authorized_keys entry. Username is 'agent' (uid 1000 alias of ironclaw runtime user), with public-key-only authentication and no password fallback. SSH sessions hold full runtime identity and can read/write everything ironclaw process owns.",
+      "evidence": [
+        {
+          "resource": "repo://docker/reborn/entrypoint.sh#L60-L127",
+          "version": "repo-lines-v1:sha256:46d9fdb40d1db5b781a21f57809ccf6ae8c3a57e282d786a9c2fd59e572bbde0:eyJzZWxlY3RlZExpbmVDb3VudCI6NjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3NzU3ZDI3ODI4NDAxZjNkMzRhNTdkNmY1MzQzMTJiNmQyYjgyNzM3NDlmMGI4N2MzYzE2ZjUyNGVlN2FkNmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyMWIwNTU5NWI1YzI1MmIzMjExMmY1ZTcxMjZmOTBjMGJlNmU3YjQ2YzBjYjk4NGNlZDVlNTg0OWIxMTEyZWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRjNWQ0MmNlNTgxNmEwYmU3ZDUyNmYwZWU0ODRjOWM2NDYwM2QxNjZmN2Y2YTYxZWM0ZDI1NGI3M2QxYTlkZGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFkMTVlNmQwNzhlY2QwMTliYjRiODcwNDU2NmZlMjAwMDQxYjM3NjA3YWVjM2Y1YzQyYTNhOGJlOWU1NjE0NTUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/deploy-reborn-cli-docker.md#L220-L244",
+          "version": "repo-lines-v1:sha256:71887d627feb4a614b4b44dda840f483e7a73749434eb413d949bccf9f11426a:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkNDA1N2I2NzQyYWE0MmEzYzExMDc2OTc0OGU2MzYyZjBhYmFiZjg4ZDk2MmViYjU3ZWQ3MTVkYzRkMTc5OGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIzNWI5NGVmODA2YWI5MzQ0YzA4OGM5MmEwODVkNDAwMjc0ZGUyZjZmMGRlYjNjNDIyMWFhNDBmNDUyOGU4ZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc3OTljZDI5ZTZjNTM2N2U1MGQ0ZjQ1YzJkNWExOWQ0YWZmOTEwZjcwMzI0YTVkZDU1OWM3Y2RmMDQ1NzlkMjgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_146bbcc49016457f9fe5e96e8676b43f",
+      "statement": "config.toml contains sections for boot (profile), identity (tenant/owner/agent), policy, drivers, runner (concurrency limits), skills, storage (backend selection), llm (provider per slot), webui (HTTP settings), google (OAuth IDs), budget (USD limits), trigger_poller, and memory (profile bindings). All secret values must be environment-only; inline secrets are rejected at parse time.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/config_file.rs#L54-L120",
+          "version": "repo-lines-v1:sha256:b43611b2918d08650c60a5fc0f536e3d81650b8ea3f00e1210c38c1cc60ecc4b:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkyZGZmZTQ4M2RmNGI3MWU2NTg2ZWFiNWI5YmNkZTU2NGY3M2UyNGFkMjRiODRmOWYxNmNhMzUwNmQxYWI5ODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBiYzM0YTVmYzQyNGMyZTk3MDdiZjZhZTc0YjcyMmIyZjA1ZjcyNmZlODU5YzY1NWE2YTNkZjNlMjRmODI2MzIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY2ZDA3OWJmZmE5NTg5YjVjNDYzYjExOGE1M2M0NDZlN2NkNjg3YTdhYzE0Y2UxYzEzZWIzZDJkOTcyYjUxMzgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVmMTk3NzgyZTMwNjk2NjkwMDVkN2EzMzk0OTA2ZTVmNWUxMjJmZTMzMzU2ODE0MDY3MzY1ZDI1MmExY2RkNmIifQ"
+        },
+        {
+          "resource": "repo://docker/reborn/config.toml",
+          "version": "repo-file-v1:sha256:93f57c7efb65f21d748763fc536f43939ae751052fa6488505e5636798d08d27"
+        }
+      ]
+    },
+    {
+      "id": "claim_ae8a8823324e4cf2a93759291868e143",
+      "statement": "IronClaw boot uses environment variables: IRONCLAW_REBORN_HOME (state root), IRONCLAW_REBORN_PROFILE (deployment profile), IRONCLAW_REBORN_WORKSPACE_ROOT (project root). These override compiled defaults and control where config.toml and libSQL data are stored.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/home.rs#L1-L100",
+          "version": "repo-lines-v1:sha256:34b80bb748d6572a67aeaefaa208dfaff65968f9a9d0bcd81a57b88c704d9a2e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIxMWE2ZjlkOTk2MDRhNjJhMGYxNWE3YzZlZTJiOTg4OTBjNzliYWM0NGU3YzZkMWQ3ZmJmY2FjMmMzNTQxOTdkIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIwMWJhNDcxOWM4MGI2ZmU5MTFiMDkxYTdjMDUxMjRiNjRlZWVjZTk2NGUwOWMwNThlZjhmOTgwNWRhY2E1NDZiIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJhNjRhMzQ2NDlkMGNmMGMyN2JkYjIyYmI2NjczYjRkYWI3NzA3ZDM4ODMzNGE2MzQ3OGMxODkxNjMwODQ1M2E1In0"
+        },
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/profile.rs#L1-L50",
+          "version": "repo-lines-v1:sha256:1e964b5f82aa313402c1c2b31528e082c7c3bf317ffb235b1274a35d7510c3c2:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiMzliNTk0NjMzMjViODE4YzEzM2Q3ODBlNzkzZDUxMzIyZTM2MjJmNjBlYjg1YzA5NWZmNGQ3Y2E0OGM3Y2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVlZTUzYjZiM2JhZGUwODMyM2M4Y2VhYmRmMWUwOWYxZGY2YzRjYTE2YjgzNTQ4MWUxYmY1ZTU0NDM0YjE2NzgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_bd022a6bb8b04919be721d87aeccbb45",
+      "statement": "WebUI authentication requires IRONCLAW_REBORN_WEBUI_TOKEN (32+ hex bytes) and IRONCLAW_REBORN_WEBUI_USER_ID. Both are required; ironclaw serve exits if either is missing. These control HTTP bearer authentication and user context for WebUI requests.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_cli/src/webui_token.rs#L1-L50",
+          "version": "repo-lines-v1:sha256:0360ca4a881304c9966eb420825e5636e0fefedffffe88582baeca5fd7edba6e:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhMzc0ZjA3NDBlODlhNGNiMmI5Zjg5NDVmODc2MzQzOGM1ZmEwOWRiOGVlZGQ4Y2M0Y2I2ZGQ4ZGIzYmYwYzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyNzU0NGE1MjVkNDVmNjNlOGViNGYxMmQwMjcxNzRhMWY0ZjdhMDNmZTliMjkyNjAyY2QwMTQxYjRiOTEyMzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY5Yjc4NGFkNmEwYjg1YWU0ZTUyYmNmZTYwMGM2NjJlZjRkMDY2OGFlZDNmNzg4NzNhODAxMjRkOTM0ODVhNWQifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/deploy-reborn-cli-docker.md#L36-L45",
+          "version": "repo-lines-v1:sha256:9d0701491646be7924f565af8e5b6f7cd961207b3c40a3e45f0b9bb66e0aa521:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg1ZDQwYzFjZGFiZGQ1OWRhZDYzOTlkNTlmY2JiZDFjZjAyNTIyYTQ0NGZhY2Q5NGFiZWI3MDUzMTY3NDRmOTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI5YWM5YjU0ODE1YzQzM2QyZGEyMjlkODA5NmE2Zjc2NjI3OTM4NzUxNjBhZDA3M2YxYWVhOWZlNDQxMGYwYmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdiZmZiNmJkMzQyNTQ1MmIwODRhN2Y2Y2VmNDNiZTcxMTkyMjA5Yjc2NzdlOGM5MGEwZWI1NDQzZTI0MWI0MTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ5MTA1ZDMzMTM3N2M5NzQzMzI0ZTI2NTkyOTBmZGVmNmEwNjExZThkYTc4ZDFhM2ZlMGU5MWQ3YWJmZDQ1MzUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1eb85c62b7da4a1b960ba6efd7374efb",
+      "statement": "LLM configuration uses named slots (default, mission) with per-slot selection: provider_id, model, api_key_env. The catalog (providers.json) lists all available providers. If no [llm.default] is configured, env-var fallback (NEARAI_API_KEY, OPENAI_API_KEY, etc.) drives runtime resolution. No implicit slot is shipped in bundled configs.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/config_file.rs#L78-L84",
+          "version": "repo-lines-v1:sha256:5ff5189eb023bc46ac6c0ba238c557d3829deab15e84505c8b73b9f4b4c4db56:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzBiYzM0MTlmNWFmNTgxODY0YmYwYTUyMWI4ZDhlMzY5Njc0OTk2MzI3ZDkxMGQyYzY3NjJiMGZkYTZjMWRmMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYWU5ODVkOTEyZDUzNzEyZGVmOTBmNmQ5NjlmMTA2MDg5MTc4N2YwNzFkZWI1YjEzNjJkY2MzYzQyYWI3NjU1OSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDY1OTUzMjIxNjY2MzY0ODllZmNlYzkwYTZiZDMzZTI3ZGQ2MTYwNTQ3ZDEyY2UxMWE1M2RmNjliMDkwZTRkYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzg4YjFlMjMzNGI3ZGYxODNiMTAyYWI4MzJiODU5OTgwNWUwMWQ2MjhkMzI5NmM2Yjg5NjczZTc5MmVhMzJkMCJ9"
+        },
+        {
+          "resource": "repo://docker/reborn/config.toml#L30-L34",
+          "version": "repo-lines-v1:sha256:b2ce777c8175b1de396aa271b1e4409f26ebec481c40b3bf9035a12213a68633:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZGY5YWJlYzczMWE1NDNhMWQ3Y2RmNzRlZWM2YWQ3OGZkMTljN2FiOTAyZDdkYWFmMWM3NjA2Mjc5OGY3N2ZjNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODk1MjIxYzI2Yzg4NGY4YmVkOTkzMjVhYTJkYzU5MTk0M2JlNzk2OGViNjQ3OTI4OGNmNjQ4MTAzZjNkNDdkNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzE3NDI1ZWY1NzE2ZTkzYjlkNmFhODZjM2E4MGM5MWIyNTg4N2EwYWUxNzc4N2YwZjNiZWI0MGM2MzMyODk4MCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://docker/reborn/entrypoint.sh#L182-L244",
+          "version": "repo-lines-v1:sha256:6c5512c7c9fdfcc2789de2d717f34d3be848862dffa2730c4fa5f548dc2a6e3e:eyJzZWxlY3RlZExpbmVDb3VudCI6NjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFhMzg2OThkNjQ4YjQwYWYyMzhmNDc1MTQyNzFlOTYzNWI5NDliOWJkMzE4YTljNmVhYWJkYjQ2Y2VmNWQxZDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3NjlkMjM3Y2Q0MjBiOWQzOGI5ODFhMGE0ZjY3NzAxOTBhNGE4M2RjYTFmZTU2YzRmNWJhMWUyY2JjMGVmNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYxZDdhNzFkZDA1ZGI1NGY1MzI1MTA0NTUzMzAxYTcwOWI3NDZkNTVjYTg4NTQ2NzY0MWYzMDRiOGMyM2JkOWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ4YzM0ZjNkMWM0MTVhZDI2MzkzNjJiZWIxN2NiMzY3OTg4YWRkNTY1ZGIwZDBlMDhmYTVjN2Y1ZDUyNzlhODgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e8fb95cf9ef243479ffb7dc42d1e3cb9",
+      "statement": "Budget configuration has three layers: compiled defaults (5 USD/day/user, 2 USD/day/project, etc.), [budget] section in config.toml, and environment variables (IRONCLAW_BUDGET_* family). Setting any USD field to 0 disables that limit. The composition root promotes string/f64 values into typed BudgetPeriod/BudgetThresholds.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/budget.rs#L1-L80",
+          "version": "repo-lines-v1:sha256:f77def70f9023d7cb9771956fae7310d6227a8ba35d328a2b10e7847f7dbbc5f:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY1YTI4MjZmMjZhMzY3ZGUwNGYxNjdmOGUxZGRjMmE5ZDM0ZjU2NGZmNWQ2ZWU4ODViNzllOGRmYTYwZDIxNDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzZTBjMWFiMzM0MjM3ZGJhNDQ1Mjg5M2QzMTM5Nzc4MDVlNGZjY2ZkNTkzNmE1MDBjM2RiZTFhOWQ3Y2E3ZTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFhNTBjNjdjOTY5NzI5OWZhMzFkYWIwZWZiNTlhYTFhOTM2Yzk0YjEyN2ViMGNkMzM2MTc2MTk5M2UyZGNhZjkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ad82c608c81447aa9bb977eaa16f0edc",
+      "statement": "Secrets are environment-only by policy. Raw secret-shaped values (hex strings ≥32 chars, base64, known patterns) pasted into config.toml are rejected at parse time by reject_inline_secret. The [google] section contains public client IDs only; client secrets must be environment variables.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/config_file.rs#L19-L34",
+          "version": "repo-lines-v1:sha256:3c2e60d55ff270790ba7207edc026fa1d137f82d479e0c057264ed0351006c6f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYwNjU3MzdlMDcxZjlmYmNkZjU0YjhhZDM4ZTY2ZTRiNmYxZjlmYTFjMDFlZDZhZjlkOTY2NGQyMjJhOTY0MDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE2YzkxZmFiNjJhNTFkZjRkNGJiZjZiYzAyMzQyNTkxNTY2MmI4ZDM1OTQ2NWE4MzNkMmE2ZDc3MDg0Mjg5YzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxNTQzZjZjMTMyZDE3NzU1M2QyYjNkNmI3MTM5OTI5YjRjNGJjZjgwMDliMjIyZjM1Mjk4YzA1YTZkMGQzZjYifQ"
+        },
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/secrets_guard.rs#L1-L50",
+          "version": "repo-lines-v1:sha256:fc60796f86d3bdc9808d0de8d4bdf3790224b9405cdffbe7dc0fe906c461d311:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFlMjM3OGYzZTdhMjRiYzk1YzExMDYwN2YzNjE1Yjg0YjUyNjgwYTY1ZGI4YWI1OTM0NTJiY2Q3ODA4Njc1NTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhlNjJiMDZkMDQ2OGNmYmRiMDkxOTNlYjhiYzUzNDA3ZDY4ZjA2ODM4N2I2ZWJmODA3Zjg2MDAwMGJhOWY2NmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ4ZmY5MmM3MDRkNTgxZDU4ZjJlZTM0MWFlYzBhYzlkZGYzNTljZjFmNjVlZTI3NjY0MjI1YTI0OGE1ZGUwZmQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_83951cb95ec04f62a67cecc7700a7552",
+      "statement": "Retired config.toml sections ([slack], [telegram]) parse without error, emitting deprecation notices. Presence of setup keys (signing_secret_env, bot_token_env, installation_id, etc.) fails boot closed with migration guidance. The entrypoint auto-migrates the old-shipped [slack] enabled=false stub.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_config/src/retired_sections.rs#L1-L80",
+          "version": "repo-lines-v1:sha256:52d05703af14c86b5eee500973c5e86d7317629a8b8b09e69bfe85cbb35a802a:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4Mjk2NGVkNmJjZDNiYTIxNGYzYWI2OGUyYzUzY2U1YzJkYjU0NjYwYmMyZWMyMzhjYmRkYWM0Yzg3YzFjMDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxYTY3ZmVhMWU3N2IyYTNjYWRlMWIzNmIxOWYyMjExYTgzNjJjYmNlNzUzMWEwNGRkYjg4MDMzYjdkMGJjNmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFkYjM3ZTRjZjNmOTg0YjQzYjQwOGY0MWYxZWZkZjMyYmZiMGNkZDMwNTRmZmJjYzdlZDU0ZThmODE1YmM2MmIifQ"
+        },
+        {
+          "resource": "repo://docker/reborn/entrypoint.sh#L246-L289",
+          "version": "repo-lines-v1:sha256:860a8ffbea914a9bfcfb5904e3424961ac70a8133ad536002d095225aff9eb8b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNlNjU3M2UzMmI3Y2U1Nzg4ZDZkZmNmZGE2YmQ2MzQyMDY2ZjAzYTcwOGJiYTkyYTlhZjdjZjc2NTRlOTkwZjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3NjlkMjM3Y2Q0MjBiOWQzOGI5ODFhMGE0ZjY3NzAxOTBhNGE4M2RjYTFmZTU2YzRmNWJhMWUyY2JjMGVmNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQxM2JhOWZiMzg0Yjg4NDFjNmU1OTAzZGExYThmMmY3OGYwOWVhZjczNDNjMDU3NmFmMzE1N2Y1MTg2MDlhZmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNlYjY5OGZmMjNjNDJlYmM0YmQzODdmNDBjNGJmMWZiYzZhOWFjMzFiMjc2MjM1Y2RlN2YwNjI2MDE4YjVmNWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_590e324fe2ca4608be33f1dbc4267ca2",
+      "statement": "On first boot, if config.toml is missing, the entrypoint selects a default config by profile (from /opt/ironclaw/reborn/config*.toml), copies it into $IRONCLAW_REBORN_HOME/config.toml, and preserves it on subsequent boots. Custom configs can be mounted at /opt/ironclaw/ and selected via IRONCLAW_REBORN_DEFAULT_CONFIG.",
+      "evidence": [
+        {
+          "resource": "repo://docker/reborn/entrypoint.sh#L134-L180",
+          "version": "repo-lines-v1:sha256:28c16fb52f8eb8eb3ffe1a26dfd4a7a74d62f49b05e51eb3bba2e80fb8335449:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjYTI2NWZmYWIwMzljOTIxMDQ2ZTFhNjgyNjcwNWE3Nzg1NTI1MjY3NzVlNDIyN2E3NWM2ZWRiN2JiZjM1NzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3NjlkMjM3Y2Q0MjBiOWQzOGI5ODFhMGE0ZjY3NzAxOTBhNGE4M2RjYTFmZTU2YzRmNWJhMWUyY2JjMGVmNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMxY2UxYWExMTY5NWQ5YjUxNTcwZGExNWYyMzlkNzBkMmY1Y2FkNThhNzg1MGQyYThkYTljZWQ1ODYxZDQ4MzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImViYTdkNWI3MjZkZDA3MTdhZDNiYjlmYzg0ZjQ0NTIzMWE3MTJlZmY0NjFkNWQwZTc2ZDY1MTU1NWMzNTA3OGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_313e91493d9248c89ef6b96a53450da7",
+      "statement": "The PostgreSQL backend uses a connection pool sized by IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE. For managed Postgres providers with low session-pool caps, setting this to 1 or 2 prevents exhaustion. Migration connection timeout is controlled by IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS (default 5 minutes).",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/deploy-reborn-cli-docker.md#L138-L148",
+          "version": "repo-lines-v1:sha256:5f4d4fed498da403f9be7d368f7076b48c79936aa4f6e6bcadb4069f2ff09b41:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzMjlhZTcxYzk4NGEwNjBhZWJhNmFlYzJhZjZmYTk3N2RiYWUwYmI3ZjU5NWQ4YjA4N2EzMjUxM2Y5NTVkMzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2NmM0ZjRjMjJkMGZjNDIwNmU5NDRkZTY1Y2I4OTQyN2Q3NmRlMDYwM2I0NDk5YjBmOTcxODViYTRkNWNjNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1NDA1NmM1MGNjMmM0OGI3ZmQ0ZDhiZmVlMGY5N2EzZTdhZDI3MGQxOTZmZmNhY2ZiNGQ1YmUyOTYyYTdjOGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMwYjQ5NmE4NThlYjdiY2UwNDA3MWI4YjgzZDlkYTIxMGFlOWFkNTg0NDNmZDhlNWRhZDUzOGU0NjA4ODRmN2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9141f4553dc841fb8b4fbcbebc1389dd",
+      "statement": "Railway deployments set IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 (Railway NAT), IRONCLAW_REBORN_PROFILE to hosted-single-tenant or hosted-single-tenant-volume, and either IRONCLAW_REBORN_POSTGRES_URL or a mounted volume. The container exposes /api/health for Railway healthchecks; the WebUI listener starts before database assembly completes, allowing graceful drains.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/deploy-reborn-cli-docker.md#L75-L126",
+          "version": "repo-lines-v1:sha256:8069a100eb0ec99302de8253e585afb46236d4f12182f64bce1a5396c033d745:eyJzZWxlY3RlZExpbmVDb3VudCI6NTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIwOTdlNGM3YmQ1MTA2NTk2ODE4ZTNkMzczNzk3MjMzMGQ4M2NhN2UxMDdkMDFlMjg4ZmJkZTFkY2NhMDFkOWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ3YzA2YzU2MWQ1YzMyNzM0MzY4NTI2OGE0NmIzMzkxZjM5OThlZWU4OTBkMmJlNTFmMGQyMWNjNGE1M2FlNmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzNWUwNjY2MjZmYjViZDAxODlhYzVjZjFjYjcxNWQ5NmZlYzZjYzQ3Njg0OGMxYzIxMWU1ZDcxZTQxMjEwM2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNlY2UxZGEwZjczNjJiZDUwMTkyNmJhMTcwYzA5ZjQ1YmIxOWFkMGQ4NjU1YTE1OTkwYWM3ZDQ2MDc2Zjg5YWEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_df7b6f97761e471da0c714ecb49f6263",
+      "statement": "The ironclaw CLI binary is a single monolithic package that includes all concrete extension packages (Slack, Telegram, web-app), first-party capabilities (Google, memory-native), WebUI, and composition runtime. There are no separate service binaries; the binary is the sole entrypoint. Dependencies are pinned in crates/app/ironclaw_cli/Cargo.toml and validated by architecture tests.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_cli/Cargo.toml#L26-L76",
+          "version": "repo-lines-v1:sha256:b21c66744587fc048558b45a5e98f45b8f48c0de0faf01a511350d4a9fd11423:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI2ZjZjMWM3M2U0Njg1YjZmNTU3OTJhZTUzOTI1NTNmZjc5ZDNjYzA2N2IwYjc0ZTA2ODY5OGY2YjJjNzZiODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcxNjU3YTI5NjJkMTAwMmU1MjczMTM4YTZlMDA3YmU2ZjdiZWExZWNjNTJmOWY3ZjZmYjQwZTYzMmE0ZmU3ZjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1ZTM5ZGYwMTRmZmViODYyNTMzYmI0Njk5M2U5MWRjZWUyNjk4NjkxMjY2NzRkYjcxNDcxYjJmMTI4ZGY5MDAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJlMmQwYTc5NzhjNTUzNGY4MmNjYTI1NDliNmQyZTk3ODVmNzk5YjRmM2VjNDU0ZjA3NjFmOTNkN2E0YTM2YTMifQ"
+        },
+        {
+          "resource": "repo://crates/app/ironclaw_cli/README.md#L1-L45",
+          "version": "repo-lines-v1:sha256:6aa0c58508a6e3560e48558acb42744be3af9c7557a436251746bd9e7d6e030d:eyJzZWxlY3RlZExpbmVDb3VudCI6NDUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEwNGM2MmFkN2NhZGY0NTE5ODUyYWM1YWZiNGJhMzJjOTcyNDA5ODhkOGE5MDY1ZjQzMWYyMTNiYjhjNjU0MmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFjNmI1NTIzMzc0N2ZhNmRlNGQzZmJkNzkyNmE2MDBmMjQxNzNmNGU4OTI0MGI2N2FmZWFlMGE0ODZmOTgxYTkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ4OTlmZTc4NDU1ZjA1YjdiZTU0M2EzOGFlYjRjMzcwYmZlMmYzYmFmMmExYmQ5OGEyZjlhZThhYTEyMWJjOGQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e16ae22fb780463ca5003f5831b7c0f6",
+      "statement": "The composition root (crates/app/ironclaw_composition) is the sole assembly entry point. build_reborn_runtime() assembles the full runtime stack based on deployment profile, storage backend, and host bindings. Composition is service-shaped (never owns domain logic) and checked for readiness fail-closed on production/migration-dry-run profiles.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_composition/README.md#L1-L50",
+          "version": "repo-lines-v1:sha256:c0569233b0906bd6d7c7b7c77711a2d6560b8ca0bca18bfaf0efce089c67567f:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ5YWExMmUxMjQ0ZDQzN2NiNzMxNjIyMDM5ZDc4YWQ1YWZlOTlhNDQxMThkOTdkMWFjM2JiNDFiNTBhNDUyMDEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ1OTdiZmQ5YWNhZWMzZDg1MDI0MDEwMTI0OTc1OWMwNmUxNWMxNGZjY2VkNWJkZGViNzViNjQ5Njc0OTBlOTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjljZjkyNjM4MDJjODM4YTAyM2NiNDkwOWEyMDcyM2JhZjhkMDE0ZWY3YTY5NzczMTMyN2U3MTNjYjFkZDU5NjUifQ"
+        },
+        {
+          "resource": "repo://crates/app/ironclaw_composition/src/lib.rs#L1-L50",
+          "version": "repo-lines-v1:sha256:104adf7bf30ad36846e43e989de94f3153f0e14799622c0524eab46f0ed0511f:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxZDc4NDMyNjNiYjRiNjE1MDJiN2FlOWQ5MmFjN2IxMjFiOGQ3MGU0ZjE0MjFhZmQ3MTliZmZjNWU4OThmNTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE3YzlmNTU5NGJlMWIxN2RlNjQ1MjUwNDNiYjg4NTc1YjY3NmMwNmRjZGU1ZGU5MTYzYTg4MjZlNTlkNTQ1ZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU5ZDJkMDdkMWU3MDhiY2RhODQxOWYzNjJkNjkwNzc4MDIzNmVmZDZkZDBhOGY3NzhlYzc0OTg2ZWY1Yjc3MTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_02a855bfc3a042e7b5eae15258eb79f2",
+      "statement": "The DeploymentConfig struct controls sandbox type (None/Docker/Railway Sandbox), storage backend (libSQL/PostgreSQL), policy profile (Standalone/HostedSingleTenant/Production), and traffic policy (Enabled/Disabled/HealthcheckOnly). These are policy data, not behavior; the runtime policy resolver (ironclaw_runtime_policy) is the only producer of EffectiveRuntimePolicy.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_composition/src/deployment.rs#L1-L100",
+          "version": "repo-lines-v1:sha256:15b98912a2f6a1951edce1fcec162b6b53d67b5117dc5d716571b69b3883013c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIwYzRjNWQ2ZTBiNmUzMDFiNWQ2MWI1MjA3ZmMxMDQ4OTRkODVmZDAzYjBmOTY5ZjI1MThiOTQ5YjA5MzdlYjJhIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI2ZWE1MGUzMTNiOWViNjIxOGRiMmRkNTQwZDUzZTQyOTViZjYyNzdhYTc0NDBkMTUyM2Q1NDRhMzIyNDkwZGNmIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5MGM2YzAwOWFjYjlmNWQ5YWRkZmI5NjQ3Y2E2OGI4ZDA0NzUwMmQ3OTc2Mzc1NzYyMzZiMzFjYmM3NjE2MWM4In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_cc3c7b4ce68c40aab37abc3236ee54e6",
+      "statement": "Slack webhooks are compiled unconditionally into the image and answer 503 temporarily_unavailable until the extension's signing secret is registered in WebUI /extensions. There is no IRONCLAW_REBORN_SLACK_ENABLED variable (no reader exists) and no [slack] section should be added to config.toml. Legacy [slack] sections must be deleted or the entrypoint must migrate them.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/deploy-reborn-cli-docker.md#L245-L295",
+          "version": "repo-lines-v1:sha256:303d9b1a64171ac00bd98c30420361800f13946475064543a4a634092b928163:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjNGQyYjNlM2NkMTA1YTk0NWRjYmNmMjVlOGIxZmE5MmY0ZThlMGE3ZGQyNjdlOGVhNTExODIzMGYwYjk1ZjkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMyMjNkNTE0ZjNiY2ZlMWI2MzJiYmU4YWRiZDc0MTkwNzBjN2YyYWQ2ZDE1ZTg0ODk3MWFmYTc4OGM5YjNlY2MiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU5YzAwZmIzZTZhMTM3MDQ4ODk4OTIwNGM4ZjMwZWU3MDM3OGU5NzhiNTZiMzlkZTA4ODI2ZGZmYjEyZGQ4MzAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7e958a6e28134ae99414c6bab57802a2",
+      "statement": "The ironclaw binary is compiled with optional features: memory-mem0 (third-party mem0 provider), test-support (loopback OAuth for hermetic tests). Without memory-mem0, mem0 bindings fail closed. Release builds fail closed if test-support seam environment variables are present.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_cli/Cargo.toml#L26-L41",
+          "version": "repo-lines-v1:sha256:1e6dae849d54ff6260784a82548c4d2510f03dd67d84bb677b6812117da2221a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI2ZjZjMWM3M2U0Njg1YjZmNTU3OTJhZTUzOTI1NTNmZjc5ZDNjYzA2N2IwYjc0ZTA2ODY5OGY2YjJjNzZiODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5NDE2ZTA5Zjc4YmEzMTZjMDMyNTY4MjEzYjg1NWVlNzU2ZTQxNTY1ZDkxOGYwOTUxOWM4MWZkNjIwZjQwNjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1ZTM5ZGYwMTRmZmViODYyNTMzYmI0Njk5M2U5MWRjZWUyNjk4NjkxMjY2NzRkYjcxNDcxYjJmMTI4ZGY5MDAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjViOThhZGVhNTEwNTljYTM5NDljYzRiZWEyN2E2Y2Q0YTEyMTc0MTZiYmMyMjZlY2U0MzYxNmRiYmQ5NTc4OWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_66f0694bfdd54599bf8876f3a494db72",
+      "statement": "ironclaw serve command starts by assembling the deployment, instantiating the product surface (runtime, LLM gateway, turn coordinator), binding the WebUI listener, and spawning turn-runner workers. On hosted-single-tenant profiles, the HTTP listener starts before database assembly completes, returning 503 for non-health routes until the router is ready.",
+      "evidence": [
+        {
+          "resource": "repo://crates/app/ironclaw_cli/README.md#L25-L35",
+          "version": "repo-lines-v1:sha256:b5cf3da42236d25eb86317dffdd61dd155f0ac236448e83b4a1037c73c95d0c1:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE0ZTQxMzViMDY0NTkwNmQwMTc2ZmM0Mjg1ZGEzOWQwNmZmNWI3NDY3NTQ4MGI1NjU3YjhkZmVmY2U3YTAzNjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNiM2Y4NzQ4NzQzY2UzZDhmNmU3NDkyN2RmNTA4ZDQ4MjMyNWRiNjVhZTdmNjZmN2QyY2U2OGY3YWI5NWQ0NDIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIzMmZlOTIzMDkzNDliZTUzZjQ3YjAzMjVhODg3YjYzZDNjOTk1Y2ZhYzExOTczY2IyYzJiZGRhYjE3ZTEwZWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZlMmIyODBlNzkyMzcxMzI2OTRiNjM4NWE4YmFmMTY5MzAzZDY2ZDk4ZjZmYjFhZDdlYTZjMjdjZjgzOGI0Y2EifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/deploy-reborn-cli-docker.md#L140-L149",
+          "version": "repo-lines-v1:sha256:4fa22276c18c313fe49ab22793d23ee56431324c1c87bec3a653b6db321d26af:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjYmQyMjdhMzQzZjcwNWNhYmE0MmM5OWQyMzAzOGNmNThiNTkwNDNmMTY2MTUxNmU3MjgzNDIzYmU1YWJhZDEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE0MjA3ZTcyMjM0ODhkZGJiZGNkNWMzOTAwNzRlZDA0NjUzMzg4MTgxZGVlZDg4YWI1MWFmMzQ2MGI1OTQ5NWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcwYzcxNzI1MWVmOGI4Nzc1MzIwYzMwNTRjNDYyNTk4YTNhZjQxYWRjZDNhNjg1MjVkYTE4NTQwZGZiZTBlMjcifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

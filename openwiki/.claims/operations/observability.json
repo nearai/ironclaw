@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:7a424de38f0cadeb14498f14aa286a9d9fd96eb67f8a2a6227c6265ff2fb7c23",
+  "claims": [
+    {
+      "id": "claim_435342138fbf4df0ab1b119ba10c8a47",
+      "statement": "Reborn records every turn submission, system run, tool invocation, and side effect as an immutable event in a durable append-log, providing a complete audit trail for debugging, compliance, and deterministic testing.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/README.md",
+          "version": "repo-file-v1:sha256:8a986209c3e2d6dabe327ec95b70ac70f6d3c166c2f623f8fda20c478f976517"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/lib.rs#L1-L38",
+          "version": "repo-lines-v1:sha256:8a0da185bfad8aff3bc66f86d0d4d05f900708487eb751280ac7f1eace6bdb24:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlNGY4YmE0Mjc0MjRmNmViOTM0OWIyZjUzZjY2ZDA1ZmI4ZWNmNjFjMGZiMTk4Y2U0Y2IyOGQ1ZTQwY2M2MmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlYThiMDhhYzA1NjExZGY2MWIzZDM1OGI4YTdjYzk5YzdjOWQ1NzFmZDM5YjUzNmM5NjhmYzIyYmFiNmRiYWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYxNmEwYjFjYjA1NWM5MDY0YjM1YTZiMGY1Yzc0OGNiMGYxMDJlYTBhOGVlOTRiMzRhYzYwYTQ0NWVhMDI2MzkifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/harness/observability.md#L36-L49",
+          "version": "repo-lines-v1:sha256:50c70699be319e64d27d5b93617f64d76452c96c031eb06b8749f3d11849f2a2:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwMThkN2Y2ZWUxOTQ5OTI3MTAxZmRlNDM3NjllOTRmOTI3YTQ4NzA4ZDc4Y2Q2MmQzMmE2YzdjMDVlOGY4OTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRjOTlhYzk1YzllMGU0ZjNiMGIyMDhhZTNmNjhmNDU3ZDlhNDQyNzEzOTE0MzQ5OGI5YTdiOGJjY2QxNTZiZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM0ZGVjMmQyY2ZjZmM4MmQ3NzgzMzFlZTlhODhjZWI5OGFkNjBiMDQ4MTNlYmQ5ZGM0MmVkMjM2YTlkYWQxNWEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7684616476864b7d96eea3f3674a38d4",
+      "statement": "RuntimeEvent is the redacted event vocabulary; constructors and serde hooks enforce sanitization at construction and on every wire crossing so raw secrets, tokens, paths, and error details never leak into logs or durable storage.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/runtime_event.rs#L180-L226",
+          "version": "repo-lines-v1:sha256:1efb857376940a4fe1a5a758eca6a7e24bf0e46b49c7911b20e51b1421a6c9ae:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZiZmY4NzY2Yzg5NjIzMWRmYmYyZTJmZmRmYWJhYzUzZDNlYWZkMzA2YzgyMjI1ZDNlMWY3YjIyOTBiM2Y0NTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1OTk4M2U4YmQwMDNlZjQ3YjY4NmY2ODM2MmM4YzgxOTJhZGFhYmI1MGY3ZDI2Yjc4ZjZhYTdjZmQ3MDZiMzAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdjOGNiODIzYjY4NmQ1ODAwZTFiZGRjYzg4NWE2ZDdhNmUzYTc3Y2Y0MzY0ZGQ1ZGEzOTM2ZThhOTlkYTUxYTAifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/runtime_event.rs#L30-L87",
+          "version": "repo-lines-v1:sha256:64a457e490e0cad749bd37491b7e4f2618bcef3395f14651f5f7fcae348c2eda:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkYTdmNjUyYWM0YzVkMzQ3Mzg0NDY3NjBlODllZDY1ZDk2OTRlN2MxYWJhYzk1MDQ4ODU4NzAzYmUxNzE1MDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMzYzM3MTlmNDMzNzljYWZkZDRmNGI3OWQ5ZDUxMDM5OTViMjA0MDYyZTZhMzMzNjM0OTMwMjAwMmIxN2M1OGYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA2YTAzZWE3OWI0ZWMzYmNkMTA4YTRiZWM5N2JmNjNhYTg3YjA0MTBiOWM0YzE2OGUzYmU1YTJlZDNiMjIyZWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJiYWZiMDhjNWQ3YjQ4ZTY2MzVmODYxZjYzODU4OGM4NTU1NDBmMGU0NGQ5ODNiNDFmMTRjN2YyZDNlZWQwODEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6b448ab484654ecebe0afb72e0b78c5e",
+      "statement": "EventSink and AuditSink are best-effort traits; sink failures must never alter runtime or control-plane outcomes; only explicit-error DurableEventLog and DurableAuditLog traits allow append failures to propagate to callers.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/README.md#L54-L59",
+          "version": "repo-lines-v1:sha256:d6bf444d57392bd9a2f6dd1b82d9292cbc5ff5793a7ef2a9ed5c31e0e319f1f9:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGEwNzllMWY3YzNiYzMzNTZlODE4ODllNWQwYjdmMjE4YmM2ZjBhNDk1MjlkYTE5NjgzYzI1NTVlMjYxNDlhMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzhmZDE2MmM2ODhkYzg2NDU1ODIzOGIzNWNmNmJhMTU5MzliZTM3ZWM1YzIyNzM3ODA1ODc3ZjRmNDc2Zjk1NSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZDVkZDYxMzIwMTg2ODU4YTk0ZWVhNjc4OWE2NmVjYzA1MDFiN2Q3OTc4Mzk5NjliMDY2ZmNkYzFhZTMwNDY2NyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjBhMGUzMDAyM2I0NzM3ZmE4MGZiY2ZlOWE2NDgwMTNiZmZhMGZjMDAxNTE5ODNkODhhNGM3YWY1MGJmZTgwNSJ9"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/sink.rs#L10-L56",
+          "version": "repo-lines-v1:sha256:181a8a209cc5a2b4dcdb579ce4b4c1458f22f1bc05493907459a5a1a4b4d428a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjllZGVmZWJmMDQ5Y2U1ZWRmMjhmZDJhZTNjZmRjMmYyMDBjZjhlOWY5OWY4ZTYyMmQyMDM0OWQxMGJjYzQzOWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjliMjdlMTE5ZGVhZTBlZDUwNGJmMzdjOTcyYjlkMDg0YjRmODM5NzgwZDUxYTY4M2M5ODBmYTBiNzNmZWI4MTQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQzYzVhYmU1NzUzMGFkMzdiZmUyNjY1ZmU5NDdmYzY4MjAyMTI4OGE3ODZjODJlZTQ0ZTFhNjhmMTY5ZWU0MmYifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/sink.rs#L61-L107",
+          "version": "repo-lines-v1:sha256:1c17bfa0fbbc5ecb86637d3c37257239f991fee5cbfe9a0e13de6bd16ed4bb4e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQwYjNmOGU4ZmQzOTBkMWI0ZGRmYTVhM2Q0OTE1YTRlOTIzOWU0NmFjOTUwZTNkZmVmNGU3NmMzYTRhMTU4YWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjliZTZiNmM0N2NjNDc3MDgwNGQ5MjI1MGM5OTI4MDBkNWQ0NDRiMjRjNWI1MmQ5NjYwMjg0M2U0ZDE0MGMzMWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVhNjUwNzI0NzQ0MGU3ODI3MGRmYjM5NDJiNWUyY2Y3NTU1NTVmZWQzM2VkZjRhZmIyYmY1MzEyMTcwNmY2MDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdjNzJjOGVkYTg1MTNkNjQ4MGNhZjc4ZjRkMDBkZDE4MDM1ZTY0YzZmOTIzNDRjMjM3NDIyMjUyY2I4ZWUyYjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4faafafa1b464ce99bbbddbf49fe06d6",
+      "statement": "Every durable event and audit record carries correlation fields (tenant_id, user_id, project_id, thread_id, run_id, invocation_id, capability_id, etc.) so operators and agents can reconstruct the full trace of a user's turn through all its side effects.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/runtime_event.rs#L93-L135",
+          "version": "repo-lines-v1:sha256:037690cac76eccad7461f080fdfc386c047f5b275da26b01a6f5c3ae79ae4b0a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkZDhhMDdkZmI2MTk2NDU2OTllZDBiZjljOGNjNjFiMjViZGU2NzA5ODg1NzE0YWUwMGVkY2UwNDIzNzUxZWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQxYTE5NzRlYWIzNjExOTgxMWViMjc0MjljMzkzNTU2ODgxZWI4OTQ4MjJhNzI5MzQ3ZGRjOGZhOGIyMjQzMjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkyYTZlMmE5NDg1MWI5ZmYxNGIwYzg0ZWFmOTMxOGRjYzAyMmU0ODg0ZTJmM2M3YmM2OGQ4MWFmOGM5Y2MxODMifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/harness/observability.md#L15-L34",
+          "version": "repo-lines-v1:sha256:8190d4054b692509c71f51a93dd202b45a9278db884fe93e34622dfbea72e1c7:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3OWIwYTBlY2VmZDQzZGJiNmQ3NDRiNmI2MjdlYTljYzg4MDBkYTMxMjQwN2I2OTA0ZDY0ZWI1ZDEwZjg4YzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ3YzA2YzU2MWQ1YzMyNzM0MzY4NTI2OGE0NmIzMzkxZjM5OThlZWU4OTBkMmJlNTFmMGQyMWNjNGE1M2FlNmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ2NzRjYTI0MzM2Yjg4Yjc1NTQzOGIzMTAzZjI4NzA2YzFiYjkzZTVkMzNmOGQwZmZkN2ZiYjQ1ZDZmNjJiYTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBmNWYwOTUzMjU5NzAyMDU1YzRkMTJlNTRhZjJjZTBiODNmOTIxYzM2YTAyZmU1MTE2NDAwODhjZWFkMzVmYzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_52a07f0f8f7a444f95d8822060359634",
+      "statement": "Event projections (ironclaw_event_projections) are metadata-only read models replayed from durable events; they provide scoped, typed views of what happened to a turn or thread (ThreadTimeline, RunStatusProjection, CapabilityActivityProjection) without writing and without exposing raw inputs, outputs, or secrets.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/README.md",
+          "version": "repo-file-v1:sha256:4d8a9e3ae492b6b4e06def203f90e7ef70ee6d24212ccd0d2b32a4eb3c3cac13"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/src/lib.rs#L1-L96",
+          "version": "repo-lines-v1:sha256:c6ca2ca07d9732db84c3b6244358a5662f742178f174f8725f18e6412b2bdbc3:eyJzZWxlY3RlZExpbmVDb3VudCI6OTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY4ZTcxYTBmMjBhZjIzYzEwMjc4NjQwZTgwMzc2YjdjODQ1Nzc4ZWFlYzk1YTY3N2ViZmZlOGVlMjNlODE4NDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMyYmRiYmZkZDhiYmU4MGE5MGJjMmNmMjA1MTVjYmNkMGJhODZmYjRmNDY4NWJlZjgxMDI3ZGQxOGUzODFmNjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_61eef6a1de7044598f539ede243d01b4",
+      "statement": "Event projections use scope-bound cursors; a cursor returned for one thread must not be replayed under another thread's scope without scope-matching; scope mismatches are detected and return ProjectionError::RebaseRequired so consumers know to re-snapshot rather than silently lose data.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/src/lib.rs#L98-L139",
+          "version": "repo-lines-v1:sha256:e1dabf93c71cdbb18405f2a08308d3b98a8c41eaadbc787cd3d6a80ba3a5a331:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxOWJlMjA4YjQ3MmNmMDM2NzUzMTNjMmFiODFjNWVjODA1M2JkZmQwYmFhODkzOGY1YzE2MjhhOGJmYmUzOTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVkZDJjYzY1ZTVlMmVjMmQ3MDJjZDU3ODdhYzlkMTM5YzI3MjYyNDI5MzhhOWRjOWZiOGE0Mjk0YjkzMTAxNmUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_bffee5385337422892d987132bdd3e42",
+      "statement": "RUST_LOG environment variable controls Reborn logging; syntax is comma-separated [target]=[level] filters (trace, debug, info, warn, error) with earlier patterns overriding later ones; ironclaw_latency=trace enables zero-cost-when-off latency macros.",
+      "evidence": [
+        {
+          "resource": "repo://crates/substrates/ironclaw_observability/src/lib.rs#L1-L40",
+          "version": "repo-lines-v1:sha256:4a2abe53c4975df10737ac9ca09849be6d19684ab3e97bd66875f79c26f2d871:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwMjhlZTk1ZGUwOWI3OGNkNDM1OGJiMmZjMWUxYWFhNDI4NDVmOTFlNmUzZWY2MDBmZmViMjJjNGM4N2NmNGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzMGVmZTMyZjdjYzA2N2Q3ZmNhMWQ0ZGNiYjdhMmM0ZmI1MjViNThiYWM3YzI5MDYyM2VmYmUxNzA0NGJkMTMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_34b522d1d30c44c489af584bd9b65591",
+      "statement": "ironclaw_observability provides live_latency_trace!, live_latency_trace_ok!, and live_latency_trace_error! macros that cost zero instructions when the ironclaw_latency target is disabled; the macros measure operation latency in milliseconds for performance observability.",
+      "evidence": [
+        {
+          "resource": "repo://crates/substrates/ironclaw_observability/README.md",
+          "version": "repo-file-v1:sha256:ce17784eb0348089381853126c5ef7f24cf27947722f54cc21f2579f73503ddc"
+        },
+        {
+          "resource": "repo://crates/substrates/ironclaw_observability/src/lib.rs#L15-L72",
+          "version": "repo-lines-v1:sha256:3c017a1607b62c761726613075ece45985687326c6062b6511c30ebbe29990bf:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlZmM2MWExZTYzZmY3OTdhODFhNTAzYzkxZjE2N2ExNzlkM2UzYzBhZTkxYmU3MTk2NzhlMTAxNjI3MzBiNzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY0YjdiMzU4NWI5NDViZWJkZjhmNTVjZDY4MDA5OGJjNGQ5ZmNhMjMzMmY1NDhmZjhjYzA4MzRhZTc0MzM4NGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiYzk4ZDZiMGRjNDkyYzUwMTZkZjEwODA1YTNhNTRlYjljMTg0YTVhNjEzN2U3ZjRiZWNmYTBjMjIwNTUwZDAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_366dd86889454ba4882daca43230f8bc",
+      "statement": "Durable event backends include in-memory (tests), JSONL (single-node dev), PostgreSQL (production), and libSQL (embedded); production must never silently fall back to in-memory; backend selection fails closed if the configured backend is unavailable.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/harness/observability.md#L118-L126",
+          "version": "repo-lines-v1:sha256:292aff6f859c0599e66c4433389fbc5bf3cadc8f970a82c27e693b15fbed4f28:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOWM4MDg3Zjc4ZjlmZjQyZjc2ZGNjODU3ZmNiMDRhYjU5YjMzZmM4MzdhMjYzMWRmMTQxNDFhNzg5MGExNDg2OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYmFmYzQ2ODc5MzhhOGJhMzZkZTA3ZDdlMmUyZDY5NTIwNzIxOGM0OTY3NGQ0NTI0MTYyYmFhNGVkY2NlZmM3NyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjQ1NTljNjBkYmQ0MzI0OWU0YjM5Y2VlYmMwNWU0YjhjMmM4YjUwMWE0NGZjY2VhYTg1NDM0ZTM2ZTA5ZDMxMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_8f102882f2df4c3b8574f32ec42748d9",
+      "statement": "LLM trace fixtures (tests/fixtures/llm_traces/*.json) script LLM behavior for deterministic E2E testing; the TraceLlm provider replays recorded responses in order, enabling full agent-loop testing without calling a real model; each scenario has a JSON driver (what the LLM would say) and a snapshot (what the agent actually did).",
+      "evidence": [
+        {
+          "resource": "repo://tests/fixtures/llm_traces/README.md#L1-L26",
+          "version": "repo-lines-v1:sha256:54998ea9e712a7994e2f920b6c66eef498eba8170a1fc8d24ab8eee79c9adee4:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRiOGNkNTgwMTJiODZjNDE1M2RhODRlODExMDk2ZWY5ZGNkMDcxZjU3MDExNjMwZjVjN2RlMDMxNjU0OTA4ZGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMwMTE5Yjg0ZmI3ZGM5ZTE5MDJhZDIxZWE5M2U2MGMzOTU2NzZjMGIyNmJmZmNkOTIyNzM3MGZlMWU4ZmViOGUifQ"
+        },
+        {
+          "resource": "repo://tests/fixtures/llm_traces/README.md#L41-L145",
+          "version": "repo-lines-v1:sha256:08909978b6118bef2e30dcfc81d0a1271eab8b1cd80f812f89757bb18639a595:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA1LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJmZjE4OGI0ZjAyOTBjNTM0YzI0MjNhNDc4NWM1ODI2MDY2OGNkNjJkODY3NGFhMzlhZjYxN2FkM2VhMjk2ZmUwIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI2OWM4Y2YwYTEwNGMzMWY3YjZjNzA0MGQ1YjdlZGYzYzhkNmZlMzg2ZTEzZmMwNGZkZWU4MzUxOTIxYmFmYmZmIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJiNzYyNjY4OWI5MWY5NWIwMzFiZWIxMmVmZTc5NjFkZjYyMWNkN2MxMjk3NWY1NzUzZmFiNjRkMjU2NjNiOWExIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJkODYwOTBiNmI3Mjk4NGRkZmU1MmRhMWI3MDUzNGZjMDYwNDM0N2JkMGE3YjVkYWFkNTVmYTk3ZjY1NThjMjJmIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_55cb04b1f147447dacd1b4d9fb5ff784",
+      "statement": "Runtime event kinds are closed vocabulary covering turn lifecycle (LoopCompleted, LoopFailed), capability activity (CapabilityActivityRequested, CapabilityActivitySucceeded), dispatch (DispatchSucceeded, DispatchFailed), model calls, background processes, hooks, and recovery; error_kind and other classified fields are constrained to closed-vocabulary labels for pattern matching.",
+      "evidence": [
+        {
+          "resource": "repo://crates/events/ironclaw_event_log/src/runtime_event.rs#L40-L70",
+          "version": "repo-lines-v1:sha256:07241892f7a57ecf583429ca4acb38d43f60051b5b39c9facc9444acbbbc632d:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyYzAwNmQ3MDI2OWFmMDI0ZTc5MjdjYWY4ZTczMzAwY2IzNDMzN2QxNWFiZmNkMmZmNDcyOTYzM2QxMzgyYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYwNDk2YjQxMzQzYzBjZTUzYjBkMzNlZDEyNTc3ZGY1M2I3YjNhMzQ0OTc2MWI0ZjczOTEzZmZhZTAyZmQwYzcifQ"
+        },
+        {
+          "resource": "repo://crates/events/ironclaw_event_projections/src/lib.rs#L173-L200",
+          "version": "repo-lines-v1:sha256:048a9ae0f1a72e06cf16a84d5d22988baa0e080c37d8281ff1ce3ac126e9f3e9:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3YzE4Nzk4OTAzNDUzYzYwYTUxN2Y0M2JhYTRlOTNmZGMzYTBmMWQ0ZGQ4N2FhMjNlYjY3MDA5NzNkMTM0MzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUxMDY4MDhiNzhkMTliM2FhMmNlZjdiNzZkNWVlM2IxZGM4YWFlZTE1MThjMWI1MzlkZjQxMTNmYTQxZDZmZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUwOTM5ZjdlODVmODFmNzQwOTdkNGE4YzJmYWNiOWNjYWY3YTUzNGU1OWZjZTdkMDU4ZWQxZTk1M2Y5MDRhMjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVjZTQ2YmNjMjc3Y2Q5N2QzY2Q2OTYzZGY1MGVjN2JkMGJlYjMwYjhmNzdiMGIxNmE2ZTQ1MjBmOWM2MGI1YzQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_01aeeb7d19c84f4195153a68ddc50ee0",
+      "statement": "A planned doctor command will collect a redacted debug bundle (config, logs, events, audit, process tree, failed invocations, screenshots, replay command) in .pi/reborn-dev/artifacts/reborn-debug/<timestamp>/ so an agent can diagnose failures without access to live systems.",
+      "evidence": [
+        {
+          "resource": "repo://docs/internal/reborn/harness/local-dev.md#L80-L100",
+          "version": "repo-lines-v1:sha256:9992c8d09c749d143db69d460a511e894871c9b706f52cfdb0ee50725195d17f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFjMzU3MDFhYTg5ZTUxNzU5ZGEwNjMyODNjOTM4M2FmN2ZiYWFlOTc4M2Q0MjZmNmM5ODc1ZmNmZWQzNzk3YjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVhMGFhYzgwODg5MWU3MzY5ZWEyMDg4YTU2NDNhMWQwNTA0ZGNhOTM1MGYyNTM3YmU0NGEyZTgzZTQ3M2U4YWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFhZjY0Y2RlOThhODVkNzYyYzkyZDhiOWVjZmU1YzMyZjlmNzBjMTZlYzJjOWRkNjY1ODUyMDM0MTE0N2IwOTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI5MTg1ODdlNzU1MjA1MjhiODNmMGI3NDNmMWFhOWJmMThmYTJkZjM5YjQ4MWRlOWEyNjAyZjYyYzk3YjVlZGUifQ"
+        },
+        {
+          "resource": "repo://docs/internal/reborn/harness/observability.md#L84-L105",
+          "version": "repo-lines-v1:sha256:d171a5d539fa9041e9a121fa3489e9057819ef95393b40f159497241b3030081:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhNDMzZDVhY2Y5YmVlY2IwODIyYjgyMjExODc2NzRkOWZmMjY0OThmMzRlY2JkN2VjZmEyNTQzZGUxMTc3ZTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ3YzA2YzU2MWQ1YzMyNzM0MzY4NTI2OGE0NmIzMzkxZjM5OThlZWU4OTBkMmJlNTFmMGQyMWNjNGE1M2FlNmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUxNzhmNjBkNWFkM2ZmZDljM2EyMGM3OTZhMDhjNmFjNmMyMjZiNGFhMzAwYjJhYjFkMDZkMDRlNjgxNjJjNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIyYzVmOTg0NzgyMTVjMDQwZGRmOWM3MjkzZmRmODAwOGNhMDZiNjA1ZGNhYjdlMDBjMmJlNzY2MmNlMDBlODIifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.0",
+    "at": "2026-09-28T08:16:43.565Z"
+  }
+}

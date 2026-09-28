@@ -1,3 +1,10 @@
+---
+type: "Reference"
+title: "Development Setup"
+openwiki_generated: true
+generated: { by: "openwiki/0.6.0", at: "2026-09-28T08:16:43.565Z" }
+---
+
 # Development Setup
 
 This page covers setting up your local development environment for IronClaw.
@@ -406,6 +413,7 @@ chmod +x scripts/dev-setup.sh
 ## Next Steps
 
 - **Run tests:** `cargo test --lib` (should pass)
+<!-- openwiki: broken internal link [/AGENTS.md#repo-wide-coding-rules] heading anchor "repo-wide-coding-rules" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
 - **Review code style:** Read [AGENTS.md](/AGENTS.md#repo-wide-coding-rules)
 - **Set up your IDE:** Follow IDE-specific instructions above
 - **Configure your editor:** Enable clippy and fmt on save
