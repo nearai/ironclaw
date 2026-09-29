@@ -245,10 +245,11 @@ jobs:
           docker system prune -af || true
           df -h /
 
-      - name: Install Rust
+      - name: Install pinned Rust for branch coverage
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly-2026-08-01
+          toolchain: nightly-2025-11-01
           components: llvm-tools-preview
           mold: true
           # Nightly crate attributes this lane compiles with. They live here,
@@ -256,6 +257,13 @@ jobs:
           # re-applied to every step and would shadow the composite's
           # $GITHUB_ENV write — silently dropping the mold linker flags.
           extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
+
+      - name: Install Rust for regular crate tests
+        if: needs.changes.outputs.run_coverage != 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: 1.98.0
+          mold: true
 
       - name: Resolve bucket settings
         id: bucket-settings
@@ -694,9 +702,10 @@ jobs:
         run: docker pull postgres:16-alpine
 
       - name: Install Rust
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly-2026-08-01
+          toolchain: nightly-2025-11-01
           components: llvm-tools-preview
           mold: true
           # Nightly crate attributes this lane compiles with. They live here,
@@ -704,6 +713,13 @@ jobs:
           # re-applied to every step and would shadow the composite's
           # $GITHUB_ENV write — silently dropping the mold linker flags.
           extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
+
+      - name: Install Rust for regular integration tests
+        if: needs.changes.outputs.run_coverage != 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: 1.98.0
+          mold: true
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm

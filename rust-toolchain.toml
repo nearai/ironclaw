@@ -6,7 +6,7 @@
 #   .github/actions/setup-rust, whose `toolchain` input defaults to the same
 #   version as `channel` below (kept in sync by
 #   scripts/ci/ws12_workflow_contracts.py); a lane that intentionally runs a
-#   different toolchain (the nightly-2026-08-01 coverage lanes) passes
+#   different toolchain (the two nightly-2025-11-01 coverage lanes) passes
 #   an explicit `toolchain:` input, and the composite exports
 #   RUSTUP_TOOLCHAIN naming exactly what it installed either way, so this
 #   file can never silently override a job's chosen toolchain.
