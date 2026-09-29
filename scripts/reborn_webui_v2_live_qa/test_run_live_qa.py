@@ -2504,6 +2504,193 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ["assistant_baseline:1", "submit", "assistant_baseline:2", "submit"],
         )
 
+    def _drive_scripted_follow_ups(
+        self,
+        *,
+        follow_ups: list[run_live_qa.ScriptedFollowUp],
+        fail_on_wait: int | None = None,
+    ) -> tuple[run_live_qa.ProbeResult, list[str], list[dict[str, object]]]:
+        events: list[str] = []
+        waits: list[dict[str, object]] = []
+        assistant_counts = iter(range(10))
+
+        class FakeComposer:
+            async def fill(self, text):
+                events.append(f"fill:{text}")
+
+            async def press(self, _key):
+                events.append("submit")
+
+        class FakeUserMessages:
+            @property
+            def last(self):
+                return self
+
+        class FakeDismiss:
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class FakeErrors:
+            async def count(self):
+                return 0
+
+        class FakeAssistantMessages:
+            async def count(self):
+                return next(assistant_counts)
+
+        class FakePage:
+            async def goto(self, _url, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                if selector == "[aria-label='Dismiss connect action']":
+                    return FakeDismiss()
+                if selector == "[data-testid='chat-composer']":
+                    return FakeComposer()
+                if selector == "[data-testid='msg-user']":
+                    return FakeUserMessages()
+                if selector == "[data-testid='msg-error']":
+                    return FakeErrors()
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantMessages()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        class FakeExpectation:
+            async def to_be_visible(self, **_kwargs):
+                return None
+
+            async def to_contain_text(self, _text, **_kwargs):
+                return None
+
+        async def fake_with_page(_output_dir, _case_name, action):
+            await action(FakePage())
+
+        async def fake_wait(_page, **kwargs):
+            waits.append(kwargs)
+            if fail_on_wait is not None and len(waits) == fail_on_wait:
+                raise AssertionError("marker missing")
+            text = f"reply {len(waits)} {kwargs['marker']}"
+            return run_live_qa.AssistantReplyWaitResult(
+                text_excerpt=text,
+                full_text=text,
+                semantic_judge_used=False,
+                semantic_judge_reason="literal_required_text_matched",
+                final_reply_wait_ms=len(waits),
+                final_reply_reason="final_reply_observed",
+            )
+
+        async def on_turn_complete(turn):
+            events.append(f"turn_complete:{turn}")
+
+        playwright_module = types.ModuleType("playwright")
+        playwright_async_api = types.ModuleType("playwright.async_api")
+        playwright_async_api.expect = lambda _locator: FakeExpectation()
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "playwright": playwright_module,
+                    "playwright.async_api": playwright_async_api,
+                },
+            ),
+            patch.object(run_live_qa, "_with_page", new=fake_with_page),
+            patch.object(run_live_qa, "_wait_for_assistant_reply", new=fake_wait),
+        ):
+            result = asyncio.run(
+                run_live_qa._live_chat_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_scripted_follow_ups",
+                    prompt="List the GitHub issues.",
+                    marker="DONE_T1",
+                    required_text=["DONE_T1"],
+                    scripted_follow_ups=follow_ups,
+                    on_turn_complete=on_turn_complete,
+                )
+            )
+        return result, events, waits
+
+    def test_live_chat_case_sends_scripted_follow_ups_in_the_same_conversation(self):
+        follow_up = run_live_qa.ScriptedFollowUp(
+            prompt="Now create a calendar event.",
+            marker="DONE_T2",
+            required_text=("DONE_T2",),
+        )
+
+        result, events, waits = self._drive_scripted_follow_ups(follow_ups=[follow_up])
+
+        self.assertTrue(result.success)
+        # One page, one composer: the follow-up is sent only after the first
+        # reply and its turn boundary, and the boundary hook runs after each.
+        self.assertEqual(
+            events,
+            [
+                "fill:List the GitHub issues.", "submit", "turn_complete:0",
+                "fill:Now create a calendar event.", "submit", "turn_complete:1",
+            ],
+        )
+        self.assertEqual([wait["marker"] for wait in waits], ["DONE_T1", "DONE_T2"])
+        self.assertEqual(waits[1]["required_text"], ["DONE_T2"])
+        # The follow-up's reply baseline is re-read after the first reply.
+        self.assertEqual(
+            [wait["assistant_count_before"] for wait in waits], [0, 1]
+        )
+        self.assertEqual(
+            waits[1]["semantic_goal"],
+            "List the GitHub issues.\nNow create a calendar event.",
+        )
+        turns = result.details["scripted_turns"]
+        self.assertEqual([turn["turn"] for turn in turns], [0, 1])
+        self.assertEqual(turns[1]["prompt"], "Now create a calendar event.")
+        self.assertEqual(turns[1]["text_excerpt"], "reply 2 DONE_T2")
+        self.assertEqual(result.details["text_excerpt"], "reply 2 DONE_T2")
+
+    def test_live_chat_case_stops_scripted_turns_at_the_first_failed_reply(self):
+        follow_ups = [
+            run_live_qa.ScriptedFollowUp(prompt="Second.", marker="DONE_T2"),
+            run_live_qa.ScriptedFollowUp(prompt="Third.", marker="DONE_T3"),
+        ]
+
+        result, events, _waits = self._drive_scripted_follow_ups(
+            follow_ups=follow_ups, fail_on_wait=2,
+        )
+
+        self.assertFalse(result.success)
+        self.assertNotIn("fill:Third.", events)
+        self.assertNotIn("turn_complete:1", events)
+        self.assertEqual(
+            [turn["turn"] for turn in result.details["scripted_turns"]], [0]
+        )
+
+    def test_live_chat_case_rejects_scripted_and_routine_follow_ups_together(self):
+        playwright_module = types.ModuleType("playwright")
+        playwright_async_api = types.ModuleType("playwright.async_api")
+        playwright_async_api.expect = lambda _locator: None
+        with patch.dict(
+            sys.modules,
+            {
+                "playwright": playwright_module,
+                "playwright.async_api": playwright_async_api,
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                asyncio.run(
+                    run_live_qa._live_chat_case(
+                        self._dummy_ctx(),
+                        case_name="qa_test_scripted_and_routine",
+                        prompt="Create a routine.",
+                        marker=None,
+                        required_text=[],
+                        routine_confirmation_follow_up=True,
+                        scripted_follow_ups=[
+                            run_live_qa.ScriptedFollowUp(prompt="x", marker=None)
+                        ],
+                    )
+                )
+
     def test_slack_correctness_chat_reply_does_not_enforce_answer_marker(self):
         captured: dict[str, object] = {}
 

@@ -88,14 +88,28 @@ per-task observations so a broad score cannot hide a failed capability.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 5,
   "catalog": {
     "generator_version": "tool-search-scale-v2",
     "seed": 7405,
     "tool_count": 500,
     "namespace_count": 20
   },
-  "arm": "signatures",
+  "arm": "prefetch-semantic",
+  "config": {
+    "disclosure": "namespaces",
+    "prefetch": "semantic",
+    "retrieval": "hybrid",
+    "prefetch_always": [],
+    "prefetch_tuning": {"REBORN_TOOL_PREFETCH_MAX_TOOLS": null},
+    "embeddings": {
+      "provider": "openai_compatible",
+      "model": "BAAI/bge-small-en-v1.5",
+      "base_url": "http://127.0.0.1:8080",
+      "dimension": 384,
+      "api_key_env": null
+    }
+  },
   "model": {
     "provider": "provider-id",
     "model": "model-id",
@@ -116,7 +130,9 @@ per-task observations so a broad score cannot hide a failed capability.
     "discovery_turns": 1,
     "tool_calls": 3,
     "tool_search_calls": 1,
-    "tool_describe_calls": 0
+    "tool_describe_calls": 0,
+    "result_read_calls": 0,
+    "bridged_tool_calls": 0
   },
   "tokens": {
     "input": 12000,
@@ -128,15 +144,89 @@ per-task observations so a broad score cannot hide a failed capability.
     "end_to_end": 2400
   },
   "cache": {
-    "tool_definition_signature_changes": null
+    "tool_definition_signature_changes": 0,
+    "tool_bearing_model_requests": 3
   },
+  "advertised": {
+    "tool_count_per_request": [12, 12, 12],
+    "schema_tokens_per_request": [1900, 1900, 1900],
+    "schema_token_estimator": "compact JSON chars / 4"
+  },
+  "selection": {
+    "turn0_tool_count": 12,
+    "turn0_tools": ["tool_search", "..."],
+    "used_tools": ["gmail__search_messages", "google_calendar__create_event"],
+    "hit_rate": 0.5,
+    "misses": 1,
+    "missed_tools": ["google_calendar__create_event"]
+  },
+  "turns": null,
+  "idle_gap": null,
   "failure": null
 }
 ```
 
-`arm` is always the exact canonical `REBORN_TOOL_DISCLOSURE` selector value.
-`cache.tool_definition_signature_changes` is `null` when the provider trace
-does not expose a trustworthy signature-change count; it is never estimated.
+A multi-turn task (the two-turn topic-drift task) fills `turns` with one
+entry per user message, numbered from 0. The second entry of a drift
+observation looks like this:
+
+```json
+{
+  "turn": 1,
+  "started": true,
+  "replied": true,
+  "completed": true,
+  "correct_tool_recalled": true,
+  "expected_tools": ["google_calendar__create_event"],
+  "called_tools": ["google_calendar__create_event"],
+  "tool_calls": 2,
+  "synthetic_tool_calls": 1,
+  "tool_search_calls": 1,
+  "bridged_tool_calls": 1,
+  "selection": {
+    "turn_start_tool_count": 12,
+    "used_tools": ["google_calendar__create_event"],
+    "hit_rate": 0.0,
+    "misses": 1,
+    "missed_tools": ["google_calendar__create_event"]
+  },
+  "time_to_first_correct_tool_call_ms": 1500,
+  "tool_bearing_model_requests": 3,
+  "tool_definition_signature_changes": 0,
+  "tools_changed_at_turn_start": false
+}
+```
+
+`idle_gap` is set only by the opt-in idle-gap variant of that task:
+`{"seconds": 8.0, "server_env": {...}}`, the gap left between the turns and the
+shortened tool-selection cache settings its server ran with.
+
+`arm` names a row of the runner's arm table
+(`scripts/tool_discovery_benchmark/README.md`); `config` records the settings
+it ran with: the `REBORN_TOOL_DISCLOSURE`, `REBORN_TOOL_PREFETCH` and
+`REBORN_TOOL_RETRIEVAL` values, the always-on selection extras, the selection
+tuning variables, and, for a dense or hybrid ranker, the embeddings provider,
+model, endpoint and dimension (never the key). For the five disclosure arms
+`arm` equals the `REBORN_TOOL_DISCLOSURE` value.
+`advertised` gives each tool-bearing request's tool count and estimated schema
+tokens (compact JSON characters / 4, an estimate rather than a tokenizer
+count). `selection` compares the first request's tools (the turn-0 selection)
+with the tools the task called: `hit_rate` is the share of used tools that
+were selected, and `misses` counts calls to tools outside the selection. The
+runner README defines both precisely.
+`cache.tool_definition_signature_changes` counts how often the SHA-256 of the
+request's `tools` array changes between consecutive tool-bearing model requests
+in one observation; the runner reads it from a loopback relay in front of the
+model endpoint. It is `null` when the relay is off or saw no tool-bearing
+request; it is never estimated.
+Each `turns` entry measures one user message on its own: its tool calls, its
+`tool_search` and bridged `tool_call` counts, its selection misses against
+the tools advertised at the start of that turn, the time from the turn's
+start to its first correct tool, signature changes within the turn, and
+whether the tools array changed at the turn boundary
+(`tools_changed_at_turn_start`). Without an idle gap the whole conversation's
+`cache.tool_definition_signature_changes` must be 0. The summary's
+`turn_aggregates` aggregates these per arm, catalog size, task and turn.
 
 `failure`, when present, uses a stable category such as `retrieval_miss`,
 `invalid_arguments`, `authorization_denied`, `approval_blocked`,
@@ -153,6 +243,8 @@ arguments are not retained in aggregate benchmark observations.
 - Relevant denied tools mixed with allowed distractors.
 - Cross-namespace workflows, including finding an email and creating a
   calendar event.
+- Topic drift: a second user message in the same conversation that needs a
+  namespace the first message did not mention.
 - No-match tasks where the correct behavior is to report that no authorized
   capability exists.
 
