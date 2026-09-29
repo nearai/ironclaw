@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.1-rc.2] - 2026-09-24
+## [1.4.1] - 2026-09-29
 
-Second patch candidate over `1.4.0`, carrying the same fix as RC1.
+Stable promotion of `1.4.1-rc.2`, carrying the Google OAuth activation fix
+validated in the release candidate.
 
 ### Fixed
 
