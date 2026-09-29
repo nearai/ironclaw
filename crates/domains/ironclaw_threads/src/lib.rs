@@ -25,6 +25,7 @@ mod summary_artifacts;
 mod title;
 mod tool_result_records;
 mod tool_result_reference;
+mod tool_selection_history;
 
 pub use filesystem_service::FilesystemSessionThreadService;
 // `title::derive_thread_title` is deliberately NOT re-exported here —
@@ -76,6 +77,14 @@ pub use structured_finalization::{
 pub use tool_result_records::{
     TOOL_RESULT_JSON_DEFAULT_LIMIT, TOOL_RESULT_JSON_MAX_LIMIT, ToolResultRecordReadError,
     model_result_preview_from_json_page, render_json_tool_result_page,
+};
+pub use tool_selection_history::{
+    AppendToolSelectionEntryRequest, MAX_TOOL_SELECTION_ADVERTISED,
+    MAX_TOOL_SELECTION_CALLED_TOOLS, MAX_TOOL_SELECTION_ENTRIES, ModelCallMark,
+    RecordToolSelectionActivityRequest, TOOL_SELECTION_ACTIVITY_SCHEMA_VERSION,
+    TOOL_SELECTION_HISTORY_SCHEMA_VERSION, ToolSelectionActivity, ToolSelectionActivityUpdate,
+    ToolSelectionEffectiveFrom, ToolSelectionEntry, ToolSelectionHistory, ToolSelectionReason,
+    ToolSelectionScore,
 };
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers

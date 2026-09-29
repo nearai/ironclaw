@@ -26,6 +26,13 @@ dumping ground.
   `ThreadMessageRecord`, `MessageContent`/`MessageKind`/`MessageStatus`,
   context-window reads (`LoadContextWindowRequest`, `ContextMessages`),
   tool-result records/references, summary artifacts, goal statements.
+- The append-only tool-selection history (`ToolSelectionHistory`,
+  `ToolSelectionEntry`, `ToolSelectionReason`,
+  `AppendToolSelectionEntryRequest`): which tools each conversation
+  advertised to the model, and from which turn. Beside it, the
+  conversation's `ToolSelectionActivity` (latest model call and the tools it
+  called successfully), which turn-start selection reads to decide whether
+  to re-select.
 - `SessionThreadError`; `ThreadMessageId` / `SummaryArtifactId`.
 - Re-exported attachment vocabulary (`AttachmentKind`, `AttachmentRef` from
   `ironclaw_common`) so transcript consumers need no extra dependency.
@@ -64,6 +71,13 @@ dumping ground.
   sequence and kind so loop policy can react without guessing.
 - Exact message lookups by run, tool result, provider call, and first user are
   indexed projections on the message row; they do not create sibling records.
+- The tool-selection history is append-only: the first entry is `initial`,
+  a `revoked` entry removes at least one tool, a re-selection
+  (`cache_cold`, `model_change`) changes the list, and a stale writer is
+  refused rather than overwriting. The activity record's model-call clock
+  only moves forward. Like structured-finalization evidence it is stored beside
+  the thread root, partitioned by thread incarnation, so deleting a thread
+  keeps it and a recreated thread id starts afresh.
 - Backend-neutral by construction: persistence is `ScopedFilesystem` only;
   backend choice happens in composition (`.claude/rules/database.md`).
 
@@ -75,6 +89,7 @@ cargo test -p ironclaw_threads
 cargo test -p ironclaw_threads --test session_thread_contract
 cargo test -p ironclaw_threads --test filesystem_session_thread_contract
 cargo test -p ironclaw_threads --test filesystem_message_range_contract
+cargo test -p ironclaw_threads --test tool_selection_history
 ```
 
 ## See also

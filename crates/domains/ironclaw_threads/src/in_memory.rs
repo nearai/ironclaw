@@ -50,6 +50,18 @@ struct InMemoryState {
     inbound_idempotency: HashMap<InboundIdempotencyKey, InboundIdempotencyRecord>,
     prepared_contexts: HashMap<ThreadId, crate::PreparedContextRecord>,
     structured_finalizations: HashMap<StructuredFinalizationKey, StructuredFinalizationRecord>,
+    /// Keyed by thread incarnation, like structured finalizations: kept after
+    /// the thread is deleted, never read by a recreated thread id.
+    tool_selection_histories: HashMap<ToolSelectionKey, crate::ToolSelectionHistory>,
+    /// Keyed like the histories.
+    tool_selection_activities: HashMap<ToolSelectionKey, crate::ToolSelectionActivity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolSelectionKey {
+    scope: ThreadScope,
+    thread_id: ThreadId,
+    incarnation_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +162,30 @@ fn mint_thread_locked<'a>(
             tool_result_records: HashMap::new(),
             next_sequence: 1,
         })
+}
+
+impl InMemorySessionThreadService {
+    /// The tool-selection key of the thread's current incarnation, with the
+    /// same non-enumerating `UnknownThread` shape for missing and cross-scope
+    /// threads as every other read.
+    fn tool_selection_key_locked(
+        state: &InMemoryState,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<ToolSelectionKey, SessionThreadError> {
+        let stored = state
+            .threads
+            .get(thread_id)
+            .filter(|stored| &stored.record.scope == scope)
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        Ok(ToolSelectionKey {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            incarnation_id: stored.incarnation_id,
+        })
+    }
 }
 
 #[async_trait]
@@ -545,6 +581,56 @@ impl SessionThreadService for InMemorySessionThreadService {
             .structured_finalizations
             .insert(key, request.record.clone());
         Ok(request.record)
+    }
+
+    async fn read_tool_selection_history(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionHistory>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let key = Self::tool_selection_key_locked(&state, scope, thread_id)?;
+        Ok(state.tool_selection_histories.get(&key).cloned())
+    }
+
+    async fn append_tool_selection_entry(
+        &self,
+        request: crate::AppendToolSelectionEntryRequest,
+    ) -> Result<crate::ToolSelectionHistory, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let key = Self::tool_selection_key_locked(&state, &request.scope, &request.thread_id)?;
+        let history = crate::tool_selection_history::append_tool_selection_entry(
+            state.tool_selection_histories.get(&key).cloned(),
+            &request,
+        )?;
+        state.tool_selection_histories.insert(key, history.clone());
+        Ok(history)
+    }
+
+    async fn read_tool_selection_activity(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionActivity>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let key = Self::tool_selection_key_locked(&state, scope, thread_id)?;
+        Ok(state.tool_selection_activities.get(&key).cloned())
+    }
+
+    async fn record_tool_selection_activity(
+        &self,
+        request: crate::RecordToolSelectionActivityRequest,
+    ) -> Result<crate::ToolSelectionActivity, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let key = Self::tool_selection_key_locked(&state, &request.scope, &request.thread_id)?;
+        let activity = crate::tool_selection_history::record_tool_selection_activity(
+            state.tool_selection_activities.get(&key).cloned(),
+            &request,
+        )?;
+        state
+            .tool_selection_activities
+            .insert(key, activity.clone());
+        Ok(activity)
     }
 
     async fn publish_structured_finalization_message(
@@ -1558,7 +1644,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         // backend stores it under the thread root, so its delete removes it
         // implicitly); an orphaned record here would replay a deleted thread.
         state.prepared_contexts.remove(thread_id);
-        // Structured-finalization evidence is an append-only LLM audit record.
+        // Structured-finalization evidence and the tool-selection history are
+        // append-only LLM audit records.
         // It is deliberately retained after transcript deletion; the
         // incarnation in its key prevents a recreated explicit id from
         // reading the predecessor's terminal output.

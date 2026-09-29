@@ -155,6 +155,68 @@ pub trait SessionThreadService: Send + Sync {
         ))
     }
 
+    /// Read a conversation's append-only tool-selection history, or `None`
+    /// before its first entry. Missing and cross-scope threads return the
+    /// non-enumerating `UnknownThread` shape. The history belongs to one
+    /// thread incarnation: a deleted-and-recreated thread id reads `None`.
+    async fn read_tool_selection_history(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionHistory>, SessionThreadError> {
+        let _ = (scope, thread_id);
+        Err(SessionThreadError::Backend(
+            "tool selection history is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Append one entry to a conversation's tool-selection history through a
+    /// bounded CAS. Refuses with `ToolSelectionHistoryConflict` when the
+    /// stored entry count differs from `expected_entries`, and with
+    /// `InvalidToolSelection` when the entry breaks the append-only rules
+    /// (the first entry is `initial`, only the first; a `revoked` entry
+    /// removes at least one tool; a re-selection changes the list). Returns
+    /// the history including the new entry.
+    async fn append_tool_selection_entry(
+        &self,
+        _request: crate::AppendToolSelectionEntryRequest,
+    ) -> Result<crate::ToolSelectionHistory, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool selection history is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Read a conversation's tool-selection activity (its latest model call
+    /// and the tools it called successfully), or `None` before anything was
+    /// recorded. Same thread-incarnation and non-enumerating rules as
+    /// [`Self::read_tool_selection_history`].
+    async fn read_tool_selection_activity(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionActivity>, SessionThreadError> {
+        let _ = (scope, thread_id);
+        Err(SessionThreadError::Backend(
+            "tool selection activity is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Record one change to a conversation's tool-selection activity through
+    /// a bounded CAS. A model-call mark older than the stored one is ignored
+    /// and a tool is recorded once. Returns the activity after the change.
+    async fn record_tool_selection_activity(
+        &self,
+        _request: crate::RecordToolSelectionActivityRequest,
+    ) -> Result<crate::ToolSelectionActivity, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool selection activity is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
     async fn replay_accepted_inbound_message(
         &self,
         request: ReplayAcceptedInboundMessageRequest,
@@ -567,6 +629,40 @@ where
         self.as_ref()
             .publish_structured_finalization_message(request)
             .await
+    }
+
+    async fn read_tool_selection_history(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionHistory>, SessionThreadError> {
+        self.as_ref()
+            .read_tool_selection_history(scope, thread_id)
+            .await
+    }
+
+    async fn append_tool_selection_entry(
+        &self,
+        request: crate::AppendToolSelectionEntryRequest,
+    ) -> Result<crate::ToolSelectionHistory, SessionThreadError> {
+        self.as_ref().append_tool_selection_entry(request).await
+    }
+
+    async fn read_tool_selection_activity(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionActivity>, SessionThreadError> {
+        self.as_ref()
+            .read_tool_selection_activity(scope, thread_id)
+            .await
+    }
+
+    async fn record_tool_selection_activity(
+        &self,
+        request: crate::RecordToolSelectionActivityRequest,
+    ) -> Result<crate::ToolSelectionActivity, SessionThreadError> {
+        self.as_ref().record_tool_selection_activity(request).await
     }
 
     async fn replay_accepted_inbound_message(

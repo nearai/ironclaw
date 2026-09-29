@@ -46,6 +46,9 @@ mod skill_context;
 mod snapshot;
 mod snippet_ref;
 mod system_inference;
+mod tool_availability;
+mod tool_retrieval;
+mod tool_selection;
 
 pub use checkpoint_payload::{MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, RedactedCheckpointPayload};
 pub use compaction::{
@@ -154,4 +157,16 @@ pub use system_inference::{
     SystemInferenceContextMessage, SystemInferenceContextRole, SystemInferenceError,
     SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
     SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
+};
+pub use tool_availability::{
+    TOOL_AVAILABILITY_LOOKUP_TIMEOUT, ToolAvailability, ToolAvailabilityPredicate,
+    ToolUnavailableReason,
+};
+pub use tool_retrieval::{
+    RankedTool, ToolCorpusOwner, ToolIndexFitReport, ToolRetrievalError, ToolRetrievalIndex,
+    ToolRetrievalProvider, ToolSearchOutcome, ToolSearchQueryClass,
+};
+pub use tool_selection::{
+    ChosenTool, ConversationContext, MAX_CONVERSATION_CONTEXT_BYTES, ToolSelection,
+    ToolSelectionCandidate, ToolSelectionClassifier, ToolSelectionError, ToolSelectionRequest,
 };
