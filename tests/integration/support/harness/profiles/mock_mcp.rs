@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::super::super::harness_mcp::{
-    build_loopback_mcp_runtime, mcp_loopback_network_policy, mock_mcp_extension_package,
+    MockMcpPackage, build_loopback_mcp_runtime, mcp_loopback_network_policy,
+    mock_mcp_extension_package, mock_mcp_multi_tool_extension_package,
     standalone_host_runtime_with_registry_egress_and_mcp,
 };
 use super::super::{
@@ -55,8 +56,84 @@ pub(crate) async fn mock_mcp_tools(
         registry,
         Arc::clone(&first_party_egress),
         mcp_runtime,
-        provider_id,
+        &[provider_id],
     )?;
+    mock_mcp_harness(
+        runtime,
+        root,
+        workspace_root,
+        vec![CapabilityId::new(capability_id)?],
+        ExtensionId::new(provider_id)?,
+        Vec::new(),
+    )
+}
+
+/// Wire several mock MCP packages, all served by the one loopback mock
+/// server at `mcp_url`, plus the synthetic `result_read` capability so a
+/// large MCP result can be paged the way production pages it. The first
+/// package is the harness's primary provider; the others are trusted
+/// alongside it.
+pub(crate) async fn mock_mcp_package_tools(
+    mcp_url: &str,
+    packages: &[MockMcpPackage],
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let Some((primary, others)) = packages.split_first() else {
+        return Err("mock_mcp_package_tools needs at least one package".into());
+    };
+    let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+    let first_party_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"accepted":true}"#.to_vec(),
+    ));
+    let mcp_runtime = build_loopback_mcp_runtime(mcp_url)?;
+    let mut registry = ExtensionRegistry::new();
+    let mut capability_ids = Vec::new();
+    for package in packages {
+        registry.insert(mock_mcp_multi_tool_extension_package(package, mcp_url)?)?;
+        for tool in &package.tools {
+            capability_ids.push(CapabilityId::new(tool.capability_id.as_str())?);
+        }
+    }
+    capability_ids.push(CapabilityId::new(
+        ironclaw_composition::test_support::RESULT_READ_CAPABILITY_ID,
+    )?);
+    let provider_ids: Vec<&str> = packages
+        .iter()
+        .map(|package| package.provider_id.as_str())
+        .collect();
+    let runtime = standalone_host_runtime_with_registry_egress_and_mcp(
+        storage_root,
+        registry,
+        Arc::clone(&first_party_egress),
+        mcp_runtime,
+        &provider_ids,
+    )?;
+    let additional_provider_trust = others
+        .iter()
+        .map(|package| {
+            Ok((
+                ExtensionId::new(package.provider_id.as_str())?,
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            ))
+        })
+        .collect::<HarnessResult<Vec<_>>>()?;
+    mock_mcp_harness(
+        runtime,
+        root,
+        workspace_root,
+        capability_ids,
+        ExtensionId::new(primary.provider_id.as_str())?,
+        additional_provider_trust,
+    )
+}
+
+fn mock_mcp_harness(
+    runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    root: Arc<tempfile::TempDir>,
+    workspace_root: std::path::PathBuf,
+    capability_ids: Vec<CapabilityId>,
+    provider_id: ExtensionId,
+    additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
@@ -77,7 +154,7 @@ pub(crate) async fn mock_mcp_tools(
         workspace_root,
         mounts,
         capability_mount_overrides: Vec::new(),
-        capability_ids: vec![CapabilityId::new(capability_id)?],
+        capability_ids,
         runtime_kind: RuntimeKind::Mcp,
         effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
         // The MCP capability declares `EffectKind::Network`, so authorization
@@ -88,8 +165,8 @@ pub(crate) async fn mock_mcp_tools(
         // block 127.0.0.1) so the MCP egress reaches the loopback server.
         network_policy: mcp_loopback_network_policy(),
         secrets: Vec::new(),
-        provider_id: ExtensionId::new(provider_id)?,
-        additional_provider_trust: Vec::new(),
+        provider_id,
+        additional_provider_trust,
         user_id: UserId::new("reborn-itest-mcp-user")?,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),

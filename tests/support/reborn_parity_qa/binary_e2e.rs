@@ -925,6 +925,9 @@ impl RebornBinaryE2EHarness {
                 as Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>),
             gate_record_store: None,
             scheduler_wake_wiring: None,
+            tool_retrieval_provider: None,
+            tool_prefetch: None,
+            tool_availability: None,
         })?;
         let binding_service: Arc<dyn ProductBindingResolver> =
             Arc::new(product_harness.binding_service()?);

@@ -25,6 +25,7 @@ mod scenario_extension_install_github_normal_gate;
 mod scenario_extension_install_instance_not_configured;
 mod scenario_extension_install_reauth_gate;
 mod scenario_google_family_install_gate_and_shared_account;
+mod scenario_install_indexes_tool_catalog_in_background;
 mod scenario_install_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
@@ -51,6 +52,33 @@ async fn malformed_lifecycle_arguments_are_structured_inner() {
     scenario_malformed_lifecycle_arguments_are_structured::run(&g)
         .await
         .expect("malformed lifecycle arguments retain structured repair detail");
+}
+
+/// Installing an extension indexes the user's tool catalog in the
+/// background; the next conversation's selection embeds no tool document.
+#[test]
+fn install_indexes_the_tool_catalog_in_the_background() {
+    run_async_test_with_stack(
+        "install_indexes_the_tool_catalog_in_the_background",
+        install_indexes_the_tool_catalog_in_the_background_inner,
+    );
+}
+
+async fn install_indexes_the_tool_catalog_in_the_background_inner() {
+    use scenario_install_indexes_tool_catalog_in_background as scenario;
+    let embedder = std::sync::Arc::new(scenario::RecordingEmbedder::default());
+    let ranker = scenario::ranker(&embedder);
+    let g = RebornIntegrationGroup::builder()
+        .with_tool_disclosure_bridged()
+        .tool_retrieval_provider(std::sync::Arc::clone(&ranker)
+            as std::sync::Arc<dyn ironclaw_loop_contracts::ToolRetrievalProvider>)
+        .tool_prefetch(scenario::semantic_selection())
+        .extension_lifecycle()
+        .await
+        .expect("group builds");
+    scenario::run(&g, &embedder, &ranker)
+        .await
+        .expect("an install indexes the tool catalog in the background");
 }
 
 #[test]

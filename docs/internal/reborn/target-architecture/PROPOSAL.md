@@ -313,6 +313,11 @@ crates/
 │       │                               mem0 REST backend (moved from domains/, amended 2026-07-29)
 │       ├── web-app/                 ▣ ironclaw_web_app_extension [products] — outbound-only browser-push
 │       │                               ChannelAdapter + codec + target provider (added 2026-08-08)
+│       ├── tool-retrieval/           ▣ ironclaw_tool_retrieval [substrates] — dense (embedding) tool ranker
+│       │                               behind the loop-tier tool retrieval port; no manifest (added 2026-09-28)
+│       ├── tool-selection-jev/       ▣ ironclaw_tool_selection_jev [substrates] — Jev turn-start tool classifier
+│       │                               over a configured decisions endpoint (TypeSafe by default) behind the
+│       │                               loop-tier tool selection port; no manifest (added 2026-09-28)
 │       └── <ext>/                    ▢ data-only packages (github, gmail, google-*, web-access, notion-mcp,
 │                                       nearai-mcp, …): manifest.toml, prompts/, schemas/, wasm/, ◇ wasm-src/
 ├── product/                          ▢ first-party userland above the kernel

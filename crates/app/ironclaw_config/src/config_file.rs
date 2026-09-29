@@ -105,6 +105,14 @@ pub struct RebornConfigFile {
     /// host-runtime binding resolver, which owns the profile catalog; this
     /// config layer only does deployment-agnostic structural validation.
     pub memory: Option<MemorySection>,
+    /// Text-embeddings provider selection and connection settings. Absent
+    /// section (or no `provider`) means no embeddings provider is built.
+    pub embeddings: Option<EmbeddingsSection>,
+    /// Turn-start tool selection: whether it runs, which classifier chooses
+    /// the tools (`local` or `jev`), and their settings. Absent section
+    /// means selection is off unless the `REBORN_TOOL_PREFETCH*`
+    /// environment variables turn it on (env wins, field by field).
+    pub tool_selection: Option<ToolSelectionSection>,
     /// Sections this crate's schema used to define and no longer does,
     /// captured verbatim so an existing operator file still parses and can be
     /// answered with migration guidance. `serde(skip)` in both directions: it
@@ -177,6 +185,155 @@ pub struct MemorySection {
     /// tidied while nothing is scheduled.
     #[serde(default)]
     pub curation_interval_turns: Option<u32>,
+}
+
+/// `[embeddings]` config section: which text-embeddings provider to build and
+/// how to reach it.
+///
+/// Every field has an `EMBEDDING_*` environment override applied by the
+/// composition root (env wins). Selection is by `provider` id; the id catalog
+/// and the fail-closed rule (unset or unknown id ⇒ no provider) live in
+/// composition, so this layer only does structural validation. The API key is
+/// never stored here: `api_key_env` is the NAME of the environment variable
+/// that holds it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingsSection {
+    /// Provider id: `openai` (defaults the base URL to OpenAI's) or
+    /// `openai_compatible` (requires `base_url`). Omitted means no provider.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// API base URL. A bare host gets `/v1` appended; `/v1` is never doubled.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Embedding model id sent to the endpoint. Required when a provider is set.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Name of the environment variable holding the API key (default
+    /// `EMBEDDING_API_KEY`). An env-var NAME, never the key itself.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Expected vector dimension. Omitted adopts the first dimension returned.
+    #[serde(default)]
+    pub dimension: Option<usize>,
+    /// Maximum inputs per request; larger batches are split. Omitted uses the
+    /// provider default.
+    #[serde(default)]
+    pub max_batch_size: Option<usize>,
+    /// Total timeout for one request, in seconds. Omitted uses the provider
+    /// default.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+}
+
+/// `[tool_selection]` config section: turn-start tool selection.
+///
+/// Every field is optional and has a `REBORN_TOOL_PREFETCH*` environment
+/// override (env wins); `ToolPrefetchSettings::resolve` applies the
+/// precedence and the range checks. This layer only checks shape: plain
+/// strings, no inline secrets, and the Jev API key named by environment
+/// variable only.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSelectionSection {
+    /// `off` (the default), `lexical` or `semantic`
+    /// (`REBORN_TOOL_PREFETCH`).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// `local` (the default: a ranker plus thresholds, on the host) or `jev`
+    /// (Jev, a hosted classifier served by the provider `[tool_selection.jev]`
+    /// names, TypeSafe by default)
+    /// (`REBORN_TOOL_PREFETCH_CLASSIFIER`).
+    #[serde(default)]
+    pub classifier: Option<String>,
+    /// Extra tools always advertised when authorized
+    /// (`REBORN_TOOL_PREFETCH_ALWAYS`).
+    #[serde(default)]
+    pub always: Option<Vec<String>>,
+    /// Most tools in the `tools` array, floor and extras included
+    /// (`REBORN_TOOL_PREFETCH_MAX_TOOLS`).
+    #[serde(default)]
+    pub max_tools: Option<usize>,
+    /// Most estimated schema tokens the advertised tools may add up to;
+    /// default 32000 (`REBORN_TOOL_PREFETCH_TOKEN_BUDGET`).
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    /// Whether a conversation re-selects its tools once the provider's
+    /// prompt cache can no longer be warm; default on
+    /// (`REBORN_TOOL_PREFETCH_RESELECT`, `on` or `off`).
+    #[serde(default)]
+    pub reselect: Option<bool>,
+    /// Prompt-cache lifetime assumed for providers the host cannot know, in
+    /// seconds; default 3600 (`REBORN_TOOL_PREFETCH_CACHE_LIFETIME_SECS`).
+    #[serde(default)]
+    pub cache_lifetime_secs: Option<u64>,
+    /// Margin added to every cache lifetime, in seconds; default 60
+    /// (`REBORN_TOOL_PREFETCH_CACHE_MARGIN_SECS`).
+    #[serde(default)]
+    pub cache_margin_secs: Option<u64>,
+    /// Most user messages a selection reads (a re-selection's window), and
+    /// most segments the local classifier ranks; default 16, between 1 and
+    /// 64 (`REBORN_TOOL_PREFETCH_CONTEXT_MESSAGES`).
+    #[serde(default)]
+    pub context_messages: Option<usize>,
+    /// Most bytes of one conversation segment the local classifier ranks;
+    /// default 2048, between 128 and 4096
+    /// (`REBORN_TOOL_PREFETCH_SEGMENT_BYTES`).
+    #[serde(default)]
+    pub segment_bytes: Option<usize>,
+    /// Settings of the `local` classifier; inert under `jev`.
+    #[serde(default)]
+    pub local: Option<ToolSelectionRankingSection>,
+    /// Settings of the `jev` classifier; inert under `local`.
+    #[serde(default)]
+    pub jev: Option<ToolSelectionJevSection>,
+}
+
+/// `[tool_selection.local]`: the optional ranker thresholds, both off (0)
+/// by default.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSelectionRankingSection {
+    /// Absolute threshold, applied to cosine scores only; default 0, off
+    /// (`REBORN_TOOL_PREFETCH_MIN_SIMILARITY`).
+    #[serde(default)]
+    pub min_similarity: Option<f64>,
+    /// Relative threshold for every ranker, against the top score of the
+    /// same segment's ranking; default 0, off
+    /// (`REBORN_TOOL_PREFETCH_MIN_RELATIVE`).
+    #[serde(default)]
+    pub min_relative: Option<f64>,
+}
+
+/// `[tool_selection.jev]`: Jev, served by the configured decisions endpoint
+/// (TypeSafe's by default; any provider serving the same decisions API works
+/// by setting `endpoint`, `model` and `api_key_env`). Sends the opening
+/// request (and, at a re-selection, a window of the conversation's user
+/// messages) and the tool catalog to that provider, a third party.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSelectionJevSection {
+    /// The decisions endpoint, a full `https` URL with a host and no
+    /// userinfo, query or fragment; default
+    /// `https://api.typesafe.ai/v1/systemone`
+    /// (`REBORN_TOOL_PREFETCH_JEV_ENDPOINT`). The egress policy allows
+    /// exactly its host and port.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Model id; default `jev-latest`, TypeSafe's flagship alias, which moves
+    /// between Jev releases. Name a version here (for example `jev-1.13.0`)
+    /// to pin it (`REBORN_TOOL_PREFETCH_JEV_MODEL`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// NAME of the environment variable holding the provider's API key;
+    /// default `TYPESAFE_API_KEY`. Never the key itself
+    /// (`REBORN_TOOL_PREFETCH_JEV_API_KEY_ENV`).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Time allowed for one whole classification, in milliseconds; default
+    /// 500. No environment override.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// One admin override authorizing a production memory binding, scoped to
@@ -1257,6 +1414,77 @@ impl RebornConfigFile {
                              memory curation"
                         .to_string(),
                 });
+            }
+        }
+        if let Some(embeddings) = &self.embeddings {
+            for (label, value) in [
+                ("embeddings.provider", &embeddings.provider),
+                ("embeddings.base_url", &embeddings.base_url),
+                ("embeddings.model", &embeddings.model),
+                ("embeddings.api_key_env", &embeddings.api_key_env),
+            ] {
+                if let Some(value) = value.as_deref() {
+                    check_non_empty_trimmed(Cow::Borrowed(label), value)?;
+                }
+            }
+            if let Some(api_key_env) = embeddings.api_key_env.as_deref() {
+                validate_env_var_reference("embeddings.api_key_env", api_key_env, attributed_path)?;
+            }
+            for (label, value) in [
+                (
+                    "embeddings.dimension",
+                    embeddings.dimension.map(|v| v as u64),
+                ),
+                (
+                    "embeddings.max_batch_size",
+                    embeddings.max_batch_size.map(|v| v as u64),
+                ),
+                (
+                    "embeddings.request_timeout_secs",
+                    embeddings.request_timeout_secs,
+                ),
+            ] {
+                if value == Some(0) {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: label.to_string(),
+                        reason: "must be greater than 0; omit the key to use the default"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(selection) = &self.tool_selection {
+            let jev = selection.jev.as_ref();
+            for (label, value) in [
+                ("tool_selection.mode", selection.mode.as_deref()),
+                ("tool_selection.classifier", selection.classifier.as_deref()),
+                (
+                    "tool_selection.jev.model",
+                    jev.and_then(|jev| jev.model.as_deref()),
+                ),
+                (
+                    "tool_selection.jev.api_key_env",
+                    jev.and_then(|jev| jev.api_key_env.as_deref()),
+                ),
+                (
+                    "tool_selection.jev.endpoint",
+                    jev.and_then(|jev| jev.endpoint.as_deref()),
+                ),
+            ] {
+                if let Some(value) = value {
+                    check_non_empty_trimmed(Cow::Borrowed(label), value)?;
+                }
+            }
+            for name in selection.always.iter().flatten() {
+                check(Cow::Borrowed("tool_selection.always"), name)?;
+            }
+            if let Some(api_key_env) = jev.and_then(|jev| jev.api_key_env.as_deref()) {
+                validate_env_var_reference(
+                    "tool_selection.jev.api_key_env",
+                    api_key_env,
+                    attributed_path,
+                )?;
             }
         }
         Ok(())
@@ -2571,6 +2799,176 @@ deployment_profile = "*"
             cfg.memory.unwrap().admin_overrides[0].deployment_profile,
             "*"
         );
+    }
+
+    #[test]
+    fn embeddings_section_parses_every_field() {
+        let toml = r#"
+[embeddings]
+provider = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+model = "nomic-embed-text"
+api_key_env = "OLLAMA_EMBED_KEY"
+dimension = 768
+max_batch_size = 16
+request_timeout_secs = 10
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("parses");
+        let section = cfg.embeddings.expect("embeddings section");
+        assert_eq!(section.provider.as_deref(), Some("openai_compatible"));
+        assert_eq!(
+            section.base_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(section.model.as_deref(), Some("nomic-embed-text"));
+        assert_eq!(section.api_key_env.as_deref(), Some("OLLAMA_EMBED_KEY"));
+        assert_eq!(section.dimension, Some(768));
+        assert_eq!(section.max_batch_size, Some(16));
+        assert_eq!(section.request_timeout_secs, Some(10));
+
+        // Absent section stays absent: no provider is implied.
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("parses");
+        assert!(cfg.embeddings.is_none());
+    }
+
+    #[test]
+    fn embeddings_section_rejects_inline_secrets_and_bad_values() {
+        for (toml, what) in [
+            (
+                "[embeddings]\napi_key_env = \"sk-proj-1234567890abcdef12345678\"\n",
+                "a pasted key in api_key_env",
+            ),
+            (
+                "[embeddings]\napi_key_env = \"https://example.com\"\n",
+                "a URL in api_key_env",
+            ),
+            (
+                "[embeddings]\nbase_url = \"https://e.example.com/?key=sk-proj-1234567890abcdef12345678\"\n",
+                "a key inside base_url",
+            ),
+            ("[embeddings]\nprovider = \"  \"\n", "a blank provider"),
+            ("[embeddings]\nmodel = \" m \"\n", "an untrimmed model"),
+            ("[embeddings]\ndimension = 0\n", "a zero dimension"),
+            ("[embeddings]\nmax_batch_size = 0\n", "a zero batch size"),
+            ("[embeddings]\nrequest_timeout_secs = 0\n", "a zero timeout"),
+            ("[embeddings]\napi_key = \"x\"\n", "an unknown key"),
+        ] {
+            assert!(
+                RebornConfigFile::parse_text(toml, &attributed()).is_err(),
+                "{what} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_selection_section_parses_every_field() {
+        let cfg = RebornConfigFile::parse_text(
+            r#"
+[tool_selection]
+mode = "lexical"
+classifier = "jev"
+always = ["outbound_deliver", "trigger_create"]
+max_tools = 60
+token_budget = 12000
+context_messages = 8
+segment_bytes = 1024
+
+[tool_selection.local]
+min_similarity = 0.4
+min_relative = 0.6
+
+[tool_selection.jev]
+endpoint = "https://jev.example.test/api/v1/decisions"
+model = "jev-1.12.0"
+api_key_env = "TYPESAFE_API_KEY"
+timeout_ms = 800
+"#,
+            &attributed(),
+        )
+        .expect("valid [tool_selection]");
+        let section = cfg.tool_selection.expect("section");
+        assert_eq!(section.mode.as_deref(), Some("lexical"));
+        assert_eq!(section.classifier.as_deref(), Some("jev"));
+        assert_eq!(
+            section.always,
+            Some(vec![
+                "outbound_deliver".to_string(),
+                "trigger_create".to_string()
+            ])
+        );
+        assert_eq!(section.max_tools, Some(60));
+        assert_eq!(section.token_budget, Some(12_000));
+        assert_eq!(section.context_messages, Some(8));
+        assert_eq!(section.segment_bytes, Some(1_024));
+        let local = section.local.expect("local");
+        assert_eq!(local.min_similarity, Some(0.4));
+        assert_eq!(local.min_relative, Some(0.6));
+        let jev = section.jev.expect("jev");
+        assert_eq!(jev.model.as_deref(), Some("jev-1.12.0"));
+        assert_eq!(
+            jev.endpoint.as_deref(),
+            Some("https://jev.example.test/api/v1/decisions")
+        );
+        assert_eq!(jev.api_key_env.as_deref(), Some("TYPESAFE_API_KEY"));
+        assert_eq!(jev.timeout_ms, Some(800));
+        assert!(
+            RebornConfigFile::parse_text("", &attributed())
+                .expect("empty")
+                .tool_selection
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tool_selection_section_rejects_unknown_keys_and_inline_secrets() {
+        for (toml, what) in [
+            ("[tool_selection]\nranker = \"bm25\"\n", "an unknown key"),
+            (
+                "[tool_selection]\ncontext_bytes = 4096\n",
+                "the byte window, replaced by context_messages and segment_bytes",
+            ),
+            (
+                "[tool_selection.jev]\napi_key = \"x\"\n",
+                "an unknown jev key",
+            ),
+            (
+                "[tool_selection.local]\nthreshold = 0.5\n",
+                "an unknown local key",
+            ),
+            (
+                "[tool_selection.jev]\napi_key_env = \"sk-proj-1234567890abcdef12345678\"\n",
+                "a pasted key in api_key_env",
+            ),
+            (
+                "[tool_selection.jev]\napi_key_env = \"TYPESAFE API KEY\"\n",
+                "a non-name in api_key_env",
+            ),
+            (
+                "[tool_selection.jev]\nmodel = \"sk-proj-1234567890abcdef12345678\"\n",
+                "a pasted key in model",
+            ),
+            (
+                "[tool_selection]\nalways = [\"sk-proj-1234567890abcdef12345678\"]\n",
+                "a pasted key in always",
+            ),
+            (
+                "[tool_selection.jev]\nendpoint = \" \"\n",
+                "a blank endpoint",
+            ),
+            (
+                "[tool_selection]\nclassifier = \" \"\n",
+                "a blank classifier",
+            ),
+            (
+                "[tool_selection]\nmode = \" lexical\"\n",
+                "an untrimmed mode",
+            ),
+        ] {
+            assert!(
+                RebornConfigFile::parse_text(toml, &attributed()).is_err(),
+                "{what} must be rejected"
+            );
+        }
     }
 
     #[test]

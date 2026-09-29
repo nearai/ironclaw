@@ -76,7 +76,9 @@ const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
 // `RebornRuntime` became an ungated production field (shutdown reads it);
 // its accessor stays test-support (integration harnesses wiring their own
 // run-delivery observer are its only callers).
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 268;
+// 268 -> 269 (2026-09-29): the test-support accessor for the tool-catalog
+// change signal on `RebornRuntime` (see its frozen-path entry).
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 269;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -464,7 +466,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         // the factory; only integration harnesses that wire their own
         // run-delivery observer read it back. The field stays ungated
         // (shutdown uses it).
-        count: 44,
+        // 44 -> 45 (2026-09-29): the active-registry change signal the
+        // runtime's tool-catalog indexer follows. Production spawns the
+        // indexer inside the runtime build; only integration harnesses that
+        // build their own planned runtime (and so their own indexer) read the
+        // signal back, to run it the way production does.
+        count: 45,
     },
     FrozenPathCount {
         category: "test-support",

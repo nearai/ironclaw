@@ -656,6 +656,8 @@ pub struct RebornRuntime {
     /// Boot-time reply-publication recovery sweep, owned so shutdown stops
     /// it before releasing publication leases.
     pub(crate) reply_publication_recovery: Option<tokio::task::JoinHandle<()>>,
+    /// Background tool-catalog indexing, owned so shutdown stops it.
+    pub(crate) tool_catalog_indexer: Option<ironclaw_loop_host::ToolCatalogIndexerHandle>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -991,6 +993,14 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn host_runtime_for_test(&self) -> Option<Arc<dyn HostRuntime>> {
         Some(Arc::clone(&self.host_runtime))
+    }
+
+    /// The active-registry change signal `build_reborn_runtime` hands the
+    /// tool-catalog indexer. For tests only: lets a harness run its own
+    /// planned runtime's indexer on the same signal.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tool_catalog_changes_for_test(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.shared_extension_registry.subscribe()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2536,6 +2546,9 @@ impl RebornRuntime {
             skill_learning_extraction_tasks.shutdown().await;
         }
         self.turn_scheduler.shutdown().await;
+        if let Some(indexer) = self.tool_catalog_indexer {
+            indexer.shutdown().await;
+        }
         // Stop the boot-recovery sweep before its leases are released below.
         if let Some(recovery) = self.reply_publication_recovery {
             recovery.abort();
@@ -3119,6 +3132,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_manifest_url,
         runner,
         tool_disclosure,
+        tool_retrieval_provider,
+        tool_vector_store,
+        tool_prefetch,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -3283,6 +3299,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         project_service,
         trigger_conversation_services,
     } = runtime_parts;
+    // A dense tool ranker persists its vectors per user under `/tool-vectors`.
+    tool_vector_store.bind(ironclaw_tool_retrieval::FilesystemToolVectorStore::new(
+        Arc::clone(&scoped_filesystem),
+        ironclaw_tool_retrieval::DEFAULT_STORED_VECTORS_PER_OWNER,
+    ));
     let process_journal_source = processes.journal();
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
@@ -4138,7 +4159,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
                             // `is_enabled()` (not `is_bridged()`): #7410 widened
                             // the disclosure protocol to every enabled mode.
                             disclosure: resolved_tool_disclosure.is_enabled(),
-                            tool_prefetch: false,
+                            tool_prefetch: resolved_tool_disclosure.is_enabled()
+                                && tool_prefetch.is_some(),
                             benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
                             // Provider-shipped, not host-owned: whatever the
                             // bound memory extension declares as its guidance,
@@ -4217,8 +4239,26 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // exact same channel. For standalone, `None` causes `build_default_planned_runtime`
         // to mint its own wiring internally (existing behavior).
         scheduler_wake_wiring: production_scheduler_wake,
+        tool_retrieval_provider,
+        // Selection admits only tools the acting user can use (#7836).
+        tool_availability: tool_prefetch.as_ref().map(|_| {
+            ironclaw_extension_host::tool_availability::extension_tool_availability(
+                Arc::clone(&services.shared_extension_registry),
+                services
+                    .product_auth
+                    .runtime_credential_account_selection_service(),
+                actor_user_id.clone(),
+            )
+        }),
+        tool_prefetch,
     };
     let composition = build_default_planned_runtime(planned_runtime_parts)?;
+    // Index users' tool catalogs now and on every active-registry change,
+    // instead of in their turns. Owned by the runtime; stopped on shutdown.
+    let tool_catalog_indexer = composition
+        .tool_catalog_indexer
+        .clone()
+        .map(|indexer| indexer.spawn(services.shared_extension_registry.subscribe()));
     let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -4790,6 +4830,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         session_channel_directory,
         session_channel_extension_id,
         reply_publication_recovery,
+        tool_catalog_indexer,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),

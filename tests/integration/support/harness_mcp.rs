@@ -81,7 +81,7 @@ pub(super) fn standalone_host_runtime_with_registry_egress_and_mcp(
     registry: ExtensionRegistry,
     first_party_egress: Arc<RecordingRuntimeHttpEgress>,
     mcp_runtime: Arc<LoopbackMcpRuntime>,
-    mcp_provider_id: &str,
+    mcp_provider_ids: &[&str],
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -97,8 +97,28 @@ pub(super) fn standalone_host_runtime_with_registry_egress_and_mcp(
     ))?))
     .with_first_party_http_egress(first_party_egress)
     .with_mcp_runtime(mcp_runtime)
-    .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(mcp_provider_id)?));
+    .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(
+        mcp_provider_ids,
+    )?));
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// One tool of a [`MockMcpPackage`]: its capability id (`<provider>.<tool>`,
+/// whose part after the provider prefix is the MCP tool name), the
+/// description the model sees, and its parameters schema.
+#[derive(Debug, Clone)]
+pub struct MockMcpTool {
+    pub capability_id: String,
+    pub description: String,
+    pub parameters_schema: serde_json::Value,
+}
+
+/// A mock MCP extension package served by the loopback mock server: one
+/// provider id and the tools it declares.
+#[derive(Debug, Clone)]
+pub struct MockMcpPackage {
+    pub provider_id: String,
+    pub tools: Vec<MockMcpTool>,
 }
 
 /// Build an `ExtensionPackage` describing a hosted MCP extension backed by the
@@ -118,6 +138,70 @@ pub(super) fn mock_mcp_extension_package(
     mcp_url: &str,
     capability_id: &str,
 ) -> HarnessResult<ExtensionPackage> {
+    mock_mcp_multi_tool_extension_package(
+        &MockMcpPackage {
+            provider_id: provider_id.to_string(),
+            tools: vec![MockMcpTool {
+                capability_id: capability_id.to_string(),
+                description: "Mock MCP capability".to_string(),
+                parameters_schema: json!({"type": "object"}),
+            }],
+        },
+        mcp_url,
+    )
+}
+
+/// [`mock_mcp_extension_package`] for a package declaring several tools,
+/// each with its own description and inline parameters schema.
+pub(super) fn mock_mcp_multi_tool_extension_package(
+    package: &MockMcpPackage,
+    mcp_url: &str,
+) -> HarnessResult<ExtensionPackage> {
+    let provider_id = package.provider_id.as_str();
+    let mut capability_manifests = Vec::with_capacity(package.tools.len());
+    let mut capabilities = Vec::with_capacity(package.tools.len());
+    for tool in &package.tools {
+        capability_manifests.push(CapabilityManifest {
+            id: CapabilityId::new(tool.capability_id.as_str())?,
+            description: tool.description.clone(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            visibility: CapabilityVisibility::Model,
+            standard_op: None,
+            input_schema_ref: CapabilityProfileSchemaRef::new(
+                "schemas/mock-mcp/mock.input.v1.json",
+            )?,
+            output_schema_ref: Some(CapabilityProfileSchemaRef::new(
+                "schemas/mock-mcp/mock.output.v1.json",
+            )?),
+            prompt_doc_ref: None,
+            required_host_ports: Vec::new(),
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+        });
+        // Inline schema so surface_descriptor returns Ok(descriptor) without
+        // trying to read "schemas/mock-mcp/mock.input.v1.json" from the test
+        // filesystem (that file doesn't exist for a test-only mock extension).
+        capabilities.push(CapabilityDescriptor {
+            id: CapabilityId::new(tool.capability_id.as_str())?,
+            provider: ExtensionId::new(provider_id)?,
+            runtime: RuntimeKind::Mcp,
+            trust_ceiling: TrustClass::Sandbox,
+            description: tool.description.clone(),
+            parameters_schema: tool.parameters_schema.clone(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+            standard_op: None,
+        });
+    }
     let manifest = ExtensionManifest {
         schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
         id: ExtensionId::new(provider_id)?,
@@ -136,47 +220,8 @@ pub(super) fn mock_mcp_extension_package(
         host_apis: Vec::new(),
         host_api_surfaces: Vec::new(),
         hooks: Vec::new(),
-        capabilities: vec![CapabilityManifest {
-            id: CapabilityId::new(capability_id)?,
-            description: "Mock MCP capability".to_string(),
-            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
-            default_permission: PermissionMode::Allow,
-            visibility: CapabilityVisibility::Model,
-            standard_op: None,
-            input_schema_ref: CapabilityProfileSchemaRef::new(
-                "schemas/mock-mcp/mock.input.v1.json",
-            )?,
-            output_schema_ref: Some(CapabilityProfileSchemaRef::new(
-                "schemas/mock-mcp/mock.output.v1.json",
-            )?),
-            prompt_doc_ref: None,
-            required_host_ports: Vec::new(),
-            runtime_credentials: Vec::new(),
-            network_targets: Vec::new(),
-            max_egress_bytes: None,
-            resource_profile: None,
-            origin_gate_matrix: None,
-        }],
+        capabilities: capability_manifests,
     };
-    // Inline schema so surface_descriptor returns Ok(descriptor) without
-    // trying to read "schemas/mock-mcp/mock.input.v1.json" from the test
-    // filesystem (that file doesn't exist for a test-only mock extension).
-    let capabilities = vec![CapabilityDescriptor {
-        id: CapabilityId::new(capability_id)?,
-        provider: ExtensionId::new(provider_id)?,
-        runtime: RuntimeKind::Mcp,
-        trust_ceiling: TrustClass::Sandbox,
-        description: "Mock MCP capability".to_string(),
-        parameters_schema: json!({"type": "object"}),
-        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
-        default_permission: PermissionMode::Allow,
-        runtime_credentials: Vec::new(),
-        network_targets: Vec::new(),
-        max_egress_bytes: None,
-        resource_profile: None,
-        origin_gate_matrix: None,
-        standard_op: None,
-    }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(
         ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
@@ -189,38 +234,39 @@ pub(super) fn mock_mcp_extension_package(
 }
 
 /// Trust policy for MCP integration tests: first-party builtins + user-trusted
-/// mock MCP provider.  The mock MCP provider is registered with root
+/// mock MCP providers.  Each mock MCP provider is registered with root
 /// `/system/extensions/<provider_id>`, so its manifest path must match the
 /// `PackageSource::LocalManifest` key the host runtime derives at dispatch time.
-fn first_party_and_mcp_trust_policy(mcp_provider_id: &str) -> HarnessResult<HostTrustPolicy> {
+fn first_party_and_mcp_trust_policy(mcp_provider_ids: &[&str]) -> HarnessResult<HostTrustPolicy> {
+    let mut entries = vec![AdminEntry::for_local_manifest(
+        PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+        "/system/extensions/builtin/manifest.toml".to_string(),
+        None,
+        HostTrustAssignment::first_party(),
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
+            EffectKind::Network,
+            EffectKind::SpawnProcess,
+            EffectKind::ExecuteCode,
+            EffectKind::ExternalWrite,
+        ],
+        None,
+    )];
+    for mcp_provider_id in mcp_provider_ids {
+        entries.push(AdminEntry::for_local_manifest(
+            PackageId::new(*mcp_provider_id)?,
+            format!("/system/extensions/{mcp_provider_id}/manifest.toml"),
+            None,
+            HostTrustAssignment::user_trusted(),
+            vec![EffectKind::DispatchCapability, EffectKind::Network],
+            None,
+        ));
+    }
     Ok(HostTrustPolicy::new(vec![Box::new(
-        AdminConfig::with_entries(vec![
-            AdminEntry::for_local_manifest(
-                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-                "/system/extensions/builtin/manifest.toml".to_string(),
-                None,
-                HostTrustAssignment::first_party(),
-                vec![
-                    EffectKind::DispatchCapability,
-                    EffectKind::ReadFilesystem,
-                    EffectKind::WriteFilesystem,
-                    EffectKind::DeleteFilesystem,
-                    EffectKind::Network,
-                    EffectKind::SpawnProcess,
-                    EffectKind::ExecuteCode,
-                    EffectKind::ExternalWrite,
-                ],
-                None,
-            ),
-            AdminEntry::for_local_manifest(
-                PackageId::new(mcp_provider_id)?,
-                format!("/system/extensions/{mcp_provider_id}/manifest.toml"),
-                None,
-                HostTrustAssignment::user_trusted(),
-                vec![EffectKind::DispatchCapability, EffectKind::Network],
-                None,
-            ),
-        ]),
+        AdminConfig::with_entries(entries),
     )])?)
 }
 

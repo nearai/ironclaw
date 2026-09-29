@@ -38,7 +38,7 @@ use ratchet_support::{
 /// definition.
 ///
 /// The eleven `ironclaw_loop_contracts` rows are PROPOSAL §6.1.4's port set
-/// verbatim. The two others are deliberate and documented:
+/// verbatim. The two after them are deliberate and documented:
 ///
 /// * `LoopExitEvidencePort` is **kernel authority, not loop contract**. It is
 ///   the read-only durable-evidence port the turn kernel uses to validate a
@@ -49,6 +49,15 @@ use ratchet_support::{
 ///   single implementer inside that crate. It never crosses the loop/kernel
 ///   membrane, so it is not part of the contract the agent loop compiles
 ///   against.
+///
+/// The last three rows are loop ports whose names do not follow the
+/// `Loop…Port` pattern (see [`NAMED_LOOP_PORTS`]): the tool retrieval port
+/// that ranks tools for `tool_search` and turn-start tool selection, and the
+/// tool selection classifier port that decides which tools a conversation
+/// advertises. The loop host consumes them and deployments implement them
+/// above the contract, so their definitions belong in
+/// `ironclaw_loop_contracts` like every other loop port, and no crate may
+/// re-export them.
 const LOOP_PORT_OWNERS: &[(&str, &str)] = &[
     ("LoopCancellationPort", "ironclaw_loop_contracts"),
     ("LoopCapabilityPort", "ironclaw_loop_contracts"),
@@ -63,14 +72,27 @@ const LOOP_PORT_OWNERS: &[(&str, &str)] = &[
     ("LoopTranscriptPort", "ironclaw_loop_contracts"),
     ("LoopAttachmentReadPort", "ironclaw_loop_host"),
     ("LoopExitEvidencePort", "ironclaw_turns"),
+    ("ToolRetrievalIndex", "ironclaw_loop_contracts"),
+    ("ToolRetrievalProvider", "ironclaw_loop_contracts"),
+    ("ToolSelectionClassifier", "ironclaw_loop_contracts"),
+];
+
+/// Loop ports whose names do not match the anchored `Loop…Port` pattern but
+/// are governed by the same location and re-export rules. Every entry must
+/// also have a `LOOP_PORT_OWNERS` row.
+const NAMED_LOOP_PORTS: &[&str] = &[
+    "ToolRetrievalIndex",
+    "ToolRetrievalProvider",
+    "ToolSelectionClassifier",
 ];
 
 const KEYWORDS: &[&str] = &["trait "];
 
 /// Anchored on both ends: a `Loop*Port` is a port, `HookedLoopModelPort` is an
-/// adapter. Only the former is location-governed.
+/// adapter. Only the former is location-governed, plus the explicitly named
+/// ports in [`NAMED_LOOP_PORTS`] (matched exactly, never by substring).
 fn is_loop_port(ident: &str) -> bool {
-    ident.starts_with("Loop") && ident.ends_with("Port")
+    (ident.starts_with("Loop") && ident.ends_with("Port")) || NAMED_LOOP_PORTS.contains(&ident)
 }
 
 /// The crate directory owning `path`, resolved through the crate inventory;
@@ -319,6 +341,24 @@ fn loop_port_predicate_is_anchored_at_both_ends() {
     // Negative: neighbours that are neither.
     assert!(!is_loop_port("LoopRunContext"));
     assert!(!is_loop_port("ProcessTransitionPort"));
+    // Positive: explicitly named ports, matched exactly.
+    assert!(is_loop_port("ToolRetrievalProvider"));
+    assert!(is_loop_port("ToolRetrievalIndex"));
+    // Negative: implementations and neighbours of the named ports.
+    assert!(!is_loop_port("NativeBm25fToolRetrieval"));
+    assert!(!is_loop_port("DenseToolRetrievalProvider"));
+    assert!(!is_loop_port("ToolRetrievalError"));
+}
+
+#[test]
+fn every_named_loop_port_has_an_owner_row() {
+    let owners: BTreeMap<&str, &str> = LOOP_PORT_OWNERS.iter().copied().collect();
+    for name in NAMED_LOOP_PORTS {
+        assert!(
+            owners.contains_key(name),
+            "{name} is in NAMED_LOOP_PORTS but has no LOOP_PORT_OWNERS row"
+        );
+    }
 }
 
 #[test]

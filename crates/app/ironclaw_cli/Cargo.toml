@@ -71,6 +71,11 @@ ironclaw_extension_support = { path = "../../extensions/ironclaw_extension_suppo
 ironclaw_auth = { path = "../../domains/ironclaw_auth", version = "0.1.0" }
 ironclaw_slack_extension = { path = "../../extensions/packages/slack", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "../../extensions/packages/telegram", version = "0.1.0" }
+# The Jev turn-start tool classifier (a hosted decisions API, TypeSafe's by
+# default), bound here (never in composition) when `[tool_selection]
+# classifier = "jev"`, so a build without the vendor package only loses this
+# one binding.
+ironclaw_tool_selection_jev = { path = "../../extensions/packages/tool-selection-jev", version = "0.1.0" }
 ironclaw_web_app = { path = "../../domains/ironclaw_web_app", version = "0.1.0" }
 ironclaw_web_app_extension = { path = "../../extensions/packages/web-app", version = "0.1.0" }
 ironclaw_webui = { path = "../../product/ironclaw_webui", version = "0.1.0" }

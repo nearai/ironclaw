@@ -25,11 +25,14 @@ use std::time::Duration;
 
 use ironclaw_config::BudgetDefaults;
 use ironclaw_config::RebornBootConfig;
+use ironclaw_config::{ToolPrefetchMode, ToolPrefetchSettings, ToolSelectionClassifierSettings};
 use ironclaw_host_api::ids::{AgentId, ProjectId, UserId};
+use ironclaw_loop_contracts::{ToolRetrievalProvider, ToolSelectionClassifier};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
 use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_loop_host::{ToolPrefetchConfig, ToolPrefetchConfigError, ToolPrefetchRanking};
 use ironclaw_triggers::TriggerFireAccessChecker;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turn_runner::runtime::{
@@ -334,6 +337,18 @@ pub struct RebornRuntimeInput {
     pub ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
+    /// The ranker behind `tool_search`. `None` (the default) keeps the
+    /// host-bundled BM25F ranker; a deployment that wants another ranker (for
+    /// example a dense index) binds it here and the runtime build hands it to
+    /// the tool-disclosure decorator.
+    pub tool_retrieval_provider: Option<Arc<dyn ToolRetrievalProvider>>,
+    /// Where a dense ranker persists tool vectors. The runtime build binds it
+    /// to the per-user `/tool-vectors` store; hand it to
+    /// `resolve_tool_retrieval_provider` so the bound ranker uses it.
+    pub tool_vector_store: ironclaw_tool_retrieval::ToolVectorStoreSlot,
+    /// Turn-start tool selection (`REBORN_TOOL_PREFETCH*`). `None` (the
+    /// default) keeps today's tool surface.
+    pub tool_prefetch: Option<ToolPrefetchConfig>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: KeepaliveSweepSettings,
     /// Explicit fire-time access checker override. Primarily a test/advanced
@@ -414,6 +429,9 @@ impl RebornRuntimeInput {
             ironhub_manifest_url,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
+            tool_retrieval_provider: None,
+            tool_vector_store: Default::default(),
+            tool_prefetch: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: KeepaliveSweepSettings::default(),
             trigger_fire_access_checker: None,
@@ -581,6 +599,44 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Bind the ranker behind `tool_search` in place of the host-bundled
+    /// BM25F ranker.
+    pub fn with_tool_retrieval_provider(
+        mut self,
+        provider: Arc<dyn ToolRetrievalProvider>,
+    ) -> Self {
+        self.tool_retrieval_provider = Some(provider);
+        self
+    }
+
+    /// Turn on turn-start tool selection with the parsed operator settings
+    /// and the local classifier; settings naming another classifier are
+    /// refused (bind it with [`Self::with_tool_prefetch_classifier`]).
+    pub fn with_tool_prefetch(
+        mut self,
+        settings: ToolPrefetchSettings,
+    ) -> Result<Self, ToolPrefetchConfigError> {
+        if settings.classifier != ToolSelectionClassifierSettings::Local {
+            return Err(ToolPrefetchConfigError::ClassifierNotBound {
+                name: settings.classifier.as_str().to_string(),
+            });
+        }
+        self.tool_prefetch = Some(tool_prefetch_config(settings)?);
+        Ok(self)
+    }
+
+    /// Turn on turn-start tool selection with `classifier` choosing the
+    /// tools in place of the local ranker and thresholds.
+    pub fn with_tool_prefetch_classifier(
+        mut self,
+        settings: ToolPrefetchSettings,
+        classifier: impl ToolSelectionClassifier + 'static,
+    ) -> Result<Self, ToolPrefetchConfigError> {
+        self.tool_prefetch =
+            Some(tool_prefetch_config(settings)?.with_classifier(Arc::new(classifier)));
+        Ok(self)
+    }
+
     pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
         self.trigger_poller = trigger_poller;
         self
@@ -706,6 +762,31 @@ impl RebornRuntimeInput {
         self.model_cost_table_override = Some(cost_table);
         self
     }
+}
+
+fn tool_prefetch_config(
+    settings: ToolPrefetchSettings,
+) -> Result<ToolPrefetchConfig, ToolPrefetchConfigError> {
+    let ranking = match settings.mode {
+        ToolPrefetchMode::Semantic => ToolPrefetchRanking::Semantic,
+        ToolPrefetchMode::Lexical | ToolPrefetchMode::Off => ToolPrefetchRanking::Lexical,
+    };
+    let r = &settings.reselection;
+    let reselection = ironclaw_loop_host::ToolReselectionConfig::new(
+        r.enabled,
+        Duration::from_secs(r.cache_lifetime_secs),
+        Duration::from_secs(r.cache_margin_secs),
+    );
+    Ok(ToolPrefetchConfig::new(
+        ranking,
+        settings.max_tools,
+        settings.token_budget,
+        settings.min_similarity,
+        settings.min_relative,
+        settings.always,
+    )?
+    .with_context(settings.context_messages, settings.segment_bytes)?
+    .with_reselection(reselection))
 }
 
 #[cfg(test)]

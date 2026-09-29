@@ -129,6 +129,164 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+/// With turn-start selection on, a run's prompt follows its frozen `tools`
+/// array through the real runtime build: the selection section renders (the
+/// selection advertises the bridges), while the memory guidance, the
+/// extension-lifecycle paragraphs and the runtime-context tool mentions,
+/// whose tools a greeting does not select, are withheld. Their
+/// ordinary-surface rendering is pinned by the test above, so their absence
+/// here is the selection's doing (#7836).
+#[tokio::test]
+async fn standalone_runtime_prompt_names_only_the_selected_tools() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let settings = ironclaw_config::ToolPrefetchSettings::resolve(
+        None,
+        &|name: &str| {
+            Ok((name == ironclaw_config::REBORN_TOOL_PREFETCH_ENV).then(|| "lexical".to_string()))
+        },
+        ironclaw_config::ToolRetrievalMode::Native,
+    )
+    .expect("settings resolve")
+    .expect("selection on");
+    let input = runtime_input(root.path().join("standalone"), Arc::clone(&requests))
+        .with_tool_prefetch(settings)
+        .expect("valid selection");
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.send_user_message(&conversation, "ping"),
+    )
+    .await
+    .expect("runtime send should finish")
+    .expect("runtime send should succeed");
+    assert_eq!(reply.status, TurnStatus::Completed);
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let recorded_requests = recorded_requests(&requests);
+    let request = recorded_requests.first().expect("one model request");
+    let system: String = request
+        .messages
+        .iter()
+        .filter(|message| message.role == HostManagedModelMessageRole::System)
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        system.contains("Tools Chosen for This Conversation"),
+        "{system}"
+    );
+    assert!(system.contains("Tool Discovery"), "{system}");
+    // The `tool_search` description lists deferred tools by name on purpose
+    // (they are reachable on demand), so the checks target the gated blocks'
+    // own wording rather than bare tool names.
+    for withheld in [
+        "Persistent Memory",
+        "ironclaw.memory.",
+        "When `extension_search` and `extension_install` are present",
+        "`extension_register_hosted_mcp` is also visible",
+        "profile_set capability",
+        "time capability",
+    ] {
+        assert!(
+            !system.contains(withheld),
+            "the prompt names {withheld:?}, which the run does not advertise: {system}"
+        );
+    }
+}
+
+/// A ranker whose fit always fails, so semantic turn-start selection cannot
+/// choose and the run falls back to the ordinary surface.
+#[derive(Debug)]
+struct FailingRetrieval;
+
+#[async_trait]
+impl ironclaw_loop_contracts::ToolRetrievalProvider for FailingRetrieval {
+    fn ranker_version(&self) -> &str {
+        "failing-composition-test-v1"
+    }
+
+    async fn fit(
+        &self,
+        _definitions: &[ironclaw_loop_contracts::ProviderToolDefinition],
+    ) -> Result<
+        Arc<dyn ironclaw_loop_contracts::ToolRetrievalIndex>,
+        ironclaw_loop_contracts::ToolRetrievalError,
+    > {
+        Err(
+            ironclaw_loop_contracts::ToolRetrievalError::CorpusTooLarge {
+                definitions: 0,
+                limit: 0,
+            },
+        )
+    }
+}
+
+/// The identity (`SYSTEM.md` plus appended sections) message of the first
+/// recorded model request.
+fn identity_prompt(requests: &Arc<StdMutex<Vec<HostManagedModelRequest>>>) -> String {
+    recorded_requests(requests)
+        .first()
+        .expect("one model request")
+        .messages
+        .iter()
+        .find(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("You are IronClaw Agent")
+        })
+        .expect("identity prompt")
+        .content
+        .clone()
+}
+
+/// A run whose turn-start selection fell back to the ordinary surface (here
+/// the selection's ranker fails) renders the prompt a runtime with selection
+/// off renders, byte for byte: no selection section, and every tool-naming
+/// section the ordinary surface always carried.
+#[tokio::test]
+async fn standalone_runtime_fallback_run_keeps_the_selection_off_prompt() {
+    async fn opening_identity_prompt(selection: bool) -> String {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut input = runtime_input(root.path().join("standalone"), Arc::clone(&requests))
+            .with_tool_retrieval_provider(Arc::new(FailingRetrieval));
+        if selection {
+            let settings = ironclaw_config::ToolPrefetchSettings::resolve(
+                None,
+                &|name: &str| {
+                    Ok((name == ironclaw_config::REBORN_TOOL_PREFETCH_ENV)
+                        .then(|| "semantic".to_string()))
+                },
+                ironclaw_config::ToolRetrievalMode::Dense,
+            )
+            .expect("settings resolve")
+            .expect("selection on");
+            input = input.with_tool_prefetch(settings).expect("valid selection");
+        }
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        runtime.shutdown().await.expect("runtime shutdown");
+        identity_prompt(&requests)
+    }
+
+    let selection_off = opening_identity_prompt(false).await;
+    let fallback = opening_identity_prompt(true).await;
+    assert_eq!(fallback, selection_off);
+    assert!(!fallback.contains("Tools Chosen for This Conversation"));
+    assert!(fallback.contains("`extension_register_hosted_mcp` is also visible"));
+    assert!(fallback.contains("Persistent Memory"));
+}
+
 #[tokio::test]
 async fn standalone_runtime_uses_existing_edited_default_system_prompt() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -212,6 +370,86 @@ async fn standalone_runtime_rejects_non_file_default_system_prompt() {
         }
         other => panic!("expected build error for non-file default prompt, got {other:?}"),
     }
+}
+
+/// Ranker that records every corpus it is fitted on and never matches.
+#[derive(Debug, Default)]
+struct RecordingRetrieval {
+    fitted_corpus_sizes: StdMutex<Vec<usize>>,
+}
+
+#[derive(Debug)]
+struct EmptyIndex;
+
+#[async_trait]
+impl ironclaw_loop_contracts::ToolRetrievalIndex for EmptyIndex {
+    async fn search(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<
+        ironclaw_loop_contracts::ToolSearchOutcome,
+        ironclaw_loop_contracts::ToolRetrievalError,
+    > {
+        Ok(ironclaw_loop_contracts::ToolSearchOutcome::no_match())
+    }
+}
+
+#[async_trait]
+impl ironclaw_loop_contracts::ToolRetrievalProvider for RecordingRetrieval {
+    fn ranker_version(&self) -> &str {
+        "recording-composition-test-v1"
+    }
+
+    async fn fit(
+        &self,
+        definitions: &[ironclaw_loop_contracts::ProviderToolDefinition],
+    ) -> Result<
+        Arc<dyn ironclaw_loop_contracts::ToolRetrievalIndex>,
+        ironclaw_loop_contracts::ToolRetrievalError,
+    > {
+        self.fitted_corpus_sizes
+            .lock()
+            .expect("fit recorder lock poisoned")
+            .push(definitions.len());
+        Ok(Arc::new(EmptyIndex))
+    }
+}
+
+/// `RebornRuntimeInput::with_tool_retrieval_provider` reaches the
+/// tool-disclosure decorator through the real `build_reborn_runtime`: the
+/// bound ranker is the one fitted over the run's authorized tool surface.
+#[tokio::test]
+async fn standalone_runtime_fits_the_bound_tool_retrieval_provider() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let provider = Arc::new(RecordingRetrieval::default());
+    let input = runtime_input(root.path().join("standalone"), Arc::clone(&requests))
+        .with_tool_retrieval_provider(
+            Arc::clone(&provider) as Arc<dyn ironclaw_loop_contracts::ToolRetrievalProvider>
+        );
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.send_user_message(&conversation, "ping"),
+    )
+    .await
+    .expect("runtime send should finish")
+    .expect("runtime send should succeed");
+    assert_eq!(reply.status, TurnStatus::Completed);
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let fitted = provider
+        .fitted_corpus_sizes
+        .lock()
+        .expect("fit recorder lock poisoned")
+        .clone();
+    assert!(
+        fitted.iter().any(|size| *size > 0),
+        "the bound ranker must be fitted over the run's authorized tools, got {fitted:?}"
+    );
 }
 
 fn runtime_input(

@@ -117,6 +117,10 @@ ironclaw_memory = { path = "crates/domains/ironclaw_memory", version = "0.1.0" }
 # The production-backend memory integration scenario binds the native provider
 # over the same libSQL composite used by memory tool dispatch.
 ironclaw_memory_native = { path = "crates/extensions/packages/memory-native", version = "0.1.0" }
+ironclaw_tool_retrieval = { path = "crates/extensions/packages/tool-retrieval", version = "0.1.0" }
+# The Jev turn-start tool classifier, pointed at a loopback stub through its
+# `test-support` seam; the integration suite never calls the real API.
+ironclaw_tool_selection_jev = { path = "crates/extensions/packages/tool-selection-jev", version = "0.1.0", features = ["test-support"] }
 ironclaw_host_ingress = { path = "crates/product/ironclaw_host_ingress", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/kernel/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_common = { path = "crates/contracts/ironclaw_common" }

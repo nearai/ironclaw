@@ -214,7 +214,13 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// into #7875. Main contributes the resource-block observer wiring and #7875
 /// adds the durable auth notification observer wiring. Both lifecycle policies
 /// remain in `ironclaw_assistant`; composition only supplies dependencies.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_935;
+/// ✎ Re-seeded 42_935 -> 43_118 on 2026-09-28 for the text-embeddings
+/// provider wiring (`embedding_provider_factory.rs`, +38 lines: map the
+/// `[embeddings]` section onto `ironclaw_llm`'s settings and call its
+/// fail-closed factory); main alone already measured 43_080. Measured with
+/// `bash scripts/ci/check-composition-budget.sh --print`; the manifest's
+/// `loc_ceiling`/`loc_observed` move to the same figure in this commit.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_118;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

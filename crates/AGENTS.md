@@ -85,7 +85,8 @@ two do not always rhyme:
 - `extensions/` is deliberately *vertical*: registry = substrates, support =
   runtimes, host = loops, manager = products; under `packages/`, the channel
   adapter crates (slack, telegram, web-app) are products and the memory provider
-  crates (memory-native, mem0) are substrates.
+  crates (memory-native, mem0), the dense tool ranker (tool-retrieval) and the
+  Jev tool classifier (tool-selection-jev) are substrates.
 - Two placement surprises: `product/ironclaw_host_ingress` and
   `app/ironclaw_config` are `substrates`-layer.
 
@@ -95,20 +96,22 @@ files carry their members' exact layers.
 
 ## Workspace facts
 
-**68 packages**: 66 under `crates/`, plus the root package
+**70 packages**: 68 under `crates/`, plus the root package
 `ironclaw_integration_tests` (the in-process Reborn integration suite,
 `tests/integration/`) and `tools/ironclaw_stress`. One documented exclusion:
 `tools/ironclaw_silk_decoder`, a standalone helper that is
 workspace-`exclude`d. Zero crates sit flat under `crates/` and zero owned
 placement exceptions remain. The gate is
 `python3 scripts/ci/check-target-tree.py`, which compares the workspace
-against the documented tree (PROPOSAL §5); on 2026-08-18 it reports:
-`target tree: OK (68 workspace members against 68 documented packages, 1
+against the documented tree (PROPOSAL §5); on 2026-09-28 it reports:
+`target tree: OK (70 workspace members against 70 documented packages, 1
 documented exclusion(s), 0 owned exception(s))` (re-derived after adding the
-notification inbox crate).
+Jev tool classifier package).
 
-Under `crates/extensions/packages/`, 15 package directories: 5 are workspace
-crates (`slack`, `telegram`, `web-app`, `memory-native`, `mem0`) and 10 are data-only
+Under `crates/extensions/packages/`, 17 package directories: 7 are workspace
+crates (`slack`, `telegram`, `web-app`, `memory-native`, `mem0`,
+`tool-retrieval`, `tool-selection-jev` — the last two are loop-port providers
+with no manifest) and 10 are data-only
 (manifest + prompts/schemas, some with prebuilt WASM): github, gmail, the
 five google-*, nearai-mcp, notion-mcp, web-access. Every package directory —
 data-only ones included — carries its own `README.md`, so the read order

@@ -437,6 +437,43 @@ fn reborn_crate_dependency_boundaries_hold() {
             .filter(|name| !memory_native_allowed.contains(name))
             .collect::<Vec<_>>(),
     );
+    // Dense tool ranker package: the retrieval port it implements, the id and
+    // provenance vocabulary its definitions carry, the embeddings port it
+    // ranks with, and the filesystem plane its vector store persists through
+    // — nothing from the loop host, the kernel, or composition.
+    let tool_retrieval_allowed = [
+        "ironclaw_tool_retrieval",
+        "ironclaw_loop_contracts",
+        "ironclaw_host_api",
+        "ironclaw_llm",
+        "ironclaw_filesystem",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_tool_retrieval",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !tool_retrieval_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+    // Jev tool classifier package: the selection port it implements, the
+    // network-policy vocabulary its requests carry, and the policy egress
+    // every request goes through — nothing from the loop host, the kernel,
+    // or composition.
+    let tool_selection_jev_allowed = [
+        "ironclaw_tool_selection_jev",
+        "ironclaw_loop_contracts",
+        "ironclaw_host_api",
+        "ironclaw_network",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_tool_selection_jev",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !tool_selection_jev_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
 
     // Canonical Reborn identity layer: it maps external identities to a stable
     // `UserId` at the bottom of the stack, so among internal ironclaw crates it
@@ -1056,7 +1093,40 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // production prompt validation checks structural limits and control
         // characters only; decoded Basic-auth samples remain test-only. Count
         // read from this test's own failure message after merging #7416 and #6985.
-        ("ironclaw_loop_contracts", 13_608),
+        // 13_608 -> 14_054 (2026-09-28, swappable tool retrieval port, design
+        // from #7411): +299 lines for the `tool_retrieval` module — the
+        // async `ToolRetrievalProvider`/`ToolRetrievalIndex` port behind
+        // `tool_search`, its scored `ToolSearchOutcome`/`RankedTool` and
+        // `ToolSearchQueryClass` DTOs, and the `ToolRetrievalError` enum. Most
+        // of it is the contract docs an implementation must hold
+        // (authorization, determinism, confidentiality, score meaning) plus
+        // inline tests. Zero ranking logic: the BM25F ranker and the host's
+        // repair of provider output stay in `ironclaw_loop_host`. The tree
+        // already sat 147 lines over the old pin inside the working slack.
+        // Count read from this test's own failure message.
+        // 14_054 -> 14_381 (2026-09-28, turn-start tool selection classifier
+        // port): +327 lines for the `tool_selection` module — the async
+        // `ToolSelectionClassifier` port that decides which tools a
+        // conversation advertises, its request/answer DTOs, the
+        // `ConversationContext` it carries (moved here from the loop host so
+        // a classifier outside it can read it), and `ToolSelectionError`.
+        // Mostly the contract docs (untrusted output, when it runs,
+        // confidentiality). Zero selection logic: the ranker thresholds, the
+        // floor, output validation and the fallback stay in
+        // `ironclaw_loop_host`; tests live in `tool_selection/tests.rs`.
+        // Count read from this test's own failure message.
+        // 14_381 -> 14_607 (2026-09-28, prompt text follows each run's
+        // advertised tools, #7836): +150 lines for the `advertised_tools`
+        // module — the `AdvertisedToolChoice` marker a turn-start selected
+        // `VisibleCapabilitySurface` carries and the `AdvertisedTools` value
+        // prompt sources gate tool-naming text on — plus the gated
+        // runtime-context time and scheduled-origin lines. DTOs and a
+        // membership check only: which sections a run gets is decided in
+        // `ironclaw_loop_host`; tests live in `advertised_tools/tests.rs` and
+        // `runtime_context/tests.rs`. The tree already sat 76 lines over the
+        // old pin inside the working slack. Count read from this test's own
+        // failure message.
+        ("ironclaw_loop_contracts", 14_607),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -1953,8 +2023,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             // their neutral binding contracts.
             "ironclaw_web_app",
             "ironclaw_web_app_extension",
+            // The vendor-specific Jev turn-start tool classifier package: the
+            // binary reads its API key host-side and builds it when
+            // `[tool_selection] classifier = "jev"`, and hands composition
+            // only the neutral `ToolSelectionClassifier` port, so
+            // composition never links the vendor package.
+            "ironclaw_tool_selection_jev",
         ],
-        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer), and ironclaw_tool_selection_jev (the binary-built Jev tool classifier). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -2317,6 +2393,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // (`ProviderToolName::encode_capability_str`) instead of re-deriving
         // the `.` -> `__` mapping inline (unbound-turns follow-up, PR #7634).
         "crates/ironclaw_loop_host/src/tool_search.rs",
+        // The dense tool ranker keeps the same exact-identifier short circuit
+        // as the native one, through the same single encoding owner.
+        "crates/tool-retrieval/src/provider.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or synthetic provider tools.
         "crates/ironclaw_composition/src/llm_admin/openai_compat_serve.rs",

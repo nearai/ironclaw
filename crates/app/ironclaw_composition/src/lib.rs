@@ -29,6 +29,7 @@ mod channel_initialization;
 #[path = "extension_lifecycle_capabilities_auth_tests.rs"]
 mod composition_extension_lifecycle_auth_tests;
 pub mod deployment;
+mod embedding_provider_factory;
 mod error;
 mod extension_host_assembly;
 mod factory;
@@ -61,6 +62,7 @@ mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+mod tool_retrieval_factory;
 mod trigger_fire_access;
 mod trigger_poller_assembly;
 
@@ -127,6 +129,10 @@ pub use ironclaw_skills::{
 pub use ironclaw_turns::TurnStatus;
 // consumer: `ironclaw_cli` serve wiring · pinned by: `ironclaw_cli` build
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+// consumer: `ironclaw_cli` runtime (via `resolve_tool_retrieval_provider`) · pinned by: `composition/tests/embedding_provider_factory.rs`
+pub use embedding_provider_factory::resolve_embedding_provider;
+// consumer: `ironclaw_cli` runtime · pinned by: `composition/tests/tool_retrieval_factory.rs`
+pub use tool_retrieval_factory::{ToolRetrievalConfigError, resolve_tool_retrieval_provider};
 // consumer: `ironclaw_cli` runtime · pinned by: `composition/tests/memory_mem0_swap.rs`
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
 // consumer: `ironclaw_cli` runtime, `tests/integration/group_memory` · pinned by: `composition/tests/memory_mem0_swap.rs` (`MemoryLifecycleConsumers` is the fn's return type)
@@ -459,6 +465,9 @@ const PER_USER_ALIASES: &[&str] = &[
     "/skills",
     "/workspace",
     "/llm-preferences",
+    // Derived tool embedding vectors (`ironclaw_tool_retrieval`'s store): per
+    // user, because they derive from each user's own authorized catalog.
+    "/tool-vectors",
 ];
 
 /// The canonical global `/system` subroots, each exposed as its own read-only

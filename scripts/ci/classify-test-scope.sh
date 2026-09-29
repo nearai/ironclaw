@@ -363,7 +363,7 @@ is_reborn_test_path() {
       return 0
       ;;
     crates/ironclaw_product_*/*|\
-    crates/slack/*|crates/telegram/*|crates/memory-native/*|crates/mem0/*)
+    crates/slack/*|crates/telegram/*|crates/memory-native/*|crates/mem0/*|crates/tool-retrieval/*|crates/tool-selection-jev/*)
       return 0
       ;;
     crates/ironclaw_webui/*)

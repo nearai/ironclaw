@@ -1127,6 +1127,59 @@ impl RebornIntegrationHarness {
         Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
     }
 
+    /// Assert every captured model request carried a byte-identical `tools`
+    /// argument (names, descriptions and schemas, in order) — the request
+    /// prefix a provider caches. Fails rather than passing vacuously with
+    /// fewer than two captured requests.
+    pub async fn assert_model_tool_definitions_identical(&self) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        if definitions.len() < 2 {
+            return Err(format!(
+                "vacuous: need at least two captured model requests to compare tools; saw {}",
+                definitions.len()
+            )
+            .into());
+        }
+        let encoded = definitions
+            .iter()
+            .map(|tools| {
+                serde_json::to_string(tools).map_err(|e| format!("serialize captured tools: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(index) = encoded.iter().position(|tools| tools != &encoded[0]) {
+            let names = |tools: &Vec<ironclaw_llm::ToolDefinition>| {
+                tools
+                    .iter()
+                    .map(|definition| definition.name.clone())
+                    .collect::<Vec<_>>()
+            };
+            return Err(format!(
+                "model request {index} advertised a different tools array than request 0: \
+                 {:?} vs {:?}; definitions that differ: {:?}",
+                names(&definitions[index]),
+                names(&definitions[0]),
+                differing_tool_definitions(&definitions[0], &definitions[index])
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The tool names the `index`-th captured model request advertised, in
+    /// order.
+    pub fn model_tool_names(&self, index: usize) -> HarnessResult<Vec<String>> {
+        self.scripted_llm
+            .captured_tool_definitions()
+            .get(index)
+            .map(|tools| {
+                tools
+                    .iter()
+                    .map(|definition| definition.name.clone())
+                    .collect()
+            })
+            .ok_or_else(|| format!("no model request {index} was captured").into())
+    }
+
     /// Assert that at least one model request was captured and every captured
     /// `tools` argument was empty. This is the positive boundary assertion for
     /// an effective empty capability allow-set; unlike `assert_model_tools_excludes`,
@@ -2476,4 +2529,31 @@ impl RebornIntegrationHarness {
         self.conversation_history_contains_impl(baseline, Some(kind), needle)
             .await
     }
+}
+
+/// The names of the tool definitions two `tools` arrays render differently,
+/// or that only one of them carries, in name order. Empty when the arrays
+/// hold the same definitions (their order aside).
+pub fn differing_tool_definitions(
+    left: &[ironclaw_llm::ToolDefinition],
+    right: &[ironclaw_llm::ToolDefinition],
+) -> Vec<String> {
+    let render = |tools: &[ironclaw_llm::ToolDefinition]| {
+        tools
+            .iter()
+            .map(|definition| {
+                let rendered = serde_json::to_string(definition)
+                    .unwrap_or_else(|error| format!("unserializable: {error}"));
+                (definition.name.clone(), rendered)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (left, right) = (render(left), render(right));
+    left.keys()
+        .chain(right.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| left.get(*name) != right.get(*name))
+        .cloned()
+        .collect()
 }

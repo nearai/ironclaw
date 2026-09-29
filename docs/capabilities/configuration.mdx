@@ -286,6 +286,83 @@ from the web interface or with `ironclaw config set google.client_id` /
 
 </Accordion>
 
+<Accordion title="tool_selection — which tools a conversation sees" icon="filter">
+
+Off by default. When on, a conversation's first message decides which tools are advertised
+to the model. The list is part of the provider's cached prompt, so it stays fixed while that
+cache could still be warm. After a pause longer than the cache lifetime, or when the model
+changes, the next turn chooses the tools again from the conversation so far, keeping every
+tool the conversation has already used. Everything else remains reachable through
+`tool_search`.
+
+```toml
+[tool_selection]
+mode         = "lexical"   # "off" | "lexical" | "semantic"
+classifier   = "local"     # "local" | "jev"
+always       = []          # extra tools always advertised when authorized
+max_tools    = 100         # floor and extras included
+token_budget = 32000       # a guard against a few huge schemas
+reselect            = true # choose again once the prompt cache has expired
+cache_lifetime_secs = 3600 # for providers whose cache lifetime is unknown
+cache_margin_secs   = 60
+context_messages    = 16   # recent user messages read; segments ranked (1-64)
+segment_bytes       = 2048 # longest segment the local classifier ranks (128-4096)
+
+[tool_selection.local]     # used only when classifier = "local"
+min_similarity = 0.0       # optional, off by default; cosine scores only
+min_relative   = 0.0       # optional, off by default; share of the top score
+
+[tool_selection.jev]       # used only when classifier = "jev"
+endpoint    = "https://api.typesafe.ai/v1/systemone" # any provider serving the same decisions API
+model       = "jev-latest" # moves between Jev releases; name a version to pin it
+api_key_env = "TYPESAFE_API_KEY" # the NAME of the variable holding the key
+timeout_ms  = 500
+```
+
+- **`local`** ranks the tools on this host (`semantic` also calls your embeddings endpoint,
+  once per selection). It ranks each user message separately, cutting a long one into
+  segments of up to `segment_bytes` at paragraph or sentence boundaries, then merges the
+  rankings by rank: every message's best tool first, then every message's second, and so
+  on, up to `max_tools`. So a conversation that covers several topics gets tools for each.
+  The thresholds are optional and off by default. `lexical` ranks only tools that share a
+  word with the conversation, so it may advertise fewer than `max_tools`.
+- **`jev`** asks Jev, TypeSafe's hosted classifier, how likely each tool is to be used and
+  keeps the most likely ones. By default it calls TypeSafe's decisions API with the key in
+  `TYPESAFE_API_KEY` (TypeSafe keys are invite-only for now). To use another provider serving
+  the same decisions API, set `endpoint` to its full URL, `model` to the model id it serves,
+  and `api_key_env` to the name of the variable holding its key. The endpoint must be an
+  `https` URL with a host and no userinfo, query or fragment, and the classifier may reach
+  exactly that host and port and nothing else. If Jev fails (including an account that cannot pay), the
+  conversation keeps the ordinary core tool set; overload responses (`429`, `503`, `529`) are
+  retried within `timeout_ms`. It never falls back to `local`.
+- **Re-selection** happens only at the start of a turn: when the conversation has been idle
+  longer than the prompt-cache lifetime plus `cache_margin_secs`, when the model or provider
+  changed, or when a selected tool was revoked. Anthropic's lifetime comes from its cache
+  retention setting (5 minutes, 1 hour, or no cache); other providers use
+  `cache_lifetime_secs`. If the new choice fails, the conversation keeps the tools it has.
+
+<Warning>
+`jev` sends each conversation's first message (up to 16 KiB), at each re-selection its
+`context_messages` most recent messages (up to 32 KiB in all) and the names of the tools it has called, and the name,
+description and parameter names of every tool the user can call to the configured Jev
+provider (TypeSafe by default), a third party. There is no on-host option; retention is
+governed by that provider's terms. With `mode = "semantic"` and the `local` classifier, the same conversation
+text goes to your embeddings endpoint instead.
+</Warning>
+
+Each key has a `REBORN_TOOL_PREFETCH*` environment override (`REBORN_TOOL_PREFETCH`,
+`REBORN_TOOL_PREFETCH_CLASSIFIER`, `REBORN_TOOL_PREFETCH_MAX_TOOLS`,
+`REBORN_TOOL_PREFETCH_RESELECT` (`on`/`off`), `REBORN_TOOL_PREFETCH_CACHE_LIFETIME_SECS`,
+`REBORN_TOOL_PREFETCH_CONTEXT_MESSAGES`, `REBORN_TOOL_PREFETCH_SEGMENT_BYTES`,
+`REBORN_TOOL_PREFETCH_JEV_ENDPOINT`, `REBORN_TOOL_PREFETCH_JEV_MODEL`,
+`REBORN_TOOL_PREFETCH_JEV_API_KEY_ENV`, …), which wins over the file; `timeout_ms` has none.
+The API key is only ever read from the variable `api_key_env` names. Startup is refused for
+an unknown mode or classifier, out-of-range numbers, and `jev` without its key or with an
+endpoint that is not a plain `https` URL. A
+`[tool_selection.jev]` table under `classifier = "local"` is ignored.
+
+</Accordion>
+
 <Accordion title="skills" icon="puzzle">
 
 ```toml

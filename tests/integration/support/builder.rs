@@ -44,6 +44,7 @@ use ironclaw_host_api::{
 use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
+    ToolRetrievalProvider,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -177,6 +178,16 @@ pub struct RebornIntegrationHarnessBuilder {
     /// degenerate one-thread group (see
     /// `RebornIntegrationGroupBuilder::communication_context_provider`).
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// Optional ranker behind `tool_search`, threaded into the degenerate
+    /// one-thread group (see `RebornIntegrationGroupBuilder::tool_retrieval_provider`).
+    tool_retrieval_provider: Option<Arc<dyn ToolRetrievalProvider>>,
+    /// Optional turn-start tool selection, threaded into the degenerate
+    /// one-thread group (see `RebornIntegrationGroupBuilder::tool_prefetch`).
+    tool_prefetch: Option<ironclaw_loop_host::ToolPrefetchConfig>,
+    /// Optional availability predicate for turn-start selection, threaded into
+    /// the degenerate one-thread group (see
+    /// `RebornIntegrationGroupBuilder::tool_availability`).
+    tool_availability: Option<Arc<dyn ironclaw_loop_contracts::ToolAvailabilityPredicate>>,
     /// C-HOOKS / E-HOOK-INFRA: optional per-run hook dispatcher builder factory
     /// threaded into the degenerate one-thread group (see
     /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
@@ -255,6 +266,37 @@ impl RebornIntegrationHarnessBuilder {
         provider: Arc<dyn CommunicationContextProvider>,
     ) -> Self {
         self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Bind the ranker behind `tool_search` in this harness's underlying group,
+    /// in place of the host-bundled BM25F ranker. Pair with a tool-disclosure
+    /// mode that defers (for example `.with_tool_disclosure_bridged()`).
+    /// Defaults `None`. See `RebornIntegrationGroupBuilder::tool_retrieval_provider`.
+    pub fn with_tool_retrieval_provider(
+        mut self,
+        provider: Arc<dyn ToolRetrievalProvider>,
+    ) -> Self {
+        self.tool_retrieval_provider = Some(provider);
+        self
+    }
+
+    /// Turn on turn-start tool selection in this harness's underlying group.
+    /// Pair with a tool-disclosure mode that is on. Defaults `None`. See
+    /// `RebornIntegrationGroupBuilder::tool_prefetch`.
+    pub fn with_tool_prefetch(mut self, config: ironclaw_loop_host::ToolPrefetchConfig) -> Self {
+        self.tool_prefetch = Some(config);
+        self
+    }
+
+    /// Filter turn-start selection candidates by `predicate` in this
+    /// harness's underlying group. Defaults `None`. See
+    /// `RebornIntegrationGroupBuilder::tool_availability`.
+    pub fn with_tool_availability(
+        mut self,
+        predicate: Arc<dyn ironclaw_loop_contracts::ToolAvailabilityPredicate>,
+    ) -> Self {
+        self.tool_availability = Some(predicate);
         self
     }
 
@@ -728,6 +770,22 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Wire several mock MCP packages behind one loopback mock MCP server
+    /// (`mcp_url`), plus the synthetic `result_read` capability. Each tool's
+    /// MCP name is its capability id without the `<provider>.` prefix; script
+    /// the server's `tools/call` answers when starting it.
+    pub fn with_mock_mcp_packages(
+        mut self,
+        mcp_url: impl Into<String>,
+        packages: impl IntoIterator<Item = super::harness_mcp::MockMcpPackage>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::MockMcpPackages {
+            mcp_url: mcp_url.into(),
+            packages: packages.into_iter().collect(),
+        };
+        self
+    }
+
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     ///
@@ -775,6 +833,15 @@ impl RebornIntegrationHarnessBuilder {
         }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
+        }
+        if let Some(provider) = self.tool_retrieval_provider {
+            group_builder = group_builder.tool_retrieval_provider(provider);
+        }
+        if let Some(config) = self.tool_prefetch {
+            group_builder = group_builder.tool_prefetch(config);
+        }
+        if let Some(predicate) = self.tool_availability {
+            group_builder = group_builder.tool_availability(predicate);
         }
         if let Some(provider) = self.communication_context_provider {
             group_builder = group_builder.communication_context_provider(provider);
@@ -920,6 +987,9 @@ impl RebornIntegrationHarness {
             bridged_policy_override: None,
             budget_accounting: false,
             communication_context_provider: None,
+            tool_retrieval_provider: None,
+            tool_prefetch: None,
+            tool_availability: None,
             hook_dispatcher_builder_factory: None,
             trajectory_observer: None,
             park_tool_gate: None,
@@ -1171,6 +1241,18 @@ impl RebornIntegrationHarness {
         &self,
     ) -> HarnessResult<Arc<dyn ironclaw_threads::SessionThreadService>> {
         Ok(Arc::new(self.thread_harness.service_instance()?))
+    }
+
+    /// This harness thread's turn-start tool-selection history (`None` before
+    /// the first selection), read from the group-shared threads storage.
+    pub(crate) async fn tool_selection_history_for_test(
+        &self,
+    ) -> HarnessResult<Option<ironclaw_threads::ToolSelectionHistory>> {
+        let scope = thread_scope_from_binding(&self.binding)?;
+        Ok(self
+            .thread_service_for_test()?
+            .read_tool_selection_history(&scope, &self.binding.thread_id)
+            .await?)
     }
 
     /// Persist a compaction summary over this harness thread.

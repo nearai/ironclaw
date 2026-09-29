@@ -107,7 +107,9 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 - `harness_mcp.rs` — the mock-MCP scaffolding extracted from the harness:
   `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
   `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
-  `mock_mcp_extension_package`, `standalone_host_runtime_with_registry_egress_and_mcp`,
+  `mock_mcp_extension_package` (and `mock_mcp_multi_tool_extension_package` for
+  a `MockMcpPackage` of several tools, behind `.with_mock_mcp_packages(..)`),
+  `standalone_host_runtime_with_registry_egress_and_mcp`,
   and the MCP trust/network policies. `HostRuntimeCapabilityHarness::mock_mcp_tools`
   lives in `harness/profiles/mock_mcp.rs` (part of the `ToolsProfile` split below);
   it delegates the MCP wiring to the `pub(super)` factories in `harness_mcp.rs`.
