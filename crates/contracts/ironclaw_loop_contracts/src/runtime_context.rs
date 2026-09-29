@@ -4,7 +4,15 @@ use ironclaw_extension_contracts::channel::ChannelPresentation;
 
 use ironclaw_host_api::turn::{ProductTurnContext, TurnOriginKind};
 
+use crate::AdvertisedTools;
 use crate::instruction_bundle::DELIVERY_GUIDANCE;
+
+/// Capabilities the runtime-context lines name. On a run that advertises a
+/// turn-start selection, each mention renders only while the selection
+/// advertises the capability (see [`AdvertisedTools`]).
+const TIME_CAPABILITY_ID: &str = "builtin.time";
+const PROFILE_SET_CAPABILITY_ID: &str = "ironclaw.memory.profile_set";
+const OUTBOUND_DELIVER_CAPABILITY_ID: &str = "builtin.outbound_deliver";
 
 /// Model-visible runtime context for one loop execution.
 ///
@@ -27,6 +35,11 @@ pub struct LoopRuntimeContext {
     /// is set. The user's timezone lives here (drives the local-time render),
     /// not as a separate field.
     pub user_profile: Option<UserProfileContext>,
+    /// The tools this run advertises. The time line and the scheduled-trigger
+    /// origin line name tools; on a turn-start selection each mention renders
+    /// only when the selection advertises that tool. `Ordinary` renders them
+    /// as always.
+    pub advertised_tools: AdvertisedTools,
 }
 
 /// Connected channels known to the system for this user at loop start.
@@ -157,26 +170,43 @@ impl LoopRuntimeContext {
     pub fn render_model_content(&self) -> String {
         let utc = self.loop_started_at_utc.format("%Y-%m-%dT%H:%MZ");
         let user_timezone = self.user_profile.as_ref().and_then(|p| p.timezone);
+        let names_time = self.advertised_tools.may_name(&[TIME_CAPABILITY_ID]);
+        let names_profile_set = self.advertised_tools.may_name(&[PROFILE_SET_CAPABILITY_ID]);
         let time_line = match user_timezone {
             Some(tz) => {
                 let local = self.loop_started_at_utc.with_timezone(&tz);
+                let precise_time = if names_time {
+                    "; for the precise current time use the time capability if it is visible"
+                } else {
+                    ""
+                };
                 // State explicitly that this is the USER's timezone/local time so the
                 // model treats it as where the user is, not an arbitrary system label.
                 format!(
                     "Current date/time at loop start: {utc} (UTC). The user's timezone \
                      is {}, so the user's current local time is {}. This was captured \
-                     when this loop started; for the precise current time use the time \
-                     capability if it is visible.",
+                     when this loop started{precise_time}.",
                     tz.name(),
                     local.format("%H:%M %a"),
                 )
             }
-            None => format!(
-                "Current date/time at loop start: {utc}. The user's timezone is \
-                 unknown - if local time matters, ask the user and offer to save \
-                 it with the profile_set capability (a saved location is not a \
-                 timezone), or use the time capability if it is visible."
-            ),
+            None => {
+                let save_timezone = if names_profile_set {
+                    " and offer to save it with the profile_set capability (a saved \
+                     location is not a timezone)"
+                } else {
+                    ""
+                };
+                let precise_time = if names_time {
+                    ", or use the time capability if it is visible"
+                } else {
+                    ""
+                };
+                format!(
+                    "Current date/time at loop start: {utc}. The user's timezone is \
+                     unknown - if local time matters, ask the user{save_timezone}{precise_time}."
+                )
+            }
         };
 
         let mut parts = vec![time_line];
@@ -329,7 +359,7 @@ impl LoopRuntimeContext {
         // Run origin line: rendered whenever `product_context` is present,
         // independent of whether a communication slice was populated.
         if let Some(ctx) = &self.product_context {
-            parts.push(render_origin_line(ctx));
+            parts.push(render_origin_line(ctx, &self.advertised_tools));
         }
 
         if parts.len() == 1 {
@@ -342,7 +372,7 @@ impl LoopRuntimeContext {
 
 /// Build the run-origin line from a `ProductTurnContext`. Rendered
 /// independently of the communication slice (see `render_model_content`).
-fn render_origin_line(ctx: &ProductTurnContext) -> String {
+fn render_origin_line(ctx: &ProductTurnContext, advertised_tools: &AdvertisedTools) -> String {
     match ctx.origin {
         TurnOriginKind::WebUi => render_first_party_chat_origin_line(ctx),
         TurnOriginKind::Inbound => {
@@ -359,10 +389,16 @@ fn render_origin_line(ctx: &ProductTurnContext) -> String {
             )
         }
         TurnOriginKind::ScheduledTrigger => {
-            "Run origin: scheduled trigger fire. The final reply is recorded in this routine's \
-             own run thread; it is not delivered externally. Deliver externally only if the \
-             prompt instructs it, using builtin__outbound_deliver."
-                .to_string()
+            let deliver_with = if advertised_tools.may_name(&[OUTBOUND_DELIVER_CAPABILITY_ID]) {
+                ", using builtin__outbound_deliver"
+            } else {
+                ""
+            };
+            format!(
+                "Run origin: scheduled trigger fire. The final reply is recorded in this \
+                 routine's own run thread; it is not delivered externally. Deliver externally \
+                 only if the prompt instructs it{deliver_with}."
+            )
         }
     }
 }

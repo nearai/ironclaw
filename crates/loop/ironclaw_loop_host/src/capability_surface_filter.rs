@@ -837,6 +837,7 @@ mod tests {
     async fn visible_capabilities_filters_descriptors_and_callable_ids() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: Some(vec![
                 capability_id("demo.a"),
                 capability_id("demo.b"),
@@ -948,6 +949,7 @@ mod tests {
     async fn visible_capabilities_preserve_capability_info_for_filtered_surface() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: None,
             version: surface_version(),
             descriptors: vec![
@@ -1683,6 +1685,7 @@ mod tests {
     async fn surface_version_preserved() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: None,
             version: surface_version(),
             descriptors: vec![descriptor("demo.allowed"), descriptor("demo.denied")],

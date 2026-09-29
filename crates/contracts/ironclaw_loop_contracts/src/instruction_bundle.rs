@@ -1198,6 +1198,7 @@ mod tests {
         description: &str,
     ) -> VisibleCapabilitySurface {
         VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: crate::CapabilitySurfaceVersion::new("surface:auth-vocab").unwrap(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: ironclaw_host_api::ids::CapabilityId::new(

@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use ironclaw_host_api::capability::CapabilityDescriptionTrust;
 
+use crate::advertised_tools::AdvertisedToolChoice;
 use crate::content_digest::ContentDigest;
 use crate::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
 use ironclaw_host_api::turn::{CapabilityActivityId, LoopGateRef, LoopResultRef};
@@ -106,6 +107,14 @@ pub struct VisibleCapabilitySurface {
     /// `descriptors`.
     #[serde(default)]
     pub callable_capability_ids: Option<Vec<CapabilityId>>,
+    /// How `descriptors` were chosen. A frozen turn-start tool selection
+    /// advertises far less than the ordinary surface, and prompt text that
+    /// names a tool must then follow `descriptors` (see
+    /// [`crate::AdvertisedTools`]). Producers that do not select leave it
+    /// [`AdvertisedToolChoice::Ordinary`]; decorators that narrow
+    /// `descriptors` in place keep it.
+    #[serde(default)]
+    pub advertised_choice: AdvertisedToolChoice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

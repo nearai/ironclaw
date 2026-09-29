@@ -23,6 +23,7 @@
 //! store is introduced.
 #![warn(unreachable_pub)]
 
+mod advertised_tools;
 mod checkpoint_payload;
 mod compaction;
 mod content_digest;
@@ -50,6 +51,7 @@ mod tool_availability;
 mod tool_retrieval;
 mod tool_selection;
 
+pub use advertised_tools::{AdvertisedToolChoice, AdvertisedTools};
 pub use checkpoint_payload::{MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, RedactedCheckpointPayload};
 pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,

@@ -120,8 +120,8 @@ fn trace_host_factory_latency_error<E: ?Sized>(
 }
 
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-    CommunicationContextProvider, EphemeralInstructionMaterializationStore,
+    AdvertisedTools, AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
+    BeginAssistantDraft, CommunicationContextProvider, EphemeralInstructionMaterializationStore,
     FinalizeAssistantMessage, HookMilestoneSink, InstructionBundleMaterializedMessage,
     InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
     LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
@@ -1050,6 +1050,8 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    /// Record each model call for turn-start tool re-selection.
+    record_model_calls: bool,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
@@ -1170,6 +1172,7 @@ where
             skill_context_source: None,
             attachment_read_port: None,
             prompt_diagnostic_sink: None,
+            record_model_calls: false,
             reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
@@ -1271,6 +1274,13 @@ where
         sink: Arc<dyn HostManagedPromptDiagnosticSink>,
     ) -> Self {
         self.prompt_diagnostic_sink = Some(sink);
+        self
+    }
+
+    /// Record every model call's time and model for turn-start tool
+    /// re-selection (see `ThreadBackedLoopModelPort::with_model_call_recording`).
+    pub fn with_model_call_recording(mut self) -> Self {
+        self.record_model_calls = true;
         self
     }
 
@@ -1676,7 +1686,6 @@ where
                 context_adapter.with_channel_conversation_context(channel_context.clone());
         }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
-        let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This
         // localizes dispatcher-owned state (slot poisoning, registry edits) to
         // this one host so it cannot leak into the next run that shares this
@@ -1843,6 +1852,14 @@ where
             ids.contains("builtin.outbound_deliver")
                 && ids.contains("builtin.outbound_delivery_targets_list")
         };
+        // The run's advertised tools, fixed at host build like the surface
+        // above: prompt blocks that name a tool follow them (#7836). The
+        // context port and the model gateway get the same value, so the skill
+        // snippets the gateway re-resolves by ref match the ones the prompt
+        // bundle referenced.
+        let advertised_tools = AdvertisedTools::from_surface(&visible_surface);
+        let context: Arc<dyn LoopContextPort> =
+            Arc::new(context_adapter.with_advertised_tools(advertised_tools.clone()));
         // Join the fetch started at loop entry and stamp the surface-derived
         // `delivery_tools_visible` flag. In the common case the fetch has already
         // resolved during the work above, so this adds no critical-path latency.
@@ -1894,6 +1911,7 @@ where
         .with_safety_context(self.safety_context.clone())
         // Stamped once per loop spawn; a resume creates a new host and restamps.
         .with_runtime_context(LoopRuntimeContext {
+            advertised_tools: advertised_tools.clone(),
             loop_started_at_utc: chrono::Utc::now(),
             communication,
             product_context: run_context.product_context.clone(),
@@ -1978,6 +1996,8 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        record_model_calls: self.record_model_calls,
+                        advertised_tools: advertised_tools.clone(),
                     },
                 ))
             } else {
@@ -2001,6 +2021,8 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        record_model_calls: self.record_model_calls,
+                        advertised_tools: advertised_tools.clone(),
                     },
                 ))
             };
@@ -3239,6 +3261,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
+                advertised_choice: Default::default(),
                 version: CapabilitySurfaceVersion::new("surface-before-ironhub-install")
                     .expect("valid surface version"),
                 descriptors: Vec::new(),

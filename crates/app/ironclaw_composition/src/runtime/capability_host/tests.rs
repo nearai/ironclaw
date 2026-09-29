@@ -2976,7 +2976,10 @@ mod tests {
         assert!(matches!(outcome, Resolution::Done(_)));
 
         let selected = activation_source
-            .load_skill_context_candidates(&run_context)
+            .load_skill_context_candidates(
+                &run_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selected skill context loads");
         // Default injection mode is `listing`: the activated skill's full body

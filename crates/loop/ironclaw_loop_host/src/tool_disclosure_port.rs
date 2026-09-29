@@ -16,7 +16,8 @@ use ironclaw_loop_contracts::{
     CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
     LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    ToolAvailabilityPredicate, ToolRetrievalError, ToolRetrievalIndex, ToolRetrievalProvider,
+    ToolSearchQueryClass, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
@@ -28,9 +29,15 @@ use crate::tool_disclosure::{
     definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
     select_active_set_for_mode,
 };
-use crate::tool_search::{
-    AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
+use crate::tool_prefetch::{
+    PrefetchSurface, TOOL_PREFETCH_LOG_TARGET, ToolPrefetch, ToolPrefetchConfig,
+    ToolPrefetchConfigError,
 };
+use crate::tool_search::{
+    MAX_SEARCH_QUERY_BYTES, NativeBm25fToolRetrieval, definitions_fingerprint,
+    sanitize_provider_ranking,
+};
+use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
@@ -61,11 +68,33 @@ const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 /// `capability_info` → direct-call discovery path.
 const CAPABILITY_INFO_NAME: &str = "capability_info";
 
+/// Model-visible `tool_search` failure when the bound ranker could not index
+/// this turn's tool catalog.
+const TOOL_SEARCH_INDEX_UNAVAILABLE: &str = "tool_search is unavailable this turn because the tool index could not be built; call a tool you already know by name";
+
+/// Model-visible `tool_search` failure when the bound ranker failed a search.
+const TOOL_SEARCH_RANKER_FAILED: &str = "tool_search failed to rank tools; try tool_search again or call a tool you already know by name";
+
+/// Model-visible `tool_search` failure when the tool catalog changed while the
+/// search was running, so its ranking no longer describes the live catalog.
+const TOOL_SEARCH_CATALOG_CHANGED: &str =
+    "the tool catalog changed while tool_search was running; run tool_search again";
+
 pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
     mode: crate::ToolDisclosureMode,
+    retrieval: Arc<dyn ToolRetrievalProvider>,
+    /// Crate-visible so selection tests can bind a prefetch with a custom
+    /// candidate filter; production binds it through
+    /// [`Self::with_tool_prefetch`].
+    pub(crate) prefetch: Option<ToolPrefetch>,
+    /// Which authorized tools turn-start selection may admit; `None` admits
+    /// every authorized tool.
+    tool_availability: Option<Arc<dyn ToolAvailabilityPredicate>>,
+    /// Each run's model and prompt-cache lifetime, for re-selection.
+    prompt_cache_profiles: Option<Arc<dyn crate::PromptCacheProfileSource>>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
@@ -78,7 +107,86 @@ impl ToolDisclosureCapabilityDecorator {
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
             mode,
+            retrieval: Arc::new(NativeBm25fToolRetrieval),
+            prefetch: None,
+            tool_availability: None,
+            prompt_cache_profiles: None,
         }
+    }
+
+    /// Bind a different tool ranker behind `tool_search`.
+    ///
+    /// The default is the host-bundled BM25F provider, so omitting this leaves
+    /// ranking exactly as it was. The runtime build path calls this when a
+    /// deployment supplies a provider; nothing below composition names a
+    /// concrete alternative.
+    pub fn with_retrieval_provider(mut self, retrieval: Arc<dyn ToolRetrievalProvider>) -> Self {
+        self.retrieval = retrieval;
+        self
+    }
+
+    /// Turn on turn-start tool selection (see [`crate::tool_prefetch`]): each
+    /// conversation advertises the tools its opening request predicts, frozen
+    /// in the conversation's selection history in `thread_service`.
+    ///
+    /// Semantic selection ranks with the provider bound by
+    /// [`Self::with_retrieval_provider`], so bind that first; it is refused
+    /// when only the native BM25F ranker is bound. `thread_scope` is the
+    /// runtime's base thread scope, owner-resolved per run the same way the
+    /// loop host resolves it.
+    pub fn with_tool_prefetch(
+        mut self,
+        config: ToolPrefetchConfig,
+        thread_service: Arc<dyn SessionThreadService>,
+        thread_scope: ThreadScope,
+    ) -> Result<Self, ToolPrefetchConfigError> {
+        let prefetch = ToolPrefetch::new(
+            config,
+            Arc::clone(&self.retrieval),
+            thread_service,
+            thread_scope,
+        )?;
+        let prefetch = match self.tool_availability.clone() {
+            Some(predicate) => prefetch.with_availability(predicate),
+            None => prefetch,
+        };
+        self.prefetch = Some(match self.prompt_cache_profiles.clone() {
+            Some(profiles) => prefetch.with_prompt_cache_profiles(profiles),
+            None => prefetch,
+        });
+        Ok(self)
+    }
+
+    /// Tell turn-start selection each run's model and prompt-cache lifetime,
+    /// which decide when a conversation may re-select. Order relative to
+    /// [`Self::with_tool_prefetch`] does not matter; without selection it is
+    /// unused.
+    pub fn with_prompt_cache_profiles(
+        mut self,
+        profiles: Arc<dyn crate::PromptCacheProfileSource>,
+    ) -> Self {
+        self.prefetch = self
+            .prefetch
+            .take()
+            .map(|prefetch| prefetch.with_prompt_cache_profiles(Arc::clone(&profiles)));
+        self.prompt_cache_profiles = Some(profiles);
+        self
+    }
+
+    /// Let turn-start selection admit only the authorized tools `predicate`
+    /// reports as available to the acting user (for example, not a tool
+    /// whose extension still needs an account connected). A tool left out
+    /// stays reachable through `tool_search` → `tool_call`, which is where
+    /// its setup prompt appears. Order relative to
+    /// [`Self::with_tool_prefetch`] does not matter; without selection the
+    /// predicate is unused.
+    pub fn with_tool_availability(mut self, predicate: Arc<dyn ToolAvailabilityPredicate>) -> Self {
+        self.prefetch = self
+            .prefetch
+            .take()
+            .map(|prefetch| prefetch.with_availability(Arc::clone(&predicate)));
+        self.tool_availability = Some(predicate);
+        self
     }
 
     /// Wrap one run's capability port with disclosure using the exact
@@ -111,6 +219,8 @@ impl ToolDisclosureCapabilityDecorator {
             mode: self.mode,
             policy,
             profile_pins,
+            retrieval: Arc::clone(&self.retrieval),
+            prefetch: self.prefetch.clone(),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -133,6 +243,14 @@ struct ToolDisclosureCapabilityPort {
     /// Reviewed visibility preferences from the run-profile owner. These are
     /// not grants; catalog construction sees only authorized definitions.
     profile_pins: Vec<CapabilityId>,
+    /// The bound tool ranker. Defaults to the host-bundled BM25F provider; a
+    /// deployment may bind another through
+    /// [`ToolDisclosureCapabilityDecorator::with_retrieval_provider`].
+    retrieval: Arc<dyn ToolRetrievalProvider>,
+    /// Turn-start selection, when configured. It replaces the core-plus-caps
+    /// active set with the conversation's frozen selection and turns
+    /// promotion off.
+    prefetch: Option<ToolPrefetch>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -149,10 +267,26 @@ struct ToolDisclosureTurnState {
     definitions_fingerprint: u64,
     surface_version: Option<CapabilitySurfaceVersion>,
     catalog: CapabilityCatalog,
-    search_index: AuthorizedToolSearchIndex,
+    /// Fitted by the bound [`ToolRetrievalProvider`] over the authorized
+    /// definitions. `None` when that fit failed: `tool_search` then fails
+    /// model-visibly while the rest of the surface keeps working.
+    retrieval: Option<FittedRetrieval>,
     active: ActiveSet,
+    /// Whether `active` is a conversation's frozen turn-start selection. The
+    /// visible surface then stays exactly the advertised tools: a tool the
+    /// model described is callable, but is not added to the surface.
+    prefetched: bool,
     disclosed_names: BTreeSet<String>,
     search_ranks: BTreeMap<String, usize>,
+}
+
+/// One fitted retrieval index and the corpus it was fitted on. The host holds
+/// only the port type, never a concrete ranker; the corpus names are what
+/// provider output is checked against before it is recorded or rendered.
+#[derive(Debug, Clone)]
+struct FittedRetrieval {
+    index: Arc<dyn ToolRetrievalIndex>,
+    corpus_names: Arc<BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -585,14 +719,20 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
             .collect();
-        let mut state = self.refresh_turn_state(&surface)?;
+        let mut state = self.refresh_turn_state(&surface).await?;
         let Some(state) = state.as_mut() else {
             surface.callable_capability_ids = Some(callable_capability_ids);
             return Ok(surface);
         };
-        let active_or_disclosed_descriptors = state
-            .catalog
-            .active_or_disclosed_descriptors(&state.active, &state.disclosed_names);
+        let no_disclosed_names = BTreeSet::new();
+        let active_or_disclosed_descriptors = state.catalog.active_or_disclosed_descriptors(
+            &state.active,
+            if state.prefetched {
+                &no_disclosed_names
+            } else {
+                &state.disclosed_names
+            },
+        );
         let active_or_disclosed_ids: BTreeSet<CapabilityId> = active_or_disclosed_descriptors
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
@@ -634,6 +774,12 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 .map(|definition| definition.capability_id),
         );
         surface.callable_capability_ids = Some(callable.into_iter().collect());
+        // Prompt text that names a tool follows this: a selected surface
+        // renders only the blocks whose tools it advertises.
+        if state.prefetched {
+            surface.advertised_choice =
+                ironclaw_loop_contracts::AdvertisedToolChoice::TurnStartSelection;
+        }
         Ok(surface)
     }
 
@@ -644,10 +790,14 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         if !is_bridge_capability_id(&request.capability_id) {
             let target_capability_id =
                 self.target_capability_id_for_input_ref(request.input_ref.as_str())?;
+            let called = target_capability_id
+                .clone()
+                .unwrap_or_else(|| request.capability_id.clone());
             // Chain-boxing: each port delegation is boxed so the stacked
             // decorator chain never compiles into a single oversized poll
             // frame (see reborn_integration_model_recovery stack-overflow).
             let resolution = Box::pin(self.inner.invoke_capability(request)).await?;
+            self.record_called_target(Some(&called), &resolution).await;
             self.promote_target_after_resolution(target_capability_id, &resolution)?;
             return Ok(resolution);
         }
@@ -728,6 +878,37 @@ impl ToolDisclosureCapabilityPort {
             .map(|targets| targets.get(input_ref).cloned())
     }
 
+    /// Record a successful call of a catalog tool in the conversation's
+    /// tool-selection activity, so a later re-selection keeps it. Only with
+    /// turn-start selection on.
+    async fn record_called_target(
+        &self,
+        target_capability_id: Option<&CapabilityId>,
+        resolution: &Resolution,
+    ) {
+        let Some(prefetch) = self.prefetch.as_ref() else {
+            return;
+        };
+        let Some(capability_id) = target_capability_id else {
+            return;
+        };
+        if !matches!(resolution, Resolution::Done(outcome) if outcome.verdict.is_success()) {
+            return;
+        }
+        let name = match self.turn_state() {
+            Ok(guard) => guard.as_ref().and_then(|state| {
+                state
+                    .catalog
+                    .definition_by_capability_id(capability_id)
+                    .map(|definition| definition.name.to_string())
+            }),
+            Err(_) => None,
+        };
+        if let Some(name) = name {
+            prefetch.record_called_tool(&self.run_context, name).await;
+        }
+    }
+
     fn promote_target_after_resolution(
         &self,
         target_capability_id: Option<CapabilityId>,
@@ -766,13 +947,27 @@ impl ToolDisclosureCapabilityPort {
                 self.target_capability_id_for_input_ref(invocation.input_ref.as_str())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let called: Vec<CapabilityId> = request
+            .invocations
+            .iter()
+            .zip(&target_capability_ids)
+            .map(|(invocation, target)| {
+                target
+                    .clone()
+                    .unwrap_or_else(|| invocation.capability_id.clone())
+            })
+            .collect();
         // Chain-boxing: each port delegation is boxed so the stacked
         // decorator chain never compiles into a single oversized poll
         // frame (see reborn_integration_model_recovery stack-overflow).
         let batch = Box::pin(self.inner.invoke_capability_batch(request)).await?;
-        for (resolution, target_capability_id) in
-            batch.resolutions.iter().zip(target_capability_ids)
+        for ((resolution, target_capability_id), called) in batch
+            .resolutions
+            .iter()
+            .zip(target_capability_ids)
+            .zip(&called)
         {
+            self.record_called_target(Some(called), resolution).await;
             self.promote_target_after_resolution(target_capability_id, resolution)?;
         }
         Ok(batch)
@@ -791,28 +986,30 @@ impl ToolDisclosureCapabilityPort {
         Ok(guard)
     }
 
-    fn refresh_turn_state(
+    async fn refresh_turn_state(
         &self,
         surface: &VisibleCapabilitySurface,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
-        let guard = self.lock_turn_state()?;
-        let current_surface = guard.as_ref().is_some_and(|state| {
-            state.turn_id == self.run_context.turn_id
-                && state.surface_version.as_ref() == Some(&surface.version)
-        });
-        if current_surface {
-            return Ok(guard);
+        {
+            let guard = self.lock_turn_state()?;
+            let current_surface = guard.as_ref().is_some_and(|state| {
+                state.turn_id == self.run_context.turn_id
+                    && state.surface_version.as_ref() == Some(&surface.version)
+            });
+            if current_surface {
+                return Ok(guard);
+            }
         }
-        drop(guard);
         let authorized_capability_ids = surface
             .descriptors
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
             .collect();
         self.rebuild_turn_state(surface.version.clone(), authorized_capability_ids)
+            .await
     }
 
-    fn rebuild_turn_state(
+    async fn rebuild_turn_state(
         &self,
         surface_version: CapabilitySurfaceVersion,
         authorized_capability_ids: BTreeSet<CapabilityId>,
@@ -827,61 +1024,129 @@ impl ToolDisclosureCapabilityPort {
             .into_iter()
             .filter(|definition| authorized_capability_ids.contains(&definition.capability_id))
             .collect();
-        let fingerprint = definitions_fingerprint(&authorized_definitions);
-        let mut guard = self.lock_turn_state()?;
+        let ranker_version = self.retrieval.ranker_version();
+        let fingerprint = definitions_fingerprint(ranker_version, &authorized_definitions);
+        let rebuild = {
+            let guard = self.lock_turn_state()?;
+            guard
+                .as_ref()
+                .map(|state| {
+                    state.turn_id != self.run_context.turn_id
+                        || state.surface_version.as_ref() != Some(&surface_version)
+                        || state.definitions_fingerprint != fingerprint
+                })
+                .unwrap_or(true)
+        };
+        if !rebuild {
+            return self.lock_turn_state();
+        }
         // Fit and cache retrieval only over the effective authorized corpus.
         // Denied schemas therefore cannot affect IDF, ordering, counts, cache
-        // invalidation, or search-index construction work.
-        let same_turn = guard
-            .as_ref()
-            .map(|state| state.turn_id == self.run_context.turn_id)
-            .unwrap_or(false);
-        let rebuild = guard
-            .as_ref()
-            .map(|state| {
-                state.turn_id != self.run_context.turn_id
-                    || state.surface_version.as_ref() != Some(&surface_version)
-                    || state.definitions_fingerprint != fingerprint
-            })
-            .unwrap_or(true);
-        if rebuild {
-            let index_started_at = std::time::Instant::now();
-            let effective_pins = if self.mode.includes_profile_pins() {
-                self.profile_pins.as_slice()
-            } else {
-                &[]
-            };
-            let catalog = CapabilityCatalog::new(&authorized_definitions, effective_pins);
-            let search_index = AuthorizedToolSearchIndex::new(authorized_definitions.iter());
+        // invalidation, or search-index construction work. The fit may be
+        // slow or remote, so it runs with the turn-state lock released.
+        let index_started_at = std::time::Instant::now();
+        // Owner-scoped, so a ranker that keeps per-document state (stored
+        // vectors) keeps it for this user only.
+        let fitted = match crate::tool_catalog_indexer::tool_corpus_owner_for_run(&self.run_context)
+        {
+            Some(owner) => {
+                self.retrieval
+                    .fit_for_owner(&owner, &authorized_definitions)
+                    .await
+            }
+            None => self.retrieval.fit(&authorized_definitions).await,
+        };
+        if self.prefetch.is_some() {
+            log_selection_fit_report(ranker_version, authorized_definitions.len(), &fitted);
+        }
+        let retrieval = match fitted {
+            Ok(index) => Some(FittedRetrieval {
+                index,
+                corpus_names: Arc::new(
+                    authorized_definitions
+                        .iter()
+                        .map(|definition| definition.name.to_string())
+                        .collect(),
+                ),
+            }),
+            Err(error) => {
+                debug!(
+                    target: "ironclaw::reborn::tool_search",
+                    ranker_version,
+                    error_kind = error.kind_label(),
+                    authorized_document_count = authorized_definitions.len(),
+                    "tool retrieval fit failed; tool_search is unavailable for this surface"
+                );
+                None
+            }
+        };
+        let effective_pins = if self.mode.includes_profile_pins() {
+            self.profile_pins.as_slice()
+        } else {
+            &[]
+        };
+        let catalog = CapabilityCatalog::new(&authorized_definitions, effective_pins);
+        if retrieval.is_some() {
             debug!(
                 target: "ironclaw::reborn::tool_search",
+                ranker_version,
                 authorized_document_count = authorized_definitions.len(),
                 index_build_micros = index_started_at.elapsed().as_micros(),
                 metadata_fingerprint = fingerprint,
                 "rebuilt authorized deferred-tool search index"
             );
-            let promoted = self.promoted_for_scope()?;
-            let active =
-                select_active_set_for_mode(&catalog, &promoted, self.caps, &self.policy, self.mode);
-            // Preserve disclosure progress across a same-turn refresh (a tool the
-            // model already described stays disclosed); a genuine turn change
-            // starts fresh.
-            let (disclosed_names, search_ranks) = guard
-                .take()
-                .filter(|_| same_turn)
-                .map(|state| (state.disclosed_names, state.search_ranks))
-                .unwrap_or((BTreeSet::new(), BTreeMap::new()));
-            *guard = Some(ToolDisclosureTurnState {
-                turn_id: self.run_context.turn_id,
-                definitions_fingerprint: fingerprint,
-                surface_version: Some(surface_version),
-                catalog,
-                search_index,
-                active,
-                disclosed_names,
-                search_ranks,
-            });
         }
+        let prefetched = match self.prefetch.as_ref() {
+            Some(prefetch) => {
+                prefetch
+                    .active_set(PrefetchSurface {
+                        run_context: &self.run_context,
+                        catalog: &catalog,
+                        policy: &self.policy,
+                        mode: self.mode,
+                    })
+                    .await
+            }
+            None => None,
+        };
+        let (active, prefetched) = match prefetched {
+            Some(active) => (active, true),
+            None => {
+                let promoted = self.promoted_for_scope()?;
+                let active = select_active_set_for_mode(
+                    &catalog,
+                    &promoted,
+                    self.caps,
+                    &self.policy,
+                    self.mode,
+                );
+                (active, false)
+            }
+        };
+        let mut guard = self.lock_turn_state()?;
+        // Preserve disclosure progress across a same-turn refresh (a tool the
+        // model already described stays disclosed); a genuine turn change
+        // starts fresh. Decided against the state present now, after the fit,
+        // so progress recorded while the fit ran is kept.
+        let same_turn = guard
+            .as_ref()
+            .is_some_and(|state| state.turn_id == self.run_context.turn_id);
+        let (disclosed_names, search_ranks) = guard
+            .take()
+            .filter(|_| same_turn)
+            .map(|state| (state.disclosed_names, state.search_ranks))
+            .unwrap_or((BTreeSet::new(), BTreeMap::new()));
+        *guard = Some(ToolDisclosureTurnState {
+            turn_id: self.run_context.turn_id,
+            definitions_fingerprint: fingerprint,
+            surface_version: Some(surface_version),
+            catalog,
+            retrieval,
+            active,
+            prefetched,
+            disclosed_names,
+            search_ranks,
+        });
         Ok(guard)
     }
 
@@ -908,6 +1173,11 @@ impl ToolDisclosureCapabilityPort {
     }
 
     fn promote_target(&self, capability_id: &CapabilityId) -> Result<(), AgentLoopHostError> {
+        // A turn-start selection is frozen for the conversation: promoting a
+        // tool would change the cached `tools` array.
+        if self.prefetch.is_some() {
+            return Ok(());
+        }
         let target = {
             let guard = self.turn_state()?;
             let Some(state) = guard.as_ref() else {
@@ -1231,27 +1501,82 @@ impl ToolDisclosureCapabilityPort {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(10)
             .clamp(1, 50);
-        let output = {
-            let mut guard = self.turn_state()?;
-            let Some(state) = guard.as_mut() else {
+        // Take what the search needs out of the turn-state lock, then release
+        // it: a bound provider's search may be slow or remote.
+        let (retrieval, fingerprint) = {
+            let guard = self.turn_state()?;
+            let Some(state) = guard.as_ref() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let search_started_at = std::time::Instant::now();
-            let outcome = state.search_index.search(query, limit);
+            (state.retrieval.clone(), state.definitions_fingerprint)
+        };
+        let ranker_version = self.retrieval.ranker_version();
+        let Some(retrieval) = retrieval else {
             debug!(
                 target: "ironclaw::reborn::tool_search",
-                query_class = outcome.query_class.as_str(),
-                empty_result = outcome.names.is_empty(),
-                returned_count = outcome.names.len(),
-                query_latency_micros = search_started_at.elapsed().as_micros(),
-                "ranked deferred-tool search without logging raw query or schemas"
+                ranker_version,
+                "tool_search has no fitted index for this surface"
             );
+            return Ok(failed_operation(TOOL_SEARCH_INDEX_UNAVAILABLE));
+        };
+        let search_started_at = std::time::Instant::now();
+        let outcome = match retrieval.index.search(query, limit).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                debug!(
+                    target: "ironclaw::reborn::tool_search",
+                    ranker_version,
+                    error_kind = error.kind_label(),
+                    query_latency_micros = search_started_at.elapsed().as_micros(),
+                    "tool retrieval search failed without logging raw query or schemas"
+                );
+                return Ok(failed_operation(TOOL_SEARCH_RANKER_FAILED));
+            }
+        };
+        let (ranked, repairs) =
+            sanitize_provider_ranking(outcome.ranked, &retrieval.corpus_names, limit);
+        let query_class = if ranked.is_empty() {
+            ToolSearchQueryClass::NoMatch
+        } else {
+            outcome.query_class
+        };
+        if repairs.any() {
+            debug!(
+                target: "ironclaw::reborn::tool_search",
+                ranker_version,
+                dropped_unknown = repairs.dropped_unknown,
+                dropped_duplicate = repairs.dropped_duplicate,
+                dropped_invalid_score = repairs.dropped_invalid_score,
+                reordered = repairs.reordered,
+                truncated = repairs.truncated,
+                "repaired tool retrieval output that broke the port contract"
+            );
+        }
+        debug!(
+            target: "ironclaw::reborn::tool_search",
+            query_class = query_class.as_str(),
+            empty_result = ranked.is_empty(),
+            returned_count = ranked.len(),
+            query_latency_micros = search_started_at.elapsed().as_micros(),
+            "ranked deferred-tool search without logging raw query or schemas"
+        );
+        let output = {
+            let mut guard = self.turn_state()?;
+            // The ranking describes the corpus it was fitted on. If the surface
+            // changed while the search ran, discard it rather than record
+            // ranks against a different catalog.
+            let Some(state) = guard
+                .as_mut()
+                .filter(|state| state.definitions_fingerprint == fingerprint)
+            else {
+                return Ok(failed_operation(TOOL_SEARCH_CATALOG_CHANGED));
+            };
             let mut ranked_results = Vec::new();
-            for (index, name) in outcome.names.into_iter().enumerate() {
+            for (index, tool) in ranked.into_iter().enumerate() {
                 state
                     .search_ranks
-                    .insert(name.clone(), index.saturating_add(1));
-                if let Some(result) = state.catalog.search_result(&name) {
+                    .insert(tool.name.clone(), index.saturating_add(1));
+                if let Some(result) = state.catalog.search_result(&tool.name) {
                     ranked_results.push(result);
                 }
             }
@@ -1656,8 +1981,56 @@ fn failed_invalid_input(summary: &'static str) -> Resolution {
     )
 }
 
+/// A model-visible, recoverable failure that is not the model's fault: the
+/// bridge could not do its job this time. Never ends the run.
+fn failed_operation(summary: &'static str) -> Resolution {
+    resolution::failed(
+        ironclaw_host_api::result_meta::FailureKind::OperationFailed,
+        summary.to_string(),
+        CapabilityFailureDetail::Diagnostic {
+            text: summary.to_string(),
+        },
+    )
+}
+
 fn invalid_invocation(summary: impl Into<String>) -> AgentLoopHostError {
     AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, summary)
+}
+
+/// The message the tool-discovery benchmark parses; keep them in step.
+pub(crate) const SELECTION_FIT_REPORT_MESSAGE: &str = "tool index vectors at selection time";
+
+/// Record, for turn-start selection, how the fitted index came by its
+/// vectors: how many were already stored, embedded during the fit, or still
+/// missing, and whether a fusing ranker's dense side fell back. Counts and
+/// labels only. Rankers without vectors (BM25F) report nothing.
+fn log_selection_fit_report(
+    ranker_version: &str,
+    documents: usize,
+    fitted: &Result<Arc<dyn ToolRetrievalIndex>, ToolRetrievalError>,
+) {
+    let report = match fitted {
+        Ok(index) => match index.fit_report() {
+            Some(report) => report,
+            None => return,
+        },
+        Err(error) => ironclaw_loop_contracts::ToolIndexFitReport {
+            missing: documents,
+            dense_fallback: Some(error.kind_label()),
+            ..Default::default()
+        },
+    };
+    debug!(
+        target: TOOL_PREFETCH_LOG_TARGET,
+        ranker_version,
+        documents,
+        stored = report.stored,
+        loaded = report.loaded,
+        embedded = report.embedded,
+        missing = report.missing,
+        dense_fallback = report.dense_fallback.unwrap_or("none"),
+        "{SELECTION_FIT_REPORT_MESSAGE}"
+    );
 }
 
 #[cfg(test)]
@@ -1708,8 +2081,8 @@ mod tests {
         result_meta::FailureKind,
     };
     use ironclaw_loop_contracts::{
-        CapabilityDescriptorView, InMemoryRunProfileResolver, ResolvedRunProfile,
-        RunProfileResolutionRequest, RunProfileResolver,
+        CapabilityDescriptorView, InMemoryRunProfileResolver, RankedTool, ResolvedRunProfile,
+        RunProfileResolutionRequest, RunProfileResolver, ToolRetrievalError, ToolSearchOutcome,
     };
     use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
 
@@ -1751,6 +2124,7 @@ mod tests {
                 .expect("mutable definitions lock")
                 .clone();
             Ok(VisibleCapabilitySurface {
+                advertised_choice: Default::default(),
                 version: self
                     .surface_version
                     .lock()
@@ -1876,6 +2250,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
+                advertised_choice: Default::default(),
                 callable_capability_ids: None,
                 version: self.surface_version.clone(),
                 descriptors: self
@@ -1998,15 +2373,37 @@ mod tests {
         port.visible_capabilities(VisibleCapabilityRequest)
             .await
             .expect("same-turn surface refresh");
+        assert_eq!(
+            fitted_search_names(&port, "timezone", 1).await,
+            vec!["fixture__lookup"]
+        );
         let guard = port.lock_turn_state().expect("refreshed turn state");
         let state = guard.as_ref().expect("refreshed state exists");
         assert_ne!(state.definitions_fingerprint, original_fingerprint);
-        assert_eq!(
-            state.search_index.search("timezone", 1).names,
-            vec!["fixture__lookup"]
-        );
         assert!(state.disclosed_names.contains("fixture__lookup"));
         assert_eq!(state.search_ranks["fixture__lookup"], 2);
+    }
+
+    /// Search the turn's fitted index directly, with the turn-state lock
+    /// released before the await (as production does).
+    async fn fitted_search_names(
+        port: &ToolDisclosureCapabilityPort,
+        query: &str,
+        limit: usize,
+    ) -> Vec<String> {
+        let index = {
+            let guard = port.lock_turn_state().expect("turn state lock");
+            guard
+                .as_ref()
+                .and_then(|state| state.retrieval.as_ref())
+                .map(|retrieval| Arc::clone(&retrieval.index))
+                .expect("turn state carries a fitted index")
+        };
+        index
+            .search(query, limit)
+            .await
+            .expect("native search is infallible")
+            .into_names()
     }
 
     #[tokio::test]
@@ -2052,23 +2449,23 @@ mod tests {
             .await
             .expect("complete policy-qualified surface builds turn state");
 
-        let guard = port.lock_turn_state().expect("turn state lock");
-        let state = guard.as_ref().expect("turn state exists");
+        {
+            let guard = port.lock_turn_state().expect("turn state lock");
+            let state = guard.as_ref().expect("turn state exists");
+            assert!(
+                state
+                    .catalog
+                    .definition_by_capability_id(
+                        &CapabilityId::new("fixture.policy_excluded")
+                            .expect("valid excluded capability id")
+                    )
+                    .is_none(),
+                "a capability excluded by non-ID policy dimensions must not enter the disclosure catalog"
+            );
+        }
         assert!(
-            state
-                .catalog
-                .definition_by_capability_id(
-                    &CapabilityId::new("fixture.policy_excluded")
-                        .expect("valid excluded capability id")
-                )
-                .is_none(),
-            "a capability excluded by non-ID policy dimensions must not enter the disclosure catalog"
-        );
-        assert!(
-            state
-                .search_index
-                .search("forbidden runtime effect approval vocabulary", 5)
-                .names
+            fitted_search_names(&port, "forbidden runtime effect approval vocabulary", 5)
+                .await
                 .is_empty(),
             "excluded capability metadata must not affect or appear in deferred-tool search"
         );
@@ -2113,6 +2510,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
+                advertised_choice: Default::default(),
                 version: CapabilitySurfaceVersion::new("surface:ordered-disclosure")
                     .expect("surface version"),
                 descriptors: Vec::new(),
@@ -4267,6 +4665,8 @@ mod tests {
             // profile narrowing (that's the integration tier).
             policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
             profile_pins: Vec::new(),
+            retrieval: Arc::new(NativeBm25fToolRetrieval),
+            prefetch: None,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -4340,6 +4740,550 @@ mod tests {
 
     fn input_ref(value: impl Into<String>) -> CapabilityInputRef {
         CapabilityInputRef::new(value.into()).expect("valid input ref")
+    }
+
+    // -----------------------------------------------------------------
+    // Tool retrieval port: bound providers, driven through the public
+    // decorator path (`with_retrieval_provider` -> `decorate_with_policy`).
+    // -----------------------------------------------------------------
+
+    /// Fits a [`ScriptedIndex`] that answers every search with a fixed
+    /// result, ignoring the query and the limit, so tests control exactly
+    /// what the host receives from a provider.
+    #[derive(Debug)]
+    struct ScriptedRetrieval {
+        fit_error: Option<ToolRetrievalError>,
+        search_result: Result<Vec<RankedTool>, ToolRetrievalError>,
+        fitted_corpus_sizes: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl ScriptedRetrieval {
+        fn ranking(ranked: Vec<RankedTool>) -> Self {
+            Self {
+                fit_error: None,
+                search_result: Ok(ranked),
+                fitted_corpus_sizes: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedIndex {
+        search_result: Result<Vec<RankedTool>, ToolRetrievalError>,
+    }
+
+    #[async_trait]
+    impl ToolRetrievalIndex for ScriptedIndex {
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<ToolSearchOutcome, ToolRetrievalError> {
+            self.search_result.clone().map(|ranked| ToolSearchOutcome {
+                ranked,
+                query_class: ToolSearchQueryClass::Lexical,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ToolRetrievalProvider for ScriptedRetrieval {
+        fn ranker_version(&self) -> &str {
+            "scripted-test-ranker-v1"
+        }
+
+        async fn fit(
+            &self,
+            definitions: &[ProviderToolDefinition],
+        ) -> Result<Arc<dyn ToolRetrievalIndex>, ToolRetrievalError> {
+            self.fitted_corpus_sizes
+                .lock()
+                .expect("fit recorder lock")
+                .push(definitions.len());
+            if let Some(error) = &self.fit_error {
+                return Err(error.clone());
+            }
+            Ok(Arc::new(ScriptedIndex {
+                search_result: self.search_result.clone(),
+            }))
+        }
+    }
+
+    /// Fits an index whose search signals `started`, then waits for
+    /// `release`, so a test can change the surface while a search is in
+    /// flight.
+    #[derive(Debug)]
+    struct GatedRetrieval {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[derive(Debug)]
+    struct GatedIndex {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ToolRetrievalIndex for GatedIndex {
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<ToolSearchOutcome, ToolRetrievalError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(ToolSearchOutcome {
+                ranked: vec![RankedTool::new("fixture__lookup", 1.0)],
+                query_class: ToolSearchQueryClass::Lexical,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ToolRetrievalProvider for GatedRetrieval {
+        fn ranker_version(&self) -> &str {
+            "gated-test-ranker-v1"
+        }
+
+        async fn fit(
+            &self,
+            _definitions: &[ProviderToolDefinition],
+        ) -> Result<Arc<dyn ToolRetrievalIndex>, ToolRetrievalError> {
+            Ok(Arc::new(GatedIndex {
+                started: Arc::clone(&self.started),
+                release: Arc::clone(&self.release),
+            }))
+        }
+    }
+
+    fn three_tool_spy() -> Arc<SpyPort> {
+        Arc::new(SpyPort {
+            definitions: vec![
+                provider_definition("fixture.read_file", "read_file", "Read a file"),
+                provider_definition("fixture.write_file", "write_file", "Write a file"),
+                provider_definition("fixture.send_email", "send_email", "Send an email"),
+            ],
+            surface_version: CapabilitySurfaceVersion::new("surface:retrieval-port")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Build a run's port the way the runtime does: the public decorator,
+    /// optionally bound to a provider, then `decorate_with_policy`.
+    async fn public_port(
+        inner: Arc<dyn LoopCapabilityPort>,
+        writer: Arc<CapturingWriter>,
+        retrieval: Option<Arc<dyn ToolRetrievalProvider>>,
+    ) -> Arc<dyn LoopCapabilityPort> {
+        let mut decorator = ToolDisclosureCapabilityDecorator::new(
+            writer as Arc<dyn LoopCapabilityResultWriter>,
+            crate::ToolDisclosureMode::Bridged,
+        );
+        if let Some(retrieval) = retrieval {
+            decorator = decorator.with_retrieval_provider(retrieval);
+        }
+        let port = decorator.decorate_with_policy(
+            &run_context(TurnId::new()).await,
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface builds turn state");
+        port
+    }
+
+    async fn call_tool_search(port: &dyn LoopCapabilityPort, arguments: Value) -> Resolution {
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_SEARCH_NAME,
+                arguments,
+            )))
+            .await
+            .expect("tool_search registers on the bridge path");
+        port.invoke_capability(LoopRequest {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("tool_search never ends the run")
+    }
+
+    fn last_search_names(writer: &CapturingWriter) -> Vec<String> {
+        let outputs = writer.outputs.lock().expect("captured outputs lock");
+        outputs
+            .last()
+            .and_then(|output| output.get("results"))
+            .and_then(Value::as_array)
+            .expect("tool_search wrote a result")
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn model_visible_failure(resolution: &Resolution) -> Option<String> {
+        match resolution {
+            Resolution::Done(outcome) => match &outcome.verdict {
+                ToolVerdict::RecoverableFailure { diagnostic, .. } => {
+                    diagnostic.model_visible_text().map(str::to_string)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_retrieval_provider_decides_tool_search_results_through_the_public_decorator() {
+        // Control: the default binding (native BM25F) puts the lexically
+        // closest tool first.
+        let native_writer = Arc::new(CapturingWriter::default());
+        let native = public_port(three_tool_spy(), Arc::clone(&native_writer), None).await;
+        let resolution = call_tool_search(native.as_ref(), json!({"query": "read a file"})).await;
+        assert!(matches!(resolution, Resolution::Done(ref o) if o.verdict.is_success()));
+        let native_names = last_search_names(&native_writer);
+        assert_eq!(native_names.first().map(String::as_str), Some("read_file"));
+
+        // Swapped: the same corpus and query, ranked by the bound provider.
+        let provider = Arc::new(ScriptedRetrieval::ranking(vec![
+            RankedTool::new("send_email", 0.9),
+            RankedTool::new("write_file", 0.4),
+        ]));
+        let fitted_corpus_sizes = Arc::clone(&provider.fitted_corpus_sizes);
+        let swapped_writer = Arc::new(CapturingWriter::default());
+        let swapped = public_port(
+            three_tool_spy(),
+            Arc::clone(&swapped_writer),
+            Some(provider as Arc<dyn ToolRetrievalProvider>),
+        )
+        .await;
+        let resolution = call_tool_search(swapped.as_ref(), json!({"query": "read a file"})).await;
+        assert!(matches!(resolution, Resolution::Done(ref o) if o.verdict.is_success()));
+        let swapped_names = last_search_names(&swapped_writer);
+
+        assert_eq!(swapped_names, vec!["send_email", "write_file"]);
+        assert_ne!(
+            native_names, swapped_names,
+            "the swap must actually change ranking, or this test proves nothing"
+        );
+        assert_eq!(
+            *fitted_corpus_sizes.lock().expect("fit recorder lock"),
+            vec![3],
+            "the provider is fitted once over the whole authorized corpus"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_search_repairs_provider_output_that_breaks_the_port_contract() {
+        let provider = Arc::new(ScriptedRetrieval::ranking(vec![
+            RankedTool::new("not_in_the_corpus", 50.0),
+            RankedTool::new("write_file", 1.0),
+            RankedTool::new("read_file", f32::NAN),
+            RankedTool::new("send_email", 3.0),
+            RankedTool::new("write_file", 9.0),
+            RankedTool::new("read_file", -2.0),
+            RankedTool::new("read_file", 0.5),
+        ]));
+        let writer = Arc::new(CapturingWriter::default());
+        let port = public_port(
+            three_tool_spy(),
+            Arc::clone(&writer),
+            Some(provider as Arc<dyn ToolRetrievalProvider>),
+        )
+        .await;
+
+        let resolution =
+            call_tool_search(port.as_ref(), json!({"query": "anything", "limit": 2})).await;
+
+        assert!(matches!(resolution, Resolution::Done(ref o) if o.verdict.is_success()));
+        // Unknown name dropped, NaN and negative scores dropped, the second
+        // `write_file` dropped as a duplicate, re-sorted because the provider
+        // broke its own order, then truncated to the requested limit.
+        assert_eq!(last_search_names(&writer), vec!["send_email", "write_file"]);
+    }
+
+    #[tokio::test]
+    async fn failed_retrieval_search_is_a_model_visible_tool_search_failure() {
+        let provider = Arc::new(ScriptedRetrieval {
+            fit_error: None,
+            search_result: Err(ToolRetrievalError::Timeout {
+                elapsed: std::time::Duration::from_millis(250),
+            }),
+            fitted_corpus_sizes: Arc::new(Mutex::new(Vec::new())),
+        });
+        let writer = Arc::new(CapturingWriter::default());
+        let port = public_port(
+            three_tool_spy(),
+            Arc::clone(&writer),
+            Some(provider as Arc<dyn ToolRetrievalProvider>),
+        )
+        .await;
+
+        let resolution = call_tool_search(port.as_ref(), json!({"query": "read a file"})).await;
+
+        assert_eq!(
+            model_visible_failure(&resolution).as_deref(),
+            Some(TOOL_SEARCH_RANKER_FAILED)
+        );
+        assert!(
+            writer
+                .outputs
+                .lock()
+                .expect("captured outputs lock")
+                .is_empty(),
+            "a failed search renders no results"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_retrieval_fit_keeps_the_surface_and_fails_tool_search_model_visibly() {
+        let provider = Arc::new(ScriptedRetrieval {
+            fit_error: Some(ToolRetrievalError::Unavailable {
+                reason: ironclaw_loop_contracts::LoopSafeSummary::new("model not loaded")
+                    .expect("valid summary"),
+            }),
+            search_result: Ok(Vec::new()),
+            fitted_corpus_sizes: Arc::new(Mutex::new(Vec::new())),
+        });
+        let writer = Arc::new(CapturingWriter::default());
+        let port = public_port(
+            three_tool_spy(),
+            Arc::clone(&writer),
+            Some(provider as Arc<dyn ToolRetrievalProvider>),
+        )
+        .await;
+
+        // The rest of the surface still builds.
+        let advertised: Vec<String> = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .map(|definition| definition.name.to_string())
+            .collect();
+        assert!(advertised.iter().any(|name| name == "read_file"));
+
+        let resolution = call_tool_search(port.as_ref(), json!({"query": "read a file"})).await;
+        assert_eq!(
+            model_visible_failure(&resolution).as_deref(),
+            Some(TOOL_SEARCH_INDEX_UNAVAILABLE)
+        );
+
+        // Describing a tool does not need the ranker and keeps working.
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                TOOL_DESCRIBE_NAME,
+                json!({"name": "send_email"}),
+            )))
+            .await
+            .expect("tool_describe registers");
+        let describe = port
+            .invoke_capability(LoopRequest {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("tool_describe resolves");
+        assert!(matches!(describe, Resolution::Done(ref o) if o.verdict.is_success()));
+    }
+
+    #[tokio::test]
+    async fn surface_change_during_a_search_discards_the_stale_ranking() {
+        let inner = Arc::new(MutableDefinitionsPort {
+            definitions: Mutex::new(vec![provider_definition(
+                "fixture.lookup",
+                "fixture__lookup",
+                "Lookup records",
+            )]),
+            surface_version: Mutex::new(
+                CapabilitySurfaceVersion::new("surface:before-search")
+                    .expect("valid surface version"),
+            ),
+            visible_capability_ids: None,
+            tool_definition_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let writer = Arc::new(CapturingWriter::default());
+        let port = public_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            Arc::clone(&writer),
+            Some(Arc::new(GatedRetrieval {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }) as Arc<dyn ToolRetrievalProvider>),
+        )
+        .await;
+
+        let change_surface_mid_search = async {
+            started.notified().await;
+            // The search is parked inside the provider. Refreshing the surface
+            // needs the turn-state lock, so this only completes because the
+            // host released it before awaiting the provider.
+            inner.definitions.lock().expect("mutable definitions lock")[0].description =
+                "Lookup records, now with a new description".to_string();
+            *inner
+                .surface_version
+                .lock()
+                .expect("mutable surface-version lock") =
+                CapabilitySurfaceVersion::new("surface:after-search")
+                    .expect("valid surface version");
+            port.visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .expect("surface refresh during a search");
+            release.notify_one();
+        };
+        let (resolution, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                call_tool_search(port.as_ref(), json!({"query": "lookup"})),
+                change_surface_mid_search
+            )
+        })
+        .await
+        .expect("the search and the surface refresh must not deadlock");
+
+        assert_eq!(
+            model_visible_failure(&resolution).as_deref(),
+            Some(TOOL_SEARCH_CATALOG_CHANGED)
+        );
+        assert!(
+            writer
+                .outputs
+                .lock()
+                .expect("captured outputs lock")
+                .is_empty(),
+            "a ranking of the old catalog must not be rendered"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tool_search_never_logs_the_raw_query() {
+        const CANARY: &str = "zebra-canary-7741";
+        let query = format!("{CANARY} read a file");
+
+        let writer = Arc::new(CapturingWriter::default());
+        let native = public_port(three_tool_spy(), Arc::clone(&writer), None).await;
+        let resolution = call_tool_search(native.as_ref(), json!({"query": query})).await;
+        assert!(matches!(resolution, Resolution::Done(ref o) if o.verdict.is_success()));
+
+        let failing = public_port(
+            three_tool_spy(),
+            Arc::new(CapturingWriter::default()),
+            Some(Arc::new(ScriptedRetrieval {
+                fit_error: None,
+                search_result: Err(ToolRetrievalError::InvalidOutput {
+                    reason: ironclaw_loop_contracts::LoopSafeSummary::new("bad vector")
+                        .expect("valid summary"),
+                }),
+                fitted_corpus_sizes: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn ToolRetrievalProvider>),
+        )
+        .await;
+        let resolution = call_tool_search(failing.as_ref(), json!({"query": query})).await;
+        assert!(model_visible_failure(&resolution).is_some());
+
+        // Positive control: the capture is live and saw both search paths.
+        assert!(logs_contain(
+            "ranked deferred-tool search without logging raw query or schemas"
+        ));
+        assert!(logs_contain(
+            "tool retrieval search failed without logging raw query or schemas"
+        ));
+        assert!(
+            !logs_contain(CANARY),
+            "the raw tool_search query reached the log capture"
+        );
+    }
+
+    use ironclaw_loop_contracts::ToolCorpusOwner;
+
+    /// Records which owner each fit was for (`None`: owner-blind).
+    #[derive(Debug, Default)]
+    struct OwnerRecordingRetrieval {
+        owners: Mutex<Vec<Option<ToolCorpusOwner>>>,
+    }
+
+    #[async_trait]
+    impl ToolRetrievalProvider for OwnerRecordingRetrieval {
+        fn ranker_version(&self) -> &str {
+            "owner-recording-test-ranker-v1"
+        }
+
+        async fn fit(
+            &self,
+            _definitions: &[ProviderToolDefinition],
+        ) -> Result<Arc<dyn ToolRetrievalIndex>, ToolRetrievalError> {
+            self.owners.lock().expect("owners lock").push(None);
+            Ok(Arc::new(ScriptedIndex {
+                search_result: Ok(Vec::new()),
+            }))
+        }
+
+        async fn fit_for_owner(
+            &self,
+            owner: &ToolCorpusOwner,
+            _definitions: &[ProviderToolDefinition],
+        ) -> Result<Arc<dyn ToolRetrievalIndex>, ToolRetrievalError> {
+            self.owners
+                .lock()
+                .expect("owners lock")
+                .push(Some(owner.clone()));
+            Ok(Arc::new(ScriptedIndex {
+                search_result: Ok(Vec::new()),
+            }))
+        }
+    }
+
+    /// The fit is for the run's acting user, so a ranker keeping state per
+    /// document (stored vectors) keeps it for that user only; a run with no
+    /// user gets an owner-blind fit.
+    #[tokio::test]
+    async fn retrieval_is_fitted_for_the_runs_acting_user() {
+        for actor in [Some("alice"), None] {
+            let retrieval = Arc::new(OwnerRecordingRetrieval::default());
+            let decorator = ToolDisclosureCapabilityDecorator::new(
+                Arc::new(CapturingWriter::default()) as Arc<dyn LoopCapabilityResultWriter>,
+                crate::ToolDisclosureMode::Bridged,
+            )
+            .with_retrieval_provider(Arc::clone(&retrieval) as Arc<dyn ToolRetrievalProvider>);
+            let mut context = run_context(TurnId::new()).await;
+            if let Some(actor) = actor {
+                context = context.with_actor(ironclaw_host_api::turn::TurnActor::new(
+                    ironclaw_host_api::ids::UserId::new(actor).expect("valid user"),
+                ));
+            }
+            let port = decorator.decorate_with_policy(
+                &context,
+                three_tool_spy(),
+                Arc::new(CapabilitySurfacePolicy::allow_all()),
+            );
+            port.visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .expect("visible surface builds turn state");
+
+            let expected = actor.map(|actor| {
+                ToolCorpusOwner::new(
+                    TenantId::new("tenant-tool-disclosure").expect("valid tenant"),
+                    ironclaw_host_api::ids::UserId::new(actor).expect("valid user"),
+                )
+            });
+            assert_eq!(
+                *retrieval.owners.lock().expect("owners lock"),
+                vec![expected]
+            );
+        }
     }
 }
 // arch-exempt: large_file, tool disclosure migration remains centralized, plan #6175

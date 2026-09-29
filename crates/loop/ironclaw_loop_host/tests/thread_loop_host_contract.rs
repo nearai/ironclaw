@@ -399,6 +399,55 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
 }
 
 #[tokio::test]
+async fn model_port_records_each_call_for_turn_start_reselection_only_when_asked() {
+    for record in [false, true] {
+        let fixture = ThreadFixture::new().await;
+        let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+        let port = ThreadBackedLoopModelPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            gateway,
+            16,
+        );
+        let port = if record {
+            port.with_model_call_recording()
+        } else {
+            port
+        };
+        issue_prompt_grant(&fixture.run_context, &[]);
+        let before = chrono::Utc::now();
+        port.stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: Vec::new(),
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            iteration: 0,
+            capability_view: None,
+            tool_choice: None,
+        })
+        .await
+        .unwrap();
+        let activity = fixture
+            .thread_service
+            .read_tool_selection_activity(&fixture.thread_scope, &fixture.thread_id)
+            .await
+            .unwrap();
+        if !record {
+            assert!(activity.is_none(), "nothing is written unless asked");
+            continue;
+        }
+        let mark = activity
+            .and_then(|activity| activity.last_model_call)
+            .expect("the call is recorded");
+        assert_eq!(mark.turn_id, fixture.run_context.turn_id);
+        assert!(mark.called_at >= before);
+        assert_eq!(mark.model.as_deref(), Some("provider/provider-model"));
+    }
+}
+
+#[tokio::test]
 async fn model_port_empty_request_pins_the_run_accepted_task_on_cache_miss() {
     let mut fixture = ThreadFixture::new_with_user_content("original accepted task").await;
     fixture.pin_initial_message_to_run();
@@ -1572,6 +1621,87 @@ async fn context_port_caches_stable_identity_within_run() {
 
     assert_eq!(first.identity_messages, second.identity_messages);
     assert_eq!(source.load_calls(), 1);
+}
+
+/// Records the advertised tools each source call was given.
+#[derive(Default)]
+struct AdvertisedToolsRecorder {
+    identity: Mutex<Vec<ironclaw_loop_contracts::AdvertisedTools>>,
+    skills: Mutex<Vec<ironclaw_loop_contracts::AdvertisedTools>>,
+}
+
+#[async_trait]
+impl HostIdentityContextSource for AdvertisedToolsRecorder {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+        advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        self.identity
+            .lock()
+            .expect("identity recorder lock")
+            .push(advertised_tools.clone());
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl HostSkillContextSource for AdvertisedToolsRecorder {
+    async fn load_skill_context_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
+    ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+        self.skills
+            .lock()
+            .expect("skill recorder lock")
+            .push(advertised_tools.clone());
+        Ok(Vec::new())
+    }
+}
+
+/// The context port hands its run's advertised tools to both prompt sources,
+/// which gate the tool-naming text they produce on them; a port given none
+/// hands over the ordinary surface, whose text is unchanged.
+#[tokio::test]
+async fn context_port_passes_the_runs_advertised_tools_to_its_prompt_sources() {
+    let fixture = ThreadFixture::new().await;
+    let selected = ironclaw_loop_contracts::AdvertisedTools::Selected(
+        [CapabilityId::new("ironclaw.tool_search").unwrap()]
+            .into_iter()
+            .collect(),
+    );
+    for (advertised, expected) in [
+        (Some(selected.clone()), selected),
+        (None, ironclaw_loop_contracts::AdvertisedTools::Ordinary),
+    ] {
+        let recorder = Arc::new(AdvertisedToolsRecorder::default());
+        let mut adapter = ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_identity_context_source(recorder.clone())
+        .with_skill_context_source(recorder.clone());
+        if let Some(advertised) = advertised {
+            adapter = adapter.with_advertised_tools(advertised);
+        }
+        adapter
+            .load_loop_context(LoopContextRequest {
+                after: None,
+                limit: 16,
+                mode: PromptMode::TextOnly,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recorder.identity.lock().unwrap().as_slice(),
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(recorder.skills.lock().unwrap().as_slice(), [expected]);
+    }
 }
 
 #[tokio::test]
@@ -5566,6 +5696,7 @@ impl HostSkillContextSource for StaticSkillContextSource {
     async fn load_skill_context_candidates(
         &self,
         _run_context: &LoopRunContext,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         Ok(self.candidates.clone())
     }
@@ -5580,6 +5711,7 @@ impl HostSkillContextSource for DelayedFailingSkillContextSource {
     async fn load_skill_context_candidates(
         &self,
         _run_context: &LoopRunContext,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         tokio::time::sleep(self.delay).await;
         Err(HostSkillContextBuildError::SourceUnavailable)
@@ -5689,6 +5821,7 @@ impl HostIdentityContextSource for ModeAwareIdentityContextSource {
         &self,
         _run_context: &LoopRunContext,
         mode: PromptMode,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match mode {
@@ -5704,6 +5837,7 @@ impl HostIdentityContextSource for StaticIdentityContextSource {
         &self,
         _run_context: &LoopRunContext,
         _mode: PromptMode,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.candidates.clone())
@@ -5726,6 +5860,7 @@ impl HostIdentityContextSource for PolicyDeniedIdentityContextSource {
         &self,
         _run_context: &LoopRunContext,
         _mode: PromptMode,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         Ok(Vec::new())
     }
@@ -5801,6 +5936,7 @@ impl HostSkillContextSource for MutableSkillContextSource {
     async fn load_skill_context_candidates(
         &self,
         _run_context: &LoopRunContext,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         Ok(self.candidates.lock().unwrap().clone())
     }
@@ -6930,6 +7066,18 @@ impl RecordingGateway {
 
 #[async_trait]
 impl HostManagedModelGateway for RecordingGateway {
+    fn prompt_cache_profile(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        _fallback_index: u32,
+        _resolved_model_route: Option<&ironclaw_loop_host::HostManagedModelRouteSnapshot>,
+    ) -> ironclaw_loop_host::HostManagedPromptCacheProfile {
+        ironclaw_loop_host::HostManagedPromptCacheProfile {
+            model: Some("provider/provider-model".to_string()),
+            lifetime: ironclaw_llm::PromptCacheLifetime::Unknown,
+        }
+    }
+
     fn diagnostic_effective_model(
         &self,
         _model_profile_id: &ModelProfileId,
@@ -7012,6 +7160,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),

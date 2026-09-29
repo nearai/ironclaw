@@ -511,6 +511,7 @@ impl MockHost {
         }];
         descriptors.extend(self.extra_capability_descriptors.clone());
         VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: self.visible_surface_version.clone(),
             descriptors,
             callable_capability_ids: None,

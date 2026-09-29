@@ -13,6 +13,11 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
 };
+use ironclaw_loop_host::{
+    EXTENSION_LIFECYCLE_PROTOCOL_PROMPT, EXTENSION_LIFECYCLE_PROTOCOL_TOOLS,
+    HOSTED_MCP_REGISTRATION_PROTOCOL_PROMPT, HOSTED_MCP_REGISTRATION_PROTOCOL_TOOLS,
+    TOOL_DISCLOSURE_PROTOCOL_PROMPT, TOOL_PREFETCH_PROTOCOL_PROMPT,
+};
 use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 use super::*;
@@ -73,7 +78,7 @@ async fn default_system_prompt_loads_and_resolves_as_identity_message() {
     let context = test_run_context().await;
 
     let candidates = source
-        .load_identity_candidates(&context, PromptMode::TextOnly)
+        .load_identity_candidates(&context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
         .await
         .expect("load candidates");
 
@@ -170,7 +175,7 @@ async fn disclosure_active_appends_tool_search_protocol_to_system_prompt() {
         context: &LoopRunContext,
     ) -> String {
         let candidates = source
-            .load_identity_candidates(context, PromptMode::TextOnly)
+            .load_identity_candidates(context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
             .await
             .expect("candidates load");
         source
@@ -209,6 +214,207 @@ async fn disclosure_active_appends_tool_search_protocol_to_system_prompt() {
     );
 }
 
+/// The resolved prompt of `source` for one run advertising `tools`.
+async fn resolve_for(
+    source: &DefaultSystemPromptIdentitySource,
+    context: &LoopRunContext,
+    tools: &AdvertisedTools,
+) -> String {
+    let candidates = source
+        .load_identity_candidates(context, PromptMode::TextOnly, tools)
+        .await
+        .expect("candidates load");
+    source
+        .resolve_identity_message_content(
+            context,
+            candidates[0]
+                .message_ref
+                .as_ref()
+                .expect("trusted identity has ref"),
+        )
+        .await
+        .expect("resolve content")
+        .expect("content exists")
+        .content
+}
+
+fn selected(ids: &[&str]) -> AdvertisedTools {
+    AdvertisedTools::Selected(
+        ids.iter()
+            .map(|id| ironclaw_host_api::ids::CapabilityId::new(*id).expect("valid capability id"))
+            .collect(),
+    )
+}
+
+const BRIDGES: [&str; 3] = [
+    "ironclaw.tool_search",
+    "ironclaw.tool_describe",
+    "ironclaw.tool_call",
+];
+
+/// Build a source over a freshly seeded `SYSTEM.md`.
+fn seeded_source(
+    root: &tempfile::TempDir,
+    protocols: SystemPromptProtocols,
+) -> DefaultSystemPromptIdentitySource {
+    let storage_root = root.path().canonicalize().expect("canonical root");
+    let prompt_path = storage_root.join("system/prompts/default-system.md");
+    seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
+    DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, protocols)
+        .expect("source loads")
+}
+
+/// On an ordinary surface the tool-discovery section is the one it always
+/// was: the discovery text followed by both extension-lifecycle paragraphs,
+/// blank-line separated, at the end of the prompt. The lifecycle paragraphs
+/// became separate assets so a selection can withhold them, and this pins
+/// that splitting them changed no byte of a prompt with selection off.
+#[tokio::test]
+async fn an_ordinary_surface_keeps_the_whole_tool_discovery_section() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = seeded_source(
+        &root,
+        SystemPromptProtocols {
+            disclosure: true,
+            ..SystemPromptProtocols::default()
+        },
+    );
+    let context = test_run_context().await;
+    let content = resolve_for(&source, &context, &AdvertisedTools::Ordinary).await;
+    let whole_section = format!(
+        "\n\n{TOOL_DISCLOSURE_PROTOCOL_PROMPT}\n{EXTENSION_LIFECYCLE_PROTOCOL_PROMPT}\n\
+         {HOSTED_MCP_REGISTRATION_PROTOCOL_PROMPT}"
+    );
+    assert!(content.ends_with(&whole_section), "{content}");
+    assert!(
+        whole_section
+            .contains("required.\n\nWhen `extension_search` and `extension_install` are present")
+    );
+    assert!(whole_section.contains("Never call a lifecycle tool that is absent.\n"));
+}
+
+/// Turn-start selection adds its section after the tool-discovery section,
+/// and only on a run that advertises a selection. A run the selection fell
+/// back on (no accepted user text, a classifier failure, an unreadable
+/// history) keeps the ordinary surface, so its prompt is byte-identical to
+/// the prompt with selection off.
+#[tokio::test]
+async fn the_selection_section_renders_only_on_a_run_that_advertises_a_selection() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let context = test_run_context().await;
+    let selection_off = resolve_for(
+        &seeded_source(
+            &root,
+            SystemPromptProtocols {
+                disclosure: true,
+                ..SystemPromptProtocols::default()
+            },
+        ),
+        &context,
+        &AdvertisedTools::Ordinary,
+    )
+    .await;
+    let selection_on = seeded_source(
+        &root,
+        SystemPromptProtocols {
+            disclosure: true,
+            tool_prefetch: true,
+            ..SystemPromptProtocols::default()
+        },
+    );
+
+    let fallback = resolve_for(&selection_on, &context, &AdvertisedTools::Ordinary).await;
+    assert_eq!(fallback, selection_off);
+    assert!(!fallback.contains("Tools Chosen for This Conversation"));
+
+    let mut advertised: Vec<&str> = BRIDGES.to_vec();
+    advertised.extend(HOSTED_MCP_REGISTRATION_PROTOCOL_TOOLS);
+    let selected_run = resolve_for(&selection_on, &context, &selected(&advertised)).await;
+    assert_eq!(
+        selected_run,
+        format!("{selection_off}\n{TOOL_PREFETCH_PROTOCOL_PROMPT}"),
+        "a selection advertising every named tool adds only the selection section"
+    );
+    assert!(selected_run.contains("start a new conversation"));
+}
+
+/// On a selected run each tool-naming section renders only while the
+/// selection advertises every tool it names.
+#[tokio::test]
+async fn a_selected_run_withholds_sections_naming_tools_it_does_not_advertise() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let context = test_run_context().await;
+    const NAMING_GUIDANCE: &str = "## Persistent Memory\n\nSearch with `ironclaw.memory.search` before saying you do not know.";
+    let source = seeded_source(
+        &root,
+        SystemPromptProtocols {
+            disclosure: true,
+            tool_prefetch: true,
+            memory_guidance: Some(NAMING_GUIDANCE.to_string()),
+            ..SystemPromptProtocols::default()
+        },
+    );
+
+    let bridges_only = resolve_for(&source, &context, &selected(&BRIDGES)).await;
+    assert!(bridges_only.contains(TOOL_DISCLOSURE_PROTOCOL_PROMPT));
+    assert!(bridges_only.ends_with(TOOL_PREFETCH_PROTOCOL_PROMPT));
+    for withheld in [
+        "extension_search",
+        "extension_install",
+        "extension_register_hosted_mcp",
+        "ironclaw.memory.search",
+        "## Persistent Memory",
+    ] {
+        assert!(
+            !bridges_only.contains(withheld),
+            "{withheld:?} names or introduces a tool the run does not advertise: {bridges_only}"
+        );
+    }
+
+    let mut advertised: Vec<&str> = BRIDGES.to_vec();
+    advertised.push("ironclaw.memory.search");
+    advertised.extend(EXTENSION_LIFECYCLE_PROTOCOL_TOOLS);
+    let with_tools = resolve_for(&source, &context, &selected(&advertised)).await;
+    assert!(with_tools.contains(NAMING_GUIDANCE));
+    assert!(with_tools.contains(EXTENSION_LIFECYCLE_PROTOCOL_PROMPT));
+    assert!(
+        !with_tools.contains(HOSTED_MCP_REGISTRATION_PROTOCOL_PROMPT),
+        "the hosted-MCP paragraph also needs extension_register_hosted_mcp"
+    );
+
+    let no_bridges = resolve_for(&source, &context, &selected(&["ironclaw.memory.search"])).await;
+    assert!(no_bridges.contains(NAMING_GUIDANCE));
+    assert!(
+        !no_bridges.contains("tool_search"),
+        "without the bridges no discovery or selection text renders: {no_bridges}"
+    );
+}
+
+/// The loop tier gates the lifecycle paragraphs on capability ids it cannot
+/// import; pin them against the lifecycle capabilities' owner.
+#[test]
+fn lifecycle_paragraph_gates_name_the_owner_capability_ids() {
+    use ironclaw_extension_manager::extension_lifecycle_capabilities::{
+        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+    };
+    use ironclaw_host_api::capability::EXTENSION_SEARCH_CAPABILITY_ID;
+    assert_eq!(
+        EXTENSION_LIFECYCLE_PROTOCOL_TOOLS,
+        [
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            EXTENSION_INSTALL_CAPABILITY_ID
+        ]
+    );
+    assert_eq!(
+        HOSTED_MCP_REGISTRATION_PROTOCOL_TOOLS,
+        [
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+        ]
+    );
+}
+
 #[tokio::test]
 async fn benchmarking_mode_active_appends_no_human_protocol_to_system_prompt() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -238,7 +444,7 @@ async fn benchmarking_mode_active_appends_no_human_protocol_to_system_prompt() {
         context: &LoopRunContext,
     ) -> String {
         let candidates = source
-            .load_identity_candidates(context, PromptMode::TextOnly)
+            .load_identity_candidates(context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
             .await
             .expect("candidates load");
         source
@@ -299,7 +505,7 @@ async fn memory_protocol_is_absent_without_a_bound_memory_provider() {
         context: &LoopRunContext,
     ) -> String {
         let candidates = source
-            .load_identity_candidates(context, PromptMode::TextOnly)
+            .load_identity_candidates(context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
             .await
             .expect("candidates load");
         source
@@ -359,7 +565,7 @@ async fn scheduled_trigger_origin_appends_unattended_protocol_only_to_triggered_
         context: &LoopRunContext,
     ) -> String {
         let candidates = source
-            .load_identity_candidates(context, PromptMode::TextOnly)
+            .load_identity_candidates(context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
             .await
             .expect("candidates load");
         source
@@ -408,13 +614,13 @@ async fn default_system_prompt_reloads_edited_prompt_for_new_candidates() {
     .expect("prompt loads");
     let context = test_run_context().await;
     let first_candidates = source
-        .load_identity_candidates(&context, PromptMode::TextOnly)
+        .load_identity_candidates(&context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
         .await
         .expect("first candidates load");
 
     std::fs::write(&prompt_path, "edited standalone prompt").expect("prompt edits");
     let edited_candidates = source
-        .load_identity_candidates(&context, PromptMode::TextOnly)
+        .load_identity_candidates(&context, PromptMode::TextOnly, &AdvertisedTools::Ordinary)
         .await
         .expect("edited candidates load");
 

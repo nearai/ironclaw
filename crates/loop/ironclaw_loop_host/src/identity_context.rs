@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext,
-    PersonalContextPolicy, PromptMode,
+    AdvertisedTools, AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage,
+    LoopRunContext, PersonalContextPolicy, PromptMode,
 };
 use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
 use ironclaw_turns::LoopMessageRef;
@@ -13,10 +13,15 @@ const LOOP_SYSTEM_ROLE: &str = "system";
 
 #[async_trait]
 pub trait HostIdentityContextSource: Send + Sync {
+    /// Identity candidates for one run. `advertised_tools` is the run's
+    /// advertised tool set: a candidate whose text names a tool must leave
+    /// that text out when [`AdvertisedTools::may_name`] says the run does not
+    /// advertise the tool (#7836).
     async fn load_identity_candidates(
         &self,
         run_context: &LoopRunContext,
         mode: PromptMode,
+        advertised_tools: &AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError>;
 
     async fn resolve_identity_message_content(
@@ -192,9 +197,10 @@ pub async fn build_identity_messages(
     run_context: &LoopRunContext,
     mode: PromptMode,
     budget: IdentityBudget,
+    advertised_tools: &AdvertisedTools,
 ) -> Result<Vec<LoopContextMessage>, AgentLoopHostError> {
     let candidates = source
-        .load_identity_candidates(run_context, mode)
+        .load_identity_candidates(run_context, mode, advertised_tools)
         .await
         .map_err(HostIdentityContextBuildError::into_host_error)?;
     build_identity_messages_for_run(&candidates, run_context, mode, budget)
@@ -404,6 +410,7 @@ mod tests {
             &context,
             PromptMode::TextOnly,
             IdentityBudget::default(),
+            &AdvertisedTools::Ordinary,
         )
         .await
         .unwrap();
@@ -427,6 +434,7 @@ mod tests {
             &context,
             PromptMode::TextOnly,
             IdentityBudget::new(60).unwrap(),
+            &AdvertisedTools::Ordinary,
         )
         .await
         .unwrap();
@@ -446,6 +454,7 @@ mod tests {
             &context,
             PromptMode::TextOnly,
             IdentityBudget::new(60).unwrap(),
+            &AdvertisedTools::Ordinary,
         )
         .await
         .unwrap();
@@ -478,6 +487,7 @@ mod tests {
             &context,
             PromptMode::TextOnly,
             IdentityBudget::default(),
+            &AdvertisedTools::Ordinary,
         )
         .await
         .unwrap();
@@ -498,6 +508,7 @@ mod tests {
             &context,
             PromptMode::TextOnly,
             IdentityBudget::default(),
+            &AdvertisedTools::Ordinary,
         )
         .await
         .unwrap();
@@ -506,6 +517,7 @@ mod tests {
             &context,
             PromptMode::TextOnly,
             IdentityBudget::default(),
+            &AdvertisedTools::Ordinary,
         )
         .await
         .unwrap();
@@ -591,6 +603,7 @@ mod tests {
             &self,
             _run_context: &LoopRunContext,
             _mode: PromptMode,
+            _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
         ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.candidates.clone())

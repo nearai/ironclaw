@@ -227,6 +227,7 @@ impl HostIdentityContextSource for ProjectIdentitySource {
         &self,
         run_context: &LoopRunContext,
         _mode: PromptMode,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         let actor = run_context
             .actor()

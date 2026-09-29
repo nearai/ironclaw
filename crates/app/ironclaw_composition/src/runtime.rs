@@ -4138,6 +4138,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                             // `is_enabled()` (not `is_bridged()`): #7410 widened
                             // the disclosure protocol to every enabled mode.
                             disclosure: resolved_tool_disclosure.is_enabled(),
+                            tool_prefetch: false,
                             benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
                             // Provider-shipped, not host-owned: whatever the
                             // bound memory extension declares as its guidance,

@@ -338,6 +338,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             });
         }
         Ok(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             descriptors,

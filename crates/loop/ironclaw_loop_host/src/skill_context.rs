@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, InstalledSkillSnapshot, LoopContextSnippet,
-    LoopRunContext, SkillActivationState, SkillContextError, SkillContextService,
-    SkillContextSource, SkillRunSnapshot, SkillTrustLevel, SkillVisibility,
+    AdvertisedTools, AgentLoopHostError, AgentLoopHostErrorKind, InstalledSkillSnapshot,
+    LoopContextSnippet, LoopRunContext, SkillActivationState, SkillContextError,
+    SkillContextService, SkillContextSource, SkillRunSnapshot, SkillTrustLevel, SkillVisibility,
 };
 pub(crate) use ironclaw_loop_contracts::{
     is_skill_snippet_model_message_ref as is_snippet_model_message_ref,
@@ -21,9 +21,14 @@ use crate::SkillSourceKind;
 /// snapshot-only loop boundary.
 #[async_trait]
 pub trait HostSkillContextSource: Send + Sync {
+    /// Skill candidates for one run. `advertised_tools` is the run's
+    /// advertised tool set: text naming a tool (the skill listing names
+    /// `builtin.skill_activate`) must be left out when
+    /// [`AdvertisedTools::may_name`] says the run does not advertise it.
     async fn load_skill_context_candidates(
         &self,
         run_context: &LoopRunContext,
+        advertised_tools: &AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError>;
 }
 
@@ -175,9 +180,10 @@ impl HostSkillContextBuildError {
 pub(crate) async fn build_skill_instruction_snippets(
     source: &(dyn HostSkillContextSource + Send + Sync),
     run_context: &LoopRunContext,
+    advertised_tools: &AdvertisedTools,
 ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
     let candidates = source
-        .load_skill_context_candidates(run_context)
+        .load_skill_context_candidates(run_context, advertised_tools)
         .await
         .map_err(HostSkillContextBuildError::into_host_error)?;
     let snapshot = build_skill_run_snapshot(candidates)

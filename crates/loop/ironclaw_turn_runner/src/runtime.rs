@@ -1836,6 +1836,7 @@ mod tests {
 
     fn full_trigger_and_spawn_surface() -> VisibleCapabilitySurface {
         VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: CapabilitySurfaceVersion::new("surface-v1").expect("test version is valid"),
             descriptors: vec![
                 descriptor(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),

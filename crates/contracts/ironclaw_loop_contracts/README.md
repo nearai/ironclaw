@@ -32,6 +32,29 @@ Almost purely trait + DTO, re-exported flat from `src/lib.rs`:
 - `RedactedCheckpointPayload` + `MAX_CHECKPOINT_STATE_PAYLOAD_BYTES`;
   loop-side error and safe-summary vocabulary (`AgentLoopHostError*`,
   `LoopSafeSummary`).
+- `ToolRetrievalProvider` / `ToolRetrievalIndex` (+ `ToolSearchOutcome`,
+  `RankedTool`, `ToolSearchQueryClass`, `ToolRetrievalError`) — the async,
+  fallible, scored tool-ranking port behind `tool_search` (design from
+  #7411). A provider fits an index once per authorized surface, then the
+  host searches it many times; the index ranks exactly the definitions it
+  was fitted on, core tools included, so turn-start tool selection can use
+  the same port. `ToolRetrievalIndex::search_many` ranks several queries
+  separately in one call (additive, defaulting to one `search` per query),
+  so a dense ranker can embed them in one request. The module docs carry the authorization, determinism and
+  confidentiality contracts and define what a score means. The traits are
+  loop ports under `reborn_loop_port_location_scan` even though their names
+  do not follow the `Loop*Port` pattern.
+- `ToolSelectionClassifier` (+ `ToolSelectionRequest`,
+  `ToolSelectionCandidate`, `ConversationContext`, `ToolSelection`,
+  `ChosenTool`, `ToolSelectionError`) — the port that decides which
+  candidates a conversation advertises at turn-start tool selection. The
+  loop host bundles a classifier that ranks each segment of the
+  conversation and merges the rankings by rank; `ConversationContext` is a
+  plain carrier of the user messages, which the loop host builds, bounds and
+  segments. A deployment may
+  bind one other (for example a hosted classification model). Its output is
+  untrusted: the host re-checks names against the candidates, enforces the
+  caps and adds the floor. Also a loop port under the scan.
 
 ## Depends on / consumed by
 

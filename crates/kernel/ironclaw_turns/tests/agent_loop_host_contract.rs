@@ -463,6 +463,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministically() {
     let context = claimed_run_context().await;
     let surface = VisibleCapabilitySurface {
+        advertised_choice: Default::default(),
         callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
@@ -664,6 +665,7 @@ fn prompt_surface_request(descriptors: Vec<CapabilityDescriptorView>) -> Instruc
     InstructionBundleRequest {
         context_bundle: LoopContextBundle::default(),
         visible_surface: Some(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: CapabilitySurfaceVersion::new("surface-catalog-description").unwrap(),
             descriptors,
             callable_capability_ids: None,
@@ -801,6 +803,7 @@ async fn instruction_bundle_renders_runtime_context_section() {
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
@@ -986,6 +989,7 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
                 .unwrap(),
@@ -1001,6 +1005,7 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
                 .unwrap(),
@@ -1071,6 +1076,7 @@ async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
@@ -1164,6 +1170,7 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
 
     let with_runtime_request = InstructionBundleRequest {
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
@@ -1885,6 +1892,7 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     let surface = VisibleCapabilitySurface {
+        advertised_choice: Default::default(),
         callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![
@@ -2480,6 +2488,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             .with_context_memory_snippet("memory:project", "project memory available"),
     );
     let surface = VisibleCapabilitySurface {
+        advertised_choice: Default::default(),
         callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
@@ -3400,6 +3409,7 @@ impl RecordingAgentLoopHost {
             capability_outcomes: Mutex::new(Vec::new()),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             visible_surface: VisibleCapabilitySurface {
+                advertised_choice: Default::default(),
                 callable_capability_ids: None,
                 version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
                 descriptors: vec![CapabilityDescriptorView {
@@ -4781,6 +4791,7 @@ async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             communication: None,
             product_context: None,
@@ -4838,6 +4849,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             communication: Some(CommunicationRuntimeContext {
                 pending_extension_auth: PendingExtensionAuthState::Unknown,
@@ -4915,6 +4927,7 @@ async fn instruction_bundle_runtime_scheduled_trigger_without_delivery_tools_omi
         safety_context: None,
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             communication: Some(CommunicationRuntimeContext {
                 pending_extension_auth: PendingExtensionAuthState::Unknown,

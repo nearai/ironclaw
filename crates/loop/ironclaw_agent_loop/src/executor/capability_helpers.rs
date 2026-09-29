@@ -854,6 +854,7 @@ mod tests {
         // (this is the bug that made bridge calls loop on "not visible in the
         // filtered surface").
         let narrowed = VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: version.clone(),
             descriptors: vec![descriptor.clone()],
             callable_capability_ids: Some(vec![advertised.clone(), deferred.clone()]),
@@ -871,6 +872,7 @@ mod tests {
         // No narrowing (callable None): only advertised descriptors are visible —
         // pre-disclosure behavior, unchanged.
         let unnarrowed = VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: version.clone(),
             descriptors: vec![descriptor],
             callable_capability_ids: None,

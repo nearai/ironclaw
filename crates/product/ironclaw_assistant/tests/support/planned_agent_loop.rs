@@ -939,6 +939,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: None,
             version: harness_surface_version(),
             descriptors: vec![CapabilityDescriptorView {
@@ -1054,6 +1055,7 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
         &self,
         _run_context: &LoopRunContext,
         _mode: PromptMode,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         Ok(Vec::new())
     }

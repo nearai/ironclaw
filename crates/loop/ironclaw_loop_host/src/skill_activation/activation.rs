@@ -17,7 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_loop_contracts::{
-    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopRunContext, SkillVisibility,
+    AdvertisedTools, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopRunContext, SkillVisibility,
 };
 use ironclaw_skills::{
     LoadedSkill, SkillSelectionOptions, SkillSource, SkillTrust, extract_skill_mentions,
@@ -1326,6 +1326,30 @@ where
     async fn load_skill_context_candidates(
         &self,
         run_context: &LoopRunContext,
+        advertised_tools: &AdvertisedTools,
+    ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+        let mut candidates = self.context_candidates(run_context).await?;
+        // The listing tells the model to activate skills with
+        // `builtin.skill_activate`; a turn-start selection that does not
+        // advertise that tool gets no listing. Explicitly mentioned and
+        // selected skill bodies still load.
+        if !advertised_tools.may_name(&[super::SKILL_ACTIVATE_CAPABILITY_ID]) {
+            candidates.retain(|candidate| {
+                candidate.ordering_key.as_deref() != Some(SKILL_LISTING_ORDERING_KEY)
+            });
+        }
+        Ok(candidates)
+    }
+}
+
+impl<S> SelectableSkillContextSource<S>
+where
+    S: SkillBundleSource + ?Sized,
+{
+    /// Every candidate for the run, the skill listing included.
+    async fn context_candidates(
+        &self,
+        run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         let Some(accepted_message_ref) = run_context.accepted_message_ref.as_ref() else {
             return Ok(Vec::new());
@@ -2355,7 +2379,10 @@ mod tests {
                 .expect("record message");
 
             let selected = selectable
-                .load_skill_context_candidates(&context)
+                .load_skill_context_candidates(
+                    &context,
+                    &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+                )
                 .await
                 .expect("selection succeeds");
 
@@ -2410,7 +2437,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
         let listing_text: String = selected
@@ -2500,7 +2530,10 @@ mod tests {
                 .expect("record the user message, as the product surface does");
 
             let selected = selectable
-                .load_skill_context_candidates(&context)
+                .load_skill_context_candidates(
+                    &context,
+                    &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+                )
                 .await
                 .expect("selection succeeds");
 
@@ -2565,7 +2598,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("a large catalog must LIST FEWER SKILLS, never fail the context build");
         for candidate in &selected {
@@ -2619,7 +2655,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
         let listing = selected
@@ -2973,7 +3012,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("required skill loads");
 
@@ -2996,7 +3038,10 @@ mod tests {
         let context = run_context_with_required_skill("code-review").await;
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("required skill loads without a recorded message");
 
@@ -3022,7 +3067,10 @@ mod tests {
             .expect("record message");
 
         let error = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect_err("missing required skill must block");
 
@@ -3062,7 +3110,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3095,7 +3146,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3142,7 +3196,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3206,7 +3263,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3245,7 +3305,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3265,6 +3328,59 @@ mod tests {
         );
     }
 
+    /// The listing names `builtin.skill_activate`, so a turn-start selection
+    /// that does not advertise it gets no listing, while an explicitly
+    /// mentioned skill's body still loads. A selection advertising the tool,
+    /// and the ordinary surface, keep the listing.
+    #[tokio::test]
+    async fn listing_renders_only_when_the_run_advertises_skill_activate() {
+        let selected = |ids: &[&str]| {
+            AdvertisedTools::Selected(
+                ids.iter()
+                    .map(|id| {
+                        ironclaw_host_api::ids::CapabilityId::new(*id).expect("valid capability id")
+                    })
+                    .collect(),
+            )
+        };
+        for (advertised, lists) in [
+            (selected(&["builtin.read_file"]), false),
+            (
+                selected(&[super::super::SKILL_ACTIVATE_CAPABILITY_ID]),
+                true,
+            ),
+            (AdvertisedTools::Ordinary, true),
+        ] {
+            let selectable =
+                SelectableSkillContextSource::new(two_skill_source(), listing_config());
+            let context = run_context().await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    "$code-review this PR",
+                )
+                .expect("record message");
+            let candidates = selectable
+                .load_skill_context_candidates(&context, &advertised)
+                .await
+                .expect("selection succeeds");
+            assert!(
+                candidates.iter().any(|candidate| {
+                    candidate
+                        .loaded_skill_md()
+                        .is_some_and(|skill_md| skill_md.contains("CODE_REVIEW_SENTINEL"))
+                }),
+                "an explicitly mentioned skill loads either way ({advertised:?})"
+            );
+            let listed = candidates
+                .iter()
+                .filter_map(HostSkillContextCandidate::discoverable_metadata)
+                .any(|(name, _)| name == SKILL_LISTING_CANDIDATE_NAME);
+            assert_eq!(listed, lists, "listing for {advertised:?}");
+        }
+    }
+
     #[tokio::test]
     async fn listing_mode_model_selected_activation_injects_body_on_later_prompt_builds() {
         let selectable = SelectableSkillContextSource::new(two_skill_source(), listing_config());
@@ -3272,7 +3388,10 @@ mod tests {
         // No recorded message: the coordinator path builds context from the
         // active plan. Before activation only the listing is visible.
         let before = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("pre-activation load succeeds");
         assert!(
@@ -3288,7 +3407,10 @@ mod tests {
             .expect("model-selected activation succeeds");
 
         let after = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("post-activation load succeeds");
         assert!(
@@ -3319,7 +3441,10 @@ mod tests {
             )
             .expect("record message");
         let before = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("criteria selection succeeds");
         assert!(
@@ -3347,7 +3472,10 @@ mod tests {
         );
 
         let after = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("post-activation load succeeds");
         assert!(
@@ -3429,7 +3557,10 @@ mod tests {
             )
             .expect("record message");
         let selected = selectable
-            .load_skill_context_candidates(&off_context)
+            .load_skill_context_candidates(
+                &off_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
         assert_no_skill_body_disclosed(&selected, "criteria selection off via the global flag");
@@ -3447,7 +3578,10 @@ mod tests {
             )
             .expect("record message");
         let selected = selectable
-            .load_skill_context_candidates(&on_context)
+            .load_skill_context_candidates(
+                &on_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
         assert_eq!(
@@ -3500,7 +3634,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3536,7 +3673,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -3574,7 +3714,10 @@ mod tests {
             )
             .expect("record natural-language message");
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("natural-language selection succeeds");
         assert_no_skill_body_disclosed(
@@ -3590,7 +3733,10 @@ mod tests {
             )
             .expect("record explicit message");
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("explicit selection succeeds");
 
@@ -3627,11 +3773,17 @@ mod tests {
             .await
             .expect("model-selected skill activates");
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("active plan context loads");
         let selected_again = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("active plan context reloads");
 
@@ -3673,7 +3825,10 @@ mod tests {
         assert_eq!(source.reads(), vec!["code-review".to_string()]);
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("active plan context loads");
 
@@ -3745,7 +3900,10 @@ mod tests {
         assert_eq!(plan.selection.activations.len(), 2);
         assert_eq!(plan.activated_bundles().len(), 2);
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("active plan context loads");
         assert_eq!(selected.len(), 2);
@@ -3785,7 +3943,10 @@ mod tests {
             )
             .expect("record message");
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("natural-language activation merges");
 
@@ -3969,7 +4130,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("an unmet requirement is a refusal, not an error");
 
@@ -4116,7 +4280,10 @@ mod tests {
             )
             .expect("record message");
         let _ = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("first prompt build");
 
@@ -4168,7 +4335,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -4222,7 +4392,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -4271,13 +4444,19 @@ mod tests {
             .expect("record second message");
 
         let first_selected = selectable
-            .load_skill_context_candidates(&first_context)
+            .load_skill_context_candidates(
+                &first_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("first selection succeeds");
         assert_eq!(first_selected.len(), 1);
 
         let first_selected_after_message_consumed = selectable
-            .load_skill_context_candidates(&first_context)
+            .load_skill_context_candidates(
+                &first_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("first selection after clear succeeds");
         assert_eq!(
@@ -4287,7 +4466,10 @@ mod tests {
         );
 
         let second_selected = selectable
-            .load_skill_context_candidates(&second_context)
+            .load_skill_context_candidates(
+                &second_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("second selection succeeds");
         assert_no_skill_body_disclosed(
@@ -4332,13 +4514,19 @@ mod tests {
             .expect("clear first message");
 
         let first_selected = selectable
-            .load_skill_context_candidates(&first_context)
+            .load_skill_context_candidates(
+                &first_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("first selection succeeds");
         assert_no_skill_body_disclosed(&first_selected, "cleared message");
 
         let second_selected = selectable
-            .load_skill_context_candidates(&second_context)
+            .load_skill_context_candidates(
+                &second_context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("second selection succeeds");
         assert_eq!(
@@ -4367,7 +4555,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -4393,7 +4584,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -4479,7 +4673,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
         let combined = selected
@@ -4532,7 +4729,10 @@ mod tests {
             .expect("record message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
 
@@ -4583,7 +4783,10 @@ mod tests {
             .expect("record message");
 
         let error = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect_err("ambiguous activation should fail");
 
@@ -4612,7 +4815,10 @@ mod tests {
             .expect("record slash message");
 
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("slash selection succeeds");
         assert_eq!(selected.len(), 1);
@@ -4625,7 +4831,10 @@ mod tests {
             )
             .expect("record dollar message");
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("dollar selection succeeds");
         assert_eq!(selected.len(), 1);
@@ -4658,7 +4867,10 @@ mod tests {
                 )
                 .expect("record message");
             let selected = selectable
-                .load_skill_context_candidates(&context)
+                .load_skill_context_candidates(
+                    &context,
+                    &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+                )
                 .await
                 .expect("cached selection succeeds");
             assert_eq!(selected.len(), 1);
@@ -4698,7 +4910,10 @@ mod tests {
                 )
                 .expect("record message");
             let selected = selectable
-                .load_skill_context_candidates(&context)
+                .load_skill_context_candidates(
+                    &context,
+                    &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+                )
                 .await
                 .expect("system skill selection succeeds");
             assert_eq!(selected.len(), 1);
@@ -4865,7 +5080,10 @@ mod tests {
             )
             .expect("record message");
         let selected = selectable
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("selection succeeds");
         assert_eq!(selected.len(), 1);
@@ -4908,7 +5126,10 @@ mod tests {
             )
             .expect("record captured scope a message");
         selectable
-            .load_skill_context_candidates(&captured_a)
+            .load_skill_context_candidates(
+                &captured_a,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("scope a selection succeeds");
 
@@ -4928,7 +5149,10 @@ mod tests {
             )
             .expect("record captured scope b message");
         selectable
-            .load_skill_context_candidates(&captured_b)
+            .load_skill_context_candidates(
+                &captured_b,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("scope b selection succeeds");
 
@@ -4944,7 +5168,10 @@ mod tests {
             "clearing a pending message must not remove an already captured plan"
         );
         let after_clear = selectable
-            .load_skill_context_candidates(&pending_a)
+            .load_skill_context_candidates(
+                &pending_a,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .expect("pending scope a selection after clear succeeds");
         assert_no_skill_body_disclosed(

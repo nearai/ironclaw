@@ -378,6 +378,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     //
     // This is the end-to-end render assertion from the plan's Task 6 spec.
     let runtime_ctx = LoopRuntimeContext {
+        advertised_tools: Default::default(),
         loop_started_at_utc: Utc::now(),
         communication: None,
         product_context: None,
