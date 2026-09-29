@@ -53,6 +53,33 @@ impl CacheRetention {
     }
 }
 
+impl CacheRetention {
+    /// How long a prompt cached under this retention stays warm without being
+    /// read again.
+    pub fn prompt_cache_lifetime(self) -> PromptCacheLifetime {
+        match self {
+            Self::None => PromptCacheLifetime::Disabled,
+            Self::Short => PromptCacheLifetime::Known(std::time::Duration::from_secs(5 * 60)),
+            Self::Long => PromptCacheLifetime::Known(std::time::Duration::from_secs(60 * 60)),
+        }
+    }
+}
+
+/// How long a provider keeps a prompt cached after its last use, as far as
+/// the provider adapter knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptCacheLifetime {
+    /// The adapter cannot know: the provider caches on its own terms (for
+    /// example OpenAI's automatic caching). Callers use a configured lifetime.
+    #[default]
+    Unknown,
+    /// The adapter asks the provider not to cache prompts.
+    Disabled,
+    /// The cache lives this long after its last use (Anthropic's
+    /// `cache_control` TTL).
+    Known(std::time::Duration),
+}
+
 impl std::str::FromStr for CacheRetention {
     type Err = String;
 
@@ -327,9 +354,21 @@ fn hardened_client_builder_base() -> reqwest::ClientBuilder {
 /// Hardened client builder for one-shot requests with a total wall-clock
 /// timeout in addition to the shared transport bounds.
 pub fn hardened_client_builder(request_timeout_secs: u64) -> reqwest::ClientBuilder {
-    use std::time::Duration;
-    hardened_client_builder_base().timeout(Duration::from_secs(request_timeout_secs))
+    hardened_client_builder_with_timeout(std::time::Duration::from_secs(request_timeout_secs))
 }
+
+/// [`hardened_client_builder`] with the total timeout given as a
+/// [`std::time::Duration`], for callers (embeddings) whose budget is
+/// configured that way.
+pub(crate) fn hardened_client_builder_with_timeout(
+    request_timeout: std::time::Duration,
+) -> reqwest::ClientBuilder {
+    hardened_client_builder_base().timeout(request_timeout)
+}
+
+/// Default total timeout for one embeddings request (one batch). A batch is a
+/// single short round-trip, so it shares the auxiliary-call budget.
+pub const EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = AUXILIARY_REQUEST_TIMEOUT_SECS;
 
 /// Hardened client builder for streaming responses whose health is measured by
 /// time-to-first-response and inter-event idle time rather than total wall time.
@@ -645,6 +684,7 @@ mod tests {
             assert!(CONNECT_TIMEOUT_SECS < DEFAULT_REQUEST_TIMEOUT_SECS);
             assert!(CONNECT_TIMEOUT_SECS < AUXILIARY_REQUEST_TIMEOUT_SECS);
             assert!(CONNECT_TIMEOUT_SECS < TRANSCRIPTION_REQUEST_TIMEOUT_SECS);
+            assert!(CONNECT_TIMEOUT_SECS < EMBEDDING_REQUEST_TIMEOUT_SECS);
             assert!(TCP_KEEPALIVE_SECS < POOL_IDLE_TIMEOUT_SECS);
         }
     }

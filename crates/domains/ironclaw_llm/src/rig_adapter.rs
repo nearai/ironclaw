@@ -55,6 +55,10 @@ pub struct RigAdapter<M: CompletionModel> {
     /// automatic-caching marker — see `build_rig_request` and issue #6984.
     /// Also controls the cost multiplier for cache-creation tokens.
     cache_retention: CacheRetention,
+    /// Whether `cache_retention` was set for this adapter (Anthropic), so
+    /// the provider's cache lifetime is known. Other providers cache on
+    /// their own terms.
+    cache_retention_known: bool,
     /// Parameter names that this provider does not support (e.g., `"temperature"`).
     /// These are stripped from requests before sending to avoid 400 errors.
     unsupported_params: HashSet<String>,
@@ -283,6 +287,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             input_cost,
             output_cost,
             cache_retention: CacheRetention::None,
+            cache_retention_known: false,
             unsupported_params: HashSet::new(),
             default_additional_params: None,
             default_max_tokens: None,
@@ -357,6 +362,7 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// a warning is logged once at construction and caching is disabled.
     pub fn with_cache_retention(mut self, retention: CacheRetention) -> Self {
         self.cache_retention = effective_cache_retention(retention, &self.model_name);
+        self.cache_retention_known = true;
         self
     }
 
@@ -1372,6 +1378,14 @@ where
             CacheRetention::None => Decimal::ONE,
             CacheRetention::Short => Decimal::new(125, 2), // 1.25× (125% of input rate)
             CacheRetention::Long => Decimal::TWO,          // 2.0×  (200% of input rate)
+        }
+    }
+
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        if self.cache_retention_known {
+            self.cache_retention.prompt_cache_lifetime()
+        } else {
+            crate::config::PromptCacheLifetime::Unknown
         }
     }
 
@@ -4501,6 +4515,46 @@ mod tests {
         let moved = params["tools"].as_array().expect("raw tools array");
         assert_eq!(moved[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(moved[0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn prompt_cache_lifetime_follows_the_retention_only_when_one_was_set() {
+        use crate::config::PromptCacheLifetime;
+        use rig::client::CompletionClient;
+        use rig::providers::anthropic;
+        use std::time::Duration;
+
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .build()
+            .expect("build Anthropic client");
+        let adapter = |retention: Option<CacheRetention>| {
+            let adapter = RigAdapter::new(
+                client.completion_model("claude-opus-4-6"),
+                "claude-opus-4-6",
+            );
+            match retention {
+                Some(retention) => adapter.with_cache_retention(retention),
+                None => adapter,
+            }
+        };
+        assert_eq!(
+            adapter(Some(CacheRetention::Short)).prompt_cache_lifetime(),
+            PromptCacheLifetime::Known(Duration::from_secs(300))
+        );
+        assert_eq!(
+            adapter(Some(CacheRetention::Long)).prompt_cache_lifetime(),
+            PromptCacheLifetime::Known(Duration::from_secs(3_600))
+        );
+        assert_eq!(
+            adapter(Some(CacheRetention::None)).prompt_cache_lifetime(),
+            PromptCacheLifetime::Disabled
+        );
+        // A provider that never set a retention caches on its own terms.
+        assert_eq!(
+            adapter(None).prompt_cache_lifetime(),
+            PromptCacheLifetime::Unknown
+        );
     }
 
     #[test]

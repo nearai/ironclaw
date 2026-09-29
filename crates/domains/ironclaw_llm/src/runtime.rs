@@ -105,6 +105,7 @@ struct ProviderSnapshot {
     cost_per_token: (Decimal, Decimal),
     cache_write_multiplier: Decimal,
     cache_read_discount: Decimal,
+    prompt_cache_lifetime: crate::config::PromptCacheLifetime,
 }
 
 impl std::fmt::Debug for ProviderSnapshot {
@@ -123,6 +124,7 @@ impl ProviderSnapshot {
         let cost_per_token = provider.cost_per_token();
         let cache_write_multiplier = provider.cache_write_multiplier();
         let cache_read_discount = provider.cache_read_discount();
+        let prompt_cache_lifetime = provider.prompt_cache_lifetime();
         Self {
             inner: provider,
             model_name,
@@ -130,6 +132,7 @@ impl ProviderSnapshot {
             cost_per_token,
             cache_write_multiplier,
             cache_read_discount,
+            prompt_cache_lifetime,
         }
     }
 }
@@ -270,6 +273,10 @@ impl LlmProvider for SwappableLlmProvider {
 
     fn cache_read_discount(&self) -> Decimal {
         read(&self.state).cache_read_discount
+    }
+
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        read(&self.state).prompt_cache_lifetime
     }
 }
 
