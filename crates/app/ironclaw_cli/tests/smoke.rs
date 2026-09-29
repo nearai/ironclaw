@@ -151,7 +151,6 @@ fn fake_bin_path(bin_dir: &Path) -> String {
     format!("{}:/usr/bin:/bin", bin_dir.display())
 }
 
-#[cfg(unix)]
 fn write_reborn_config(reborn_home: &Path, profile: &str) {
     std::fs::create_dir_all(reborn_home).expect("reborn home");
     let production_sections = match profile {
@@ -3996,6 +3995,112 @@ fn doctor_reports_explicit_profile() {
             .lines()
             .any(|line| line.contains("profile") && line.contains("production")),
         "expected a line containing both 'profile' and 'production', stdout: {stdout}"
+    );
+}
+
+#[test]
+fn config_path_reports_config_file_profile_when_env_is_unset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume-sandboxed");
+
+    let output = Command::new(reborn_bin())
+        .args(["config", "path"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw config path should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("profile: hosted-single-tenant-volume-sandboxed"),
+        "config path must report the effective profile from config.toml: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_reports_config_file_profile_when_env_is_unset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume-sandboxed");
+
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw doctor should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line.contains("profile")
+            && line.contains("hosted-single-tenant-volume-sandboxed")),
+        "doctor must report the effective profile from config.toml: {stdout}"
+    );
+}
+
+#[test]
+fn status_reports_config_file_profile_when_env_is_unset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume-sandboxed");
+
+    let output = Command::new(reborn_bin())
+        .arg("status")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw status should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line.contains("profile")
+            && line.contains("hosted-single-tenant-volume-sandboxed")),
+        "status must report the effective profile from config.toml: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_flags_invalid_config_file_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_config(&reborn_home, "not-a-profile");
+
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw doctor should run");
+
+    assert!(
+        output.status.success(),
+        "doctor reports diagnostic failures in output, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("config file [boot].profile `not-a-profile` is invalid"),
+        "doctor must flag invalid effective profile from config.toml: {stdout}"
+    );
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed-railway"),
+        "invalid-profile diagnostic should list every supported profile: {stdout}"
     );
 }
 

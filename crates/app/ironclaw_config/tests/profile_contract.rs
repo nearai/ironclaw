@@ -176,6 +176,13 @@ fn invalid_profile_is_rejected() {
             value: "prod".to_string(),
         }
     );
+    let message = err.to_string();
+    for profile in RebornProfile::all() {
+        assert!(
+            message.contains(profile.as_str()),
+            "invalid-profile diagnostic should list supported profile {profile}: {message}"
+        );
+    }
 }
 
 #[test]
