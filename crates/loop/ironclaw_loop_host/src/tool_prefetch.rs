@@ -178,6 +178,11 @@ pub use conversation::{
     MAX_CONTEXT_MESSAGES, MAX_CONTEXT_SEGMENT_BYTES, MIN_CONTEXT_SEGMENT_BYTES,
 };
 
+#[cfg(test)]
+use local_classifier::{
+    LEXICAL_SELECTION_RANKER_VERSION, SelectionInputs, SkipReason, ToolSelectionPlan,
+    plan_selection,
+};
 use local_classifier::{
     LOCAL_CLASSIFIER_NAME, LexicalSelectionRetrieval, RankingToolClassifier, SelectionFloor,
     advertised_names, selection_floor,
@@ -1329,3 +1334,6 @@ enum Served {
     /// Another writer appended first; re-read and serve what it recorded.
     LostRace,
 }
+
+#[cfg(test)]
+mod tests;

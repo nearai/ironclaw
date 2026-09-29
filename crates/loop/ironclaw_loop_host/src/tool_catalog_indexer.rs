@@ -245,3 +245,6 @@ impl Drop for ToolCatalogIndexerHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

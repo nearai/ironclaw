@@ -469,3 +469,6 @@ fn fuse(lexical: &[RankedTool], dense: &[RankedTool], limit: usize) -> Vec<Ranke
 fn reciprocal_rank(zero_based_rank: usize) -> f64 {
     1.0 / (RRF_K + zero_based_rank as f64 + 1.0)
 }
+
+#[cfg(test)]
+mod tests;

@@ -83,3 +83,6 @@ impl AdvertisedTools {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

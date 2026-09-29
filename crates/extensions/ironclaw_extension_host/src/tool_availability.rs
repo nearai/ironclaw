@@ -191,3 +191,6 @@ impl ToolAvailabilityPredicate for ExtensionToolAvailability {
         answers
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -165,3 +165,6 @@ fn truncate_to_char_boundary(text: &str, max_bytes: usize) -> &str {
     }
     &text[..end]
 }
+
+#[cfg(test)]
+mod tests;

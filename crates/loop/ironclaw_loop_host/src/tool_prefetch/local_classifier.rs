@@ -229,6 +229,67 @@ pub(crate) fn advertised_names<'a>(
         .collect()
 }
 
+/// The result of ranking one catalog against one conversation context.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolSelectionPlan {
+    /// Every advertised name, in the order the `tools` array carries them:
+    /// catalog tools by provider name, then the bridges.
+    pub(crate) advertised: Vec<String>,
+    /// The floor tools (mandatory and extras) that were authorized.
+    pub(crate) floor: Vec<String>,
+    pub(crate) selected: Vec<SelectedTool>,
+    pub(crate) skipped: Vec<SkippedTool>,
+    /// Estimated schema tokens of everything advertised.
+    pub(crate) est_schema_tokens: u32,
+}
+
+/// The inputs [`plan_selection`] reads, gathered so the function stays pure.
+#[cfg(test)]
+pub(crate) struct SelectionInputs<'a> {
+    pub(crate) config: &'a ToolPrefetchConfig,
+    /// Authorized, available catalog definitions with their estimated schema
+    /// tokens, in catalog order.
+    pub(crate) candidates: &'a [(&'a ProviderToolDefinition, u32)],
+    /// Estimated tokens of the three bridges as advertised.
+    pub(crate) bridge_tokens: u32,
+    /// One sanitized ranking per conversation segment, in segment order
+    /// (newest message first): best first, names from `candidates` only.
+    pub(crate) rankings: &'a [Vec<RankedTool>],
+    pub(crate) ranker_version: &'a str,
+}
+
+/// Choose the advertised tools: the floor, then the segments' rankings
+/// merged by rank ([`merge_rankings`]), until `max_tools` or the token
+/// budget is reached. Pure: the same inputs always produce the same plan.
+/// The production path runs the same steps, with the floor computed by the
+/// host and the choice made behind the classifier port.
+#[cfg(test)]
+pub(crate) fn plan_selection(inputs: SelectionInputs<'_>) -> ToolSelectionPlan {
+    let floor = selection_floor(
+        &inputs.config.always,
+        inputs.candidates,
+        inputs.bridge_tokens,
+    );
+    let (selected, skipped) = merge_rankings(
+        inputs.config,
+        inputs.candidates,
+        &floor,
+        inputs.rankings,
+        inputs.ranker_version,
+    );
+    let est_schema_tokens = selected.iter().fold(floor.reserved_tokens, |sum, tool| {
+        sum.saturating_add(tool.est_schema_tokens)
+    });
+    ToolSelectionPlan {
+        advertised: advertised_names(&floor.names, selected.iter().map(|tool| tool.name.as_str())),
+        floor: floor.names,
+        selected,
+        skipped,
+        est_schema_tokens,
+    }
+}
+
 /// Merge one ranking per segment into the tools to advertise past the
 /// floor, and the ranked tools left out, with why.
 ///
