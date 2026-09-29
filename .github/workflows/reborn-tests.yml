@@ -248,7 +248,7 @@ jobs:
       - name: Install Rust
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly-2025-11-01
+          toolchain: nightly-2026-08-01
           components: llvm-tools-preview
           mold: true
           # Nightly crate attributes this lane compiles with. They live here,
@@ -696,7 +696,7 @@ jobs:
       - name: Install Rust
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly-2025-11-01
+          toolchain: nightly-2026-08-01
           components: llvm-tools-preview
           mold: true
           # Nightly crate attributes this lane compiles with. They live here,

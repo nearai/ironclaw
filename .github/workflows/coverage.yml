@@ -112,7 +112,7 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly-2025-11-01
+          toolchain: nightly-2026-08-01
           # Nightly crate attributes for the instrumented build. They belong
           # here rather than in a job-level `env: RUSTFLAGS:`, which would
           # split ownership of the variable with the composite.
@@ -224,7 +224,7 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly-2025-11-01
+          toolchain: nightly-2026-08-01
           # Nightly crate attributes for the instrumented build. They belong
           # here rather than in a job-level `env: RUSTFLAGS:`, which would
           # split ownership of the variable with the composite.
