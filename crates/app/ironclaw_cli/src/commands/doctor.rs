@@ -46,12 +46,7 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
         ),
     });
 
-    checks.push(DoctorCheck {
-        name: "profile".to_string(),
-        category: CheckCategory::Core,
-        outcome: CheckOutcome::Pass,
-        detail: report.profile().to_string(),
-    });
+    checks.push(check_effective_profile(context));
 
     let config_path = context.boot_config().home().config_file_path();
     checks.push(check_config_file(&config_path));
@@ -102,6 +97,25 @@ fn check_config_file(path: &std::path::Path) -> DoctorCheck {
         },
         Err(error) => DoctorCheck {
             name: "config_file".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Fail,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn check_effective_profile(context: &RebornCliContext) -> DoctorCheck {
+    match crate::runtime::read_config_file(context.boot_config()).and_then(|config_file| {
+        crate::runtime::effective_profile(context.boot_config(), config_file.as_ref())
+    }) {
+        Ok(profile) => DoctorCheck {
+            name: "profile".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Pass,
+            detail: profile.to_string(),
+        },
+        Err(error) => DoctorCheck {
+            name: "profile".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Fail,
             detail: error.to_string(),

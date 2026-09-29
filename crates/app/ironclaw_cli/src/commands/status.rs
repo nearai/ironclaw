@@ -39,7 +39,8 @@ fn build_status_dto_with_service_state(
     service: ServiceStateDto,
 ) -> anyhow::Result<StatusDto> {
     let home = context.boot_config().home();
-    let profile = context.boot_config().profile();
+    let config_file = crate::runtime::read_config_file(context.boot_config())?;
+    let profile = crate::runtime::effective_profile(context.boot_config(), config_file.as_ref())?;
     let config_path = home.config_file_path();
     // Cloned before `config_path` moves into `FilePresence` below —
     // `resolve_login_link_and_note` needs it to check `[webui].env_token_var`.

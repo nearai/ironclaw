@@ -56,6 +56,9 @@ impl ConfigPathCommand {
         let report =
             ironclaw_config::RebornDoctorReport::from_config(context.boot_config().clone());
         let home = context.boot_config().home();
+        let config_file = crate::runtime::read_config_file(context.boot_config())?;
+        let profile =
+            crate::runtime::effective_profile(context.boot_config(), config_file.as_ref())?;
 
         let config_path = home.config_file_path();
         let providers_path = home.providers_file_path();
@@ -70,7 +73,7 @@ impl ConfigPathCommand {
         println!("IronClaw Reborn config path");
         println!("reborn_home: {}", report.home_path().display());
         println!("home_source: {}", report.home_source_label());
-        println!("profile: {}", report.profile());
+        println!("profile: {}", profile);
         println!(
             "config_file: {} ({})",
             config_path.display(),
