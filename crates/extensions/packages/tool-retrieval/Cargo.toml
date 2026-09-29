@@ -1,0 +1,48 @@
+[package]
+name = "ironclaw_tool_retrieval"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Dense (embedding) tool ranker for IronClaw Reborn: a ToolRetrievalProvider over the authorized tool catalog"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+# Internal IronClaw crates: the loop-tier retrieval port this crate implements,
+# the host-api id/provenance vocabulary its definitions carry, and the
+# embeddings port it ranks with. Pinned by `reborn_dependency_boundaries.rs`
+# (`tool_retrieval_allowed`).
+# `ironclaw_filesystem` is the durable plane the vector store persists through
+# (a typed wrapper over `ScopedFilesystem`; composition chooses the backend).
+ironclaw_filesystem = { path = "../../../substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_llm = { path = "../../../domains/ironclaw_llm", version = "0.1.0" }
+ironclaw_loop_contracts = { path = "../../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+# Background indexing jobs: a task set the provider owns, a permit semaphore
+# bounding concurrent jobs, and a watch channel per job for its waiters.
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The store contract runs on every filesystem backend: libSQL through a
+# temp file, PostgreSQL through IRONCLAW_TOOL_VECTOR_STORE_POSTGRES_URL or a
+# throwaway container (skipped without Docker).
+deadpool-postgres = "0.14"
+libsql = { version = "0.9", default-features = false, features = ["core"] }
+tempfile = "3"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
+tokio-postgres = "0.7"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
