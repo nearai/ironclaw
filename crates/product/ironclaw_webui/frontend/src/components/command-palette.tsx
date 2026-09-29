@@ -39,10 +39,16 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
 
   React.useEffect(() => {
     if (!open) return;
+    const returnFocusTo = document.activeElement;
     setQuery("");
     setActive(0);
     const id = window.requestAnimationFrame(() => inputRef.current?.focus());
-    return () => window.cancelAnimationFrame(id);
+    return () => {
+      window.cancelAnimationFrame(id);
+      if (returnFocusTo instanceof HTMLElement && returnFocusTo.isConnected) {
+        returnFocusTo.focus();
+      }
+    };
   }, [open]);
 
   React.useEffect(() => {

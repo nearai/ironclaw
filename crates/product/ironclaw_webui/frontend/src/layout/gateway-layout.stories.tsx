@@ -1,8 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router";
 
-import { withQueryClient } from "../test-support/storybook-decorators";
+import { withQueryClient, withStubbedFetch } from "../test-support/storybook-decorators";
 import { GatewayLayout } from "./gateway-layout";
 
 // The full app shell: sidebar + header + routed <Outlet>. Seeding the ["threads"]
@@ -62,3 +62,55 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {};
+
+export const PaletteFocusRestoration: Story = {
+  args: { token: "" },
+  decorators: [withStubbedFetch([])],
+  render: (args) => (
+    <MemoryRouter initialEntries={["/chat"]}>
+      <Routes>
+        <Route element={<GatewayLayout {...args} />}>
+          <Route path="chat" element={
+            <label>
+              Draft
+              <textarea aria-label="Draft" />
+            </label>
+          } />
+        </Route>
+      </Routes>
+    </MemoryRouter>
+  ),
+  play: async ({ canvas, canvasElement, userEvent }) => {
+    const draft = canvas.getByRole("textbox", { name: "Draft" });
+    await userEvent.type(draft, "Keep this draft");
+
+    for (const dismissal of ["Escape", "Control", "Meta", "backdrop"]) {
+      const focused = new Promise<void>((resolve) => {
+        canvasElement.addEventListener("focusin", function onFocus(event) {
+          if (event.target instanceof HTMLElement && event.target.closest('[role="dialog"]')) {
+            canvasElement.removeEventListener("focusin", onFocus);
+            resolve();
+          }
+        });
+      });
+      await userEvent.keyboard("{Control>}k{/Control}");
+      await focused;
+      const dialog = await canvas.findByRole("dialog");
+      await expect(within(dialog).getByRole("textbox")).toHaveFocus();
+
+      if (dismissal === "backdrop") {
+        await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+      } else if (dismissal === "Escape") {
+        await userEvent.keyboard("{Escape}");
+      } else {
+        await userEvent.keyboard(`{${dismissal}>}k{/${dismissal}}`);
+      }
+
+      await expect(canvas.queryByRole("dialog")).not.toBeInTheDocument();
+      await expect(draft).toHaveFocus();
+    }
+
+    await userEvent.keyboard(" preserved");
+    await expect(draft).toHaveValue("Keep this draft preserved");
+  },
+};

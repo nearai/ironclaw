@@ -53,3 +53,15 @@ remain separate same-origin files under `frontend/public/vendor/fonts/`.
 
 The NEAR wallet connect popup is still a separate entrypoint with its own CSP and
 must not be merged into the main SPA bundle.
+
+## Command palette keyboard behavior
+
+Cmd/Ctrl+K opens the command palette and focuses its search input. Dismissing
+it with Escape, Cmd/Ctrl+K, or the backdrop returns focus to the invoking
+element if it is still mounted, so typing can continue in the same input.
+The `GatewayLayout` story `PaletteFocusRestoration` exercises this behavior
+through the real shell shortcut with isolated data and no backend requests:
+
+```bash
+corepack pnpm test:storybook src/layout/gateway-layout.stories.tsx -t "Palette Focus Restoration"
+```
