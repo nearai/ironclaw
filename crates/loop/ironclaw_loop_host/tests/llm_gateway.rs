@@ -3509,6 +3509,7 @@ async fn production_loop_model_request_includes_runtime_context() {
     .with_safety_context(non_production_safety_context())
     .with_instruction_materialization_store(store_for_port)
     .with_runtime_context(LoopRuntimeContext {
+        advertised_tools: Default::default(),
         loop_started_at_utc,
         communication: None,
         product_context: None,
@@ -4220,6 +4221,32 @@ fn diagnostic_effective_model_uses_selected_fallback_route() {
         effective_model.as_ref().map(|model| model.as_str()),
         Some("fallback-model")
     );
+}
+
+#[test]
+fn prompt_cache_profile_names_the_provider_and_model_and_the_provider_lifetime() {
+    let provider = Arc::new(RecordingLlmProvider::reply_for_model(
+        "primary-model",
+        "primary response",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let profile = gateway.prompt_cache_profile(&interactive_model(), 0, None);
+    let model = gateway
+        .diagnostic_effective_model(&interactive_model(), 0, None)
+        .expect("effective model");
+    assert_eq!(
+        profile.model,
+        Some(format!("{STATIC_PROVIDER_ID}/{}", model.as_str())),
+        "the identity names the provider as well as the model"
+    );
+    // A provider that does not set its own cache lifetime reports none.
+    assert_eq!(profile.lifetime, ironclaw_llm::PromptCacheLifetime::Unknown);
 }
 
 #[tokio::test]
@@ -5907,6 +5934,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             descriptors: Vec::new(),

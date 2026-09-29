@@ -43,7 +43,8 @@ per `docs/internal/reborn/guidance-conventions.md` rule 1.
 
 - Fast local check: `cargo test -p ironclaw_threads`
 - Focused contract suites: `session_thread_contract`,
-  `filesystem_session_thread_contract`, `filesystem_message_range_contract`
+  `filesystem_session_thread_contract`, `filesystem_message_range_contract`,
+  `tool_selection_history`
 - Boundary check after dependency/API changes:
   `cargo test -p ironclaw_architecture_tests`
 

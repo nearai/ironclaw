@@ -3,7 +3,8 @@
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
 //! `with_narrowed_capability_surface_policy_for_bridged_test`,
 //! `budget_accounting`, `communication_context_provider`,
-//! `hook_dispatcher_builder_factory`, `with_memory_curation_interval`.
+//! `hook_dispatcher_builder_factory`, `with_memory_curation_interval`,
+//! `tool_retrieval_provider`, `tool_prefetch`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -18,8 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
-use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
-use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_loop_contracts::{
+    CommunicationContextProvider, InstructionSafetyContext, ToolRetrievalProvider,
+};
+use ironclaw_loop_host::{ToolDisclosureMode, ToolPrefetchConfig};
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::InMemoryTurnEventSink;
 
@@ -200,6 +203,35 @@ impl RebornIntegrationGroupBuilder {
         provider: Arc<dyn CommunicationContextProvider>,
     ) -> Self {
         self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Bind the ranker behind `tool_search` in the group's ONE shared planned
+    /// runtime (`DefaultPlannedRuntimeParts::tool_retrieval_provider`), in place
+    /// of the host-bundled BM25F ranker. Only has an effect with tool
+    /// disclosure enabled. Defaults `None` (native BM25F).
+    pub fn tool_retrieval_provider(mut self, provider: Arc<dyn ToolRetrievalProvider>) -> Self {
+        self.tool_retrieval_provider = Some(provider);
+        self
+    }
+
+    /// Turn on turn-start tool selection in the group's ONE shared planned
+    /// runtime (`DefaultPlannedRuntimeParts::tool_prefetch`). Needs tool
+    /// disclosure enabled. Defaults `None` (today's surface).
+    pub fn tool_prefetch(mut self, config: ToolPrefetchConfig) -> Self {
+        self.tool_prefetch = Some(config);
+        self
+    }
+
+    /// Filter turn-start selection candidates by `predicate` in the group's
+    /// ONE shared planned runtime
+    /// (`DefaultPlannedRuntimeParts::tool_availability`). Defaults `None`
+    /// (every authorized tool is a candidate).
+    pub fn tool_availability(
+        mut self,
+        predicate: Arc<dyn ironclaw_loop_contracts::ToolAvailabilityPredicate>,
+    ) -> Self {
+        self.tool_availability = Some(predicate);
         self
     }
 

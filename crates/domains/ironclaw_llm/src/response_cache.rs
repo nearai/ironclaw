@@ -217,6 +217,10 @@ impl LlmProvider for CachedProvider {
         self.inner.cache_write_multiplier()
     }
 
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        self.inner.prompt_cache_lifetime()
+    }
+
     fn cache_read_discount(&self) -> Decimal {
         self.inner.cache_read_discount()
     }

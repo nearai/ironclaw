@@ -798,6 +798,7 @@ mod tests {
         let context = test_context();
         let store = Arc::new(EphemeralInstructionMaterializationStore::default());
         let runtime_ctx = LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
@@ -879,6 +880,7 @@ mod tests {
     async fn prompt_port_with_runtime_context_without_store_is_invalid_invocation() {
         let context = test_context();
         let runtime_ctx = LoopRuntimeContext {
+            advertised_tools: Default::default(),
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),

@@ -76,6 +76,9 @@ ironclaw_mcp = { path = "../../lanes/ironclaw_mcp" }
 # `[memory]` binding selects.
 ironclaw_memory_mem0 = { path = "../../extensions/packages/mem0", optional = true }
 ironclaw_memory_native = { path = "../../extensions/packages/memory-native" }
+# The dense `tool_search` ranker, bound only when the operator selects
+# `REBORN_TOOL_RETRIEVAL=dense` (`tool_retrieval_factory.rs`).
+ironclaw_tool_retrieval = { path = "../../extensions/packages/tool-retrieval", version = "0.1.0" }
 ironclaw_network = { path = "../../substrates/ironclaw_network" }
 ironclaw_notifications = { path = "../../domains/ironclaw_notifications" }
 ironclaw_observability = { path = "../../substrates/ironclaw_observability" }

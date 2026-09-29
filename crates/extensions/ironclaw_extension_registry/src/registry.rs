@@ -227,6 +227,9 @@ impl ExtensionRegistry {
 pub struct SharedExtensionRegistry {
     inner: Arc<RwLock<Arc<ExtensionRegistry>>>,
     version: Arc<AtomicU64>,
+    /// Publishes `version` after every change, for consumers that react to
+    /// catalog changes instead of polling (background tool indexing).
+    changes: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl SharedExtensionRegistry {
@@ -234,7 +237,20 @@ impl SharedExtensionRegistry {
         Self {
             inner: Arc::new(RwLock::new(Arc::new(registry))),
             version: Arc::new(AtomicU64::new(0)),
+            changes: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
+    }
+
+    /// A receiver that sees the registry's version after every change
+    /// (insert, update, replace, successful remove). Changes coalesce: a
+    /// slow receiver sees the latest version, not every one.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn bump_version(&self) {
+        let version = self.version.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        self.changes.send_replace(version);
     }
 
     pub fn snapshot(&self) -> Arc<ExtensionRegistry> {
@@ -267,7 +283,7 @@ impl SharedExtensionRegistry {
         let mut guard = self.inner.write();
         let removed = Arc::make_mut(&mut guard).remove(id);
         if removed.is_some() {
-            self.version.fetch_add(1, Ordering::AcqRel);
+            self.bump_version();
         }
         removed
     }
@@ -278,14 +294,14 @@ impl SharedExtensionRegistry {
     ) -> Result<R, ExtensionError> {
         let mut guard = self.inner.write();
         let result = f(Arc::make_mut(&mut guard))?;
-        self.version.fetch_add(1, Ordering::AcqRel);
+        self.bump_version();
         Ok(result)
     }
 
     pub fn replace(&self, registry: ExtensionRegistry) {
         let mut guard = self.inner.write();
         *guard = Arc::new(registry);
-        self.version.fetch_add(1, Ordering::AcqRel);
+        self.bump_version();
     }
 }
 
@@ -416,6 +432,33 @@ mod tests {
             ExtensionError::DuplicateExtension { .. }
         ));
         assert_eq!(registry.version(), inserted_version);
+    }
+
+    #[test]
+    fn shared_registry_publishes_each_applied_change_to_subscribers() {
+        let registry = SharedExtensionRegistry::default();
+        let mut changes = registry.subscribe();
+        assert!(!changes.has_changed().expect("sender alive"));
+
+        assert!(registry.remove(&extension_id("missing")).is_none());
+        assert!(
+            !changes.has_changed().expect("sender alive"),
+            "a no-op remove is not a change"
+        );
+
+        registry
+            .upsert(test_package("alpha", &["read"]))
+            .expect("upsert package");
+        assert!(changes.has_changed().expect("sender alive"));
+        assert_eq!(*changes.borrow_and_update(), registry.version());
+
+        registry.remove(&extension_id("alpha"));
+        assert!(changes.has_changed().expect("sender alive"));
+        assert_eq!(*changes.borrow_and_update(), registry.version());
+
+        // Clones share one signal.
+        registry.clone().replace(ExtensionRegistry::default());
+        assert!(changes.has_changed().expect("sender alive"));
     }
 
     #[test]

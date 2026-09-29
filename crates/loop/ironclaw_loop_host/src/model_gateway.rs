@@ -425,6 +425,20 @@ where
             .and_then(|route| ProviderModelId::new(route.model).ok())
     }
 
+    fn prompt_cache_profile(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> crate::HostManagedPromptCacheProfile {
+        crate::HostManagedPromptCacheProfile {
+            model: self
+                .diagnostic_effective_model(model_profile_id, fallback_index, resolved_model_route)
+                .map(|model| format!("{}/{}", self.provider_id, model.as_str())),
+            lifetime: self.provider.prompt_cache_lifetime(),
+        }
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,

@@ -84,6 +84,7 @@ pub mod session_ingress;
 pub mod skill_learning;
 pub mod skill_listing;
 pub mod store;
+pub mod tool_availability;
 
 mod build_error;
 #[cfg(test)]

@@ -675,6 +675,10 @@ impl LlmProvider for AnthropicOAuthProvider {
         &self.model
     }
 
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        self.cache_retention.prompt_cache_lifetime()
+    }
+
     fn cost_per_token(&self) -> (Decimal, Decimal) {
         let model = self.active_model_name();
         costs::model_cost(&model).unwrap_or_else(costs::default_cost)

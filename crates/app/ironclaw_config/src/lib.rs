@@ -31,6 +31,8 @@ mod home;
 mod profile;
 mod retired_sections;
 mod secrets_guard;
+mod tool_prefetch;
+mod tool_retrieval;
 
 pub use boot::RebornBootConfig;
 pub use budget::{
@@ -45,12 +47,13 @@ pub use capability_remediation::{
 };
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
-    GoogleFieldUpdate, GoogleOauthConfigUpdate, GoogleOauthConfigUpdateSession, GoogleSection,
-    HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, MemoryAdminOverride,
-    MemorySection, PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile,
+    EmbeddingsSection, GoogleFieldUpdate, GoogleOauthConfigUpdate, GoogleOauthConfigUpdateSession,
+    GoogleSection, HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection,
+    MemoryAdminOverride, MemorySection, PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile,
     RebornConfigFileError, RebornConfigFileUpdateError, RunnerSection, StorageBackend,
-    StorageSection, TriggerPollerConfigSection, begin_default_llm_slot_update,
-    begin_google_oauth_config_update, update_default_llm_slot, update_google_oauth_config,
+    StorageSection, ToolSelectionJevSection, ToolSelectionRankingSection, ToolSelectionSection,
+    TriggerPollerConfigSection, begin_default_llm_slot_update, begin_google_oauth_config_update,
+    update_default_llm_slot, update_google_oauth_config,
 };
 pub use config_seed::{
     RebornConfigSeedError, RebornConfigSeedOutcome, seed_default_config_file_if_missing,
@@ -60,3 +63,12 @@ pub use home::{REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource}
 pub use profile::{REBORN_PROFILE_ENV, RebornProfile};
 pub use retired_sections::{RetiredSectionError, RetiredSections, retired_config_key_guidance};
 pub use secrets_guard::{InlineSecretError, reject_inline_secret};
+pub use tool_prefetch::{
+    DEFAULT_JEV_API_KEY_ENV, DEFAULT_JEV_ENDPOINT, DEFAULT_JEV_MODEL, DEFAULT_JEV_TIMEOUT_MS,
+    JevSettings, MAX_TOOL_PREFETCH_CONTEXT_MESSAGES, MAX_TOOL_PREFETCH_SEGMENT_BYTES,
+    MIN_TOOL_PREFETCH_SEGMENT_BYTES, REBORN_TOOL_PREFETCH_CLASSIFIER_ENV, REBORN_TOOL_PREFETCH_ENV,
+    REBORN_TOOL_PREFETCH_JEV_ENDPOINT_ENV, TOOL_PREFETCH_MANDATORY_FLOOR, ToolPrefetchEnvLookup,
+    ToolPrefetchMode, ToolPrefetchSettings, ToolPrefetchSettingsError, ToolReselectionSettings,
+    ToolSelectionClassifierSettings,
+};
+pub use tool_retrieval::{REBORN_TOOL_RETRIEVAL_ENV, ToolRetrievalMode, UnknownToolRetrievalMode};

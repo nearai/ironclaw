@@ -655,6 +655,36 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "unbound-turns (PR #7633)",
     },
     SameLayerEdge {
+        // The dense tool ranker embeds tool documents and queries through the
+        // embeddings port its owner defines, rather than a second
+        // embeddings abstraction of its own.
+        crate_name: "ironclaw_tool_retrieval",
+        dependency_name: "ironclaw_llm",
+        layer: "substrates",
+        owner: "extensions/packages/tool-retrieval/",
+        decided_in: "dense tool ranker (tool retrieval port consumer)",
+    },
+    SameLayerEdge {
+        // The dense tool ranker persists its vectors through the shared
+        // filesystem substrate (a typed wrapper over `ScopedFilesystem`,
+        // like the memory provider's), not a store of its own.
+        crate_name: "ironclaw_tool_retrieval",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "extensions/packages/tool-retrieval/",
+        decided_in: "persisted tool vectors",
+    },
+    SameLayerEdge {
+        // The Jev tool classifier calls a hosted API, and external HTTP goes
+        // through the network substrate's policy egress rather than a client
+        // of its own.
+        crate_name: "ironclaw_tool_selection_jev",
+        dependency_name: "ironclaw_network",
+        layer: "substrates",
+        owner: "extensions/packages/tool-selection-jev/",
+        decided_in: "Jev tool classifier (tool selection port consumer)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_triggers",
         dependency_name: "ironclaw_libsql_runtime",
         layer: "substrates",
@@ -750,7 +780,15 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 // 72 -> 73 (#7688): the dedicated notification-record domain is introduced
 // directly at the substrates layer and stores its grammar through the shared
 // filesystem substrate rather than coupling notification state to outbound.
-const SAME_LAYER_EDGE_BASELINE: usize = 73;
+// 73 -> 74: the dense tool ranker package (`ironclaw_tool_retrieval`) is a
+// substrates-layer provider, like the memory providers, and ranks with the
+// `ironclaw_llm` embeddings port.
+// 74 -> 75: the Jev tool classifier package (`ironclaw_tool_selection_jev`)
+// is a substrates-layer provider and sends its requests through the
+// `ironclaw_network` policy egress.
+// 75 -> 76: the dense tool ranker persists its vectors per user through the
+// `ironclaw_filesystem` substrate.
+const SAME_LAYER_EDGE_BASELINE: usize = 76;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
@@ -846,6 +884,8 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_stress", "app"),
     ("ironclaw_telegram_extension", "products"),
     ("ironclaw_threads", "substrates"),
+    ("ironclaw_tool_retrieval", "substrates"),
+    ("ironclaw_tool_selection_jev", "substrates"),
     ("ironclaw_triggers", "substrates"),
     ("ironclaw_web_app", "substrates"),
     ("ironclaw_web_app_extension", "products"),

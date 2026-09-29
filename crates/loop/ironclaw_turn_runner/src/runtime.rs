@@ -9,19 +9,21 @@ use ironclaw_loop_contracts::{
     AgentLoopDriverError, AgentLoopHostError, CapabilitySurfaceProfileId,
     CommunicationContextProvider, InstructionSafetyContext, LoopCapabilityPort,
     LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
-    MemoryPromptContextService, RunProfileResolver,
+    MemoryPromptContextService, RunProfileResolver, ToolAvailabilityPredicate, ToolCorpusOwner,
+    ToolRetrievalProvider,
 };
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, GatewayPromptCacheProfiles,
+    HostIdentityContextSource, HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway,
     HostManagedPromptDiagnosticSink, HostSkillContextSource, HostUserProfileSource,
     LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ModelRouteResolver, ProductLiveCancellationReadiness,
     RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
     SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
-    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnLimits,
-    ToolDisclosureCapabilityDecorator, ToolDisclosureMode, verify_product_live_cancellation_probe,
+    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnLimits, ToolCatalogIndexer,
+    ToolDisclosureCapabilityDecorator, ToolDisclosureMode, ToolPrefetchConfig,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
 use ironclaw_outbound::ReplyAttachmentIntentPort;
@@ -482,6 +484,22 @@ where
     /// When `None` (the default), the notifier and channel are minted internally, which is
     /// correct for standalone and any composition that does not need to pre-mint.
     pub scheduler_wake_wiring: Option<SchedulerWakeWiring>,
+    /// The ranker behind `tool_search` (and, later, turn-start tool
+    /// selection). `None` (the default) binds the host-bundled BM25F ranker,
+    /// so ranking is unchanged. When `Some`, the tool-disclosure decorator
+    /// ranks with this provider instead. Only consulted when tool disclosure
+    /// is enabled.
+    pub tool_retrieval_provider: Option<Arc<dyn ToolRetrievalProvider>>,
+    /// Turn-start tool selection. `None` (the default) keeps today's
+    /// surface. When `Some`, each conversation advertises only the tools its
+    /// opening request predicts, frozen in the conversation's selection
+    /// history in `thread_service`. Requires tool disclosure; semantic
+    /// selection also requires `tool_retrieval_provider`.
+    pub tool_prefetch: Option<ToolPrefetchConfig>,
+    /// Which authorized tools turn-start selection may admit (for example,
+    /// not a tool whose extension still needs an account connected). `None`
+    /// admits every authorized tool. Only consulted with `tool_prefetch`.
+    pub tool_availability: Option<Arc<dyn ToolAvailabilityPredicate>>,
 }
 
 pub struct RebornRuntimeLoopComposition<S, G>
@@ -494,6 +512,10 @@ where
     pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
     pub scheduler_handle: TurnRunSchedulerHandle,
+    /// Indexes users' tool catalogs off the turn path, when tool disclosure
+    /// ranks with a bound retrieval provider. Not running until its owner
+    /// calls `spawn` with the catalog-change signal.
+    pub tool_catalog_indexer: Option<Arc<ToolCatalogIndexer>>,
 }
 
 #[derive(Debug)]
@@ -504,6 +526,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     SubagentCompletion(String),
     SteeringReconcileObserver(String),
     AfterTurnHooks(String),
+    ToolPrefetch(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -523,6 +546,12 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             }
             Self::AfterTurnHooks(error) => {
                 write!(formatter, "after-turn hook wiring failed: {error}")
+            }
+            Self::ToolPrefetch(error) => {
+                write!(
+                    formatter,
+                    "turn-start tool selection is misconfigured: {error}"
+                )
             }
         }
     }
@@ -848,10 +877,56 @@ where
             mode = ?parts.config.tool_disclosure,
             "reborn tool disclosure decorator wired"
         );
-        Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+        let decorator = ToolDisclosureCapabilityDecorator::new(
             Arc::clone(&parts.capability_result_writer),
             parts.config.tool_disclosure,
-        )))
+        );
+        let decorator = match parts.tool_retrieval_provider.clone() {
+            Some(provider) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    ranker_version = provider.ranker_version(),
+                    "reborn tool retrieval provider bound"
+                );
+                decorator.with_retrieval_provider(provider)
+            }
+            None => decorator,
+        };
+        let decorator = match parts.tool_prefetch.clone() {
+            Some(config) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    ranking = ?config.ranking(),
+                    classifier = config.classifier_name(),
+                    max_tools = config.max_tools(),
+                    "reborn turn-start tool selection bound"
+                );
+                decorator
+                    .with_tool_prefetch(
+                        config,
+                        Arc::clone(&parts.thread_service),
+                        parts.thread_scope.clone(),
+                    )
+                    .map_err(|error| {
+                        DefaultPlannedRuntimeBuildError::ToolPrefetch(error.to_string())
+                    })?
+                    .with_prompt_cache_profiles(Arc::new(GatewayPromptCacheProfiles::new(
+                        Arc::clone(&parts.model_gateway),
+                    )))
+            }
+            None => decorator,
+        };
+        let decorator = match parts.tool_availability.clone() {
+            Some(predicate) => decorator.with_tool_availability(predicate),
+            None => decorator,
+        };
+        Some(Arc::new(decorator))
+    } else if parts.tool_prefetch.is_some() {
+        // Selection narrows the advertised tools and relies on the discovery
+        // bridges for everything else; without disclosure there are none.
+        return Err(DefaultPlannedRuntimeBuildError::ToolPrefetch(
+            "it needs tool disclosure, which is off (REBORN_TOOL_DISCLOSURE=off)".to_string(),
+        ));
     } else {
         None
     };
@@ -877,6 +952,41 @@ where
         .map(|id| CapabilityId::new(*id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    // Background indexing of users' tool catalogs, when a retrieval provider
+    // ranks them: the same port stack a turn's disclosure layer wraps (so
+    // the documents indexed are the documents a turn fits), without the
+    // disclosure layer itself.
+    let tool_catalog_indexer = match (&tool_disclosure_decorator, &parts.tool_retrieval_provider) {
+        (Some(_), Some(retrieval)) => {
+            let catalog: Arc<dyn LoopCapabilityPortFactory> =
+                Arc::new(RuntimeProfiledCapabilityPortFactory {
+                    inner: Arc::clone(&parts.capability_factory),
+                    surface_resolver: Arc::clone(&capability_surface_resolver),
+                    spawn_decorator: spawn_decorator.clone(),
+                    tool_disclosure_decorator: None,
+                    global_denied: global_denied.clone(),
+                    scheduled_trigger_denied: scheduled_trigger_denied.clone(),
+                    unbound_denied: unbound_denied.clone(),
+                    unattended_denied: unattended_denied.clone(),
+                    declarations_thread_service: Arc::clone(&parts.thread_service),
+                    tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins.clone(),
+                    catalog_indexer: None,
+                });
+            let default_owner =
+                parts.thread_scope.owner_user_id.clone().map(|user_id| {
+                    ToolCorpusOwner::new(parts.thread_scope.tenant_id.clone(), user_id)
+                });
+            Some(Arc::new(ToolCatalogIndexer::new(
+                catalog,
+                Arc::clone(retrieval),
+                Arc::clone(&run_profile_resolver),
+                Some(parts.thread_scope.agent_id.clone()),
+                parts.thread_scope.project_id.clone(),
+                default_owner,
+            )))
+        }
+        _ => None,
+    };
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RuntimeProfiledCapabilityPortFactory {
             inner: parts.capability_factory,
@@ -889,6 +999,7 @@ where
             unattended_denied,
             declarations_thread_service: Arc::clone(&parts.thread_service),
             tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins,
+            catalog_indexer: tool_catalog_indexer.clone(),
         });
     let safety_context = parts
         .safety_context
@@ -930,6 +1041,15 @@ where
     }
     if let Some(sink) = parts.prompt_diagnostic_sink {
         host_factory = host_factory.with_prompt_diagnostic_sink(sink);
+    }
+    // Re-selection reads each conversation's last model call; record it only
+    // when a conversation may re-select.
+    if parts
+        .tool_prefetch
+        .as_ref()
+        .is_some_and(|config| config.reselection().enabled())
+    {
+        host_factory = host_factory.with_model_call_recording();
     }
     if let Some(port) = parts.reply_attachment_intent_port {
         host_factory = host_factory.with_reply_attachment_intent_port(port);
@@ -1015,6 +1135,7 @@ where
             coordinator,
             host_factory,
             scheduler_handle,
+            tool_catalog_indexer,
         },
     )
 }
@@ -1069,6 +1190,8 @@ struct RuntimeProfiledCapabilityPortFactory {
     /// resolved surface to exactly that allowlist.
     declarations_thread_service: Arc<dyn SessionThreadService>,
     tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
+    /// Told whose catalog each run is, so catalog changes re-index it.
+    catalog_indexer: Option<Arc<ToolCatalogIndexer>>,
 }
 
 #[async_trait::async_trait]
@@ -1077,6 +1200,9 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        if let Some(indexer) = &self.catalog_indexer {
+            indexer.note_run(run_context);
+        }
         let mut policy = self
             .surface_resolver
             .resolve(run_context)
@@ -1705,6 +1831,7 @@ mod tests {
                 ironclaw_threads::InMemorySessionThreadService::default(),
             ),
             tool_disclosure_profile_pins: HashMap::new(),
+            catalog_indexer: None,
         };
 
         factory
@@ -1758,6 +1885,7 @@ mod tests {
                 ironclaw_threads::InMemorySessionThreadService::default(),
             ),
             tool_disclosure_profile_pins: HashMap::new(),
+            catalog_indexer: None,
         };
         let mut context = test_run_context().await;
         let mut product_context = ProductTurnContext::new(
@@ -1836,6 +1964,7 @@ mod tests {
 
     fn full_trigger_and_spawn_surface() -> VisibleCapabilitySurface {
         VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             version: CapabilitySurfaceVersion::new("surface-v1").expect("test version is valid"),
             descriptors: vec![
                 descriptor(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
@@ -1908,6 +2037,7 @@ mod tests {
                 ironclaw_threads::InMemorySessionThreadService::default(),
             ),
             tool_disclosure_profile_pins: HashMap::new(),
+            catalog_indexer: None,
         };
 
         let scheduled_ids =
@@ -1973,6 +2103,7 @@ mod tests {
                 ironclaw_threads::InMemorySessionThreadService::default(),
             ),
             tool_disclosure_profile_pins: HashMap::new(),
+            catalog_indexer: None,
         };
 
         let scheduled_ids =

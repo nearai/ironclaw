@@ -1906,6 +1906,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             // Empty = "callable == advertised". A disclosure decorator that narrows
             // the advertised set populates this with the wider reachable catalog.
             callable_capability_ids: None,
+            // The whole visible surface; only turn-start selection (in the
+            // disclosure decorator) marks a surface as selected.
+            advertised_choice: ironclaw_loop_contracts::AdvertisedToolChoice::Ordinary,
         })
     }
 

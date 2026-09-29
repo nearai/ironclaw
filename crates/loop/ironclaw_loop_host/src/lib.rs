@@ -33,6 +33,7 @@ mod driver_host_port_adapters;
 mod durable_input_queue;
 mod external_tool_capability;
 mod filesystem_skill_bundle_source;
+mod hybrid_tool_retrieval;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
@@ -59,10 +60,12 @@ pub mod system_prompt_assets;
 mod thread_resolving_model_gateway;
 mod thread_scope;
 mod token_estimator;
+mod tool_catalog_indexer;
 mod tool_diagnostics;
 mod tool_disclosure;
 mod tool_disclosure_mode;
 mod tool_disclosure_port;
+mod tool_prefetch;
 mod tool_search;
 pub mod user_profile_context;
 
@@ -102,6 +105,9 @@ pub use driver_host_port_adapters::{
 pub use durable_input_queue::FilesystemHostInputQueue;
 pub use external_tool_capability::wrap_external_tools;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
+pub use hybrid_tool_retrieval::{
+    DEFAULT_DENSE_FIT_TIMEOUT, DEFAULT_DENSE_SEARCH_TIMEOUT, HybridToolRetrieval,
+};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityBudget, IdentityFileName,
@@ -177,18 +183,29 @@ pub use synthetic_capability::{
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use system_prompt_assets::{
-    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT,
-    SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
-    TOOL_DISCLOSURE_PROTOCOL_PROMPT,
+    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, EXTENSION_LIFECYCLE_PROTOCOL_PROMPT,
+    EXTENSION_LIFECYCLE_PROTOCOL_TOOLS, HOSTED_MCP_REGISTRATION_PROTOCOL_PROMPT,
+    HOSTED_MCP_REGISTRATION_PROTOCOL_TOOLS, SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
+    SELF_KNOWLEDGE_PROTOCOL_PROMPT, TOOL_DISCLOSURE_PROTOCOL_PROMPT, TOOL_PREFETCH_PROTOCOL_PROMPT,
+    tool_naming_sections,
 };
 pub use thread_resolving_model_gateway::{
     ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
 };
 pub use thread_scope::ThreadScopeResolver;
+pub use tool_catalog_indexer::{
+    MAX_INDEXED_OWNERS, TOOL_CATALOG_INDEX_DEBOUNCE, ToolCatalogIndexer, ToolCatalogIndexerHandle,
+    tool_corpus_owner_for_run,
+};
 pub use tool_diagnostics::{HostManagedToolDiagnosticEmitter, PreparedToolDiagnosticResult};
 pub use tool_disclosure::bridge_capability_ids;
 pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
 pub use tool_disclosure_port::ToolDisclosureCapabilityDecorator;
+pub use tool_prefetch::{
+    GatewayPromptCacheProfiles, MAX_CONTEXT_MESSAGES, MAX_CONTEXT_SEGMENT_BYTES,
+    MIN_CONTEXT_SEGMENT_BYTES, PromptCacheProfileSource, TOOL_PREFETCH_MANDATORY_FLOOR,
+    ToolPrefetchConfig, ToolPrefetchConfigError, ToolPrefetchRanking, ToolReselectionConfig,
+};
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
@@ -208,7 +225,7 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, RunId};
 use ironclaw_host_api::turn::TurnLeaseToken;
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    AdvertisedTools, AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
     CapabilityResultIntrinsicOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
     InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
@@ -364,6 +381,11 @@ where
     /// context). Rendered as ONE framed system-context block per prompt
     /// build; `None` everywhere else.
     channel_conversation_context: Option<String>,
+    /// The run's advertised tools, handed to the identity and skill sources
+    /// so tool-naming text follows the surface. Must equal the value the
+    /// run's model port holds, or the skill snippets it re-resolves by ref
+    /// would differ.
+    advertised_tools: AdvertisedTools,
 }
 
 struct IdentityCandidateCache {
@@ -436,7 +458,15 @@ where
             memory_degradation_note_emitted: Arc::new(OnceCell::new()),
             memory_degradation_note_in_flight: Arc::new(AtomicBool::new(false)),
             channel_conversation_context: None,
+            advertised_tools: AdvertisedTools::Ordinary,
         }
+    }
+
+    /// The tools this run advertises (see [`AdvertisedTools`]). Defaults to
+    /// the ordinary surface, whose prompt text is unchanged.
+    pub fn with_advertised_tools(mut self, advertised_tools: AdvertisedTools) -> Self {
+        self.advertised_tools = advertised_tools;
+        self
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -554,8 +584,12 @@ where
             let started_at = ironclaw_observability::live_latency_started_at();
             let instruction_snippets = match self.skill_context_source.as_deref() {
                 Some(source) => {
-                    skill_context::build_skill_instruction_snippets(source, &self.run_context)
-                        .await?
+                    skill_context::build_skill_instruction_snippets(
+                        source,
+                        &self.run_context,
+                        &self.advertised_tools,
+                    )
+                    .await?
                 }
                 None => Vec::new(),
             };
@@ -579,7 +613,11 @@ where
                             .cell_for_mode(mode)
                             .get_or_try_init(|| async {
                                 source
-                                    .load_identity_candidates(&self.run_context, mode)
+                                    .load_identity_candidates(
+                                        &self.run_context,
+                                        mode,
+                                        &self.advertised_tools,
+                                    )
                                     .await
                                     .map_err(HostIdentityContextBuildError::into_host_error)
                             })
@@ -1440,6 +1478,7 @@ impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
             version: empty_surface_version()?,
             descriptors: Vec::new(),
             callable_capability_ids: None,
+            advertised_choice: ironclaw_loop_contracts::AdvertisedToolChoice::Ordinary,
         })
     }
 
@@ -1514,6 +1553,13 @@ where
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    /// Record each model call in the conversation's tool-selection activity
+    /// (turn-start selection reads it to tell whether the prompt cache could
+    /// still be warm).
+    record_model_calls: bool,
+    /// The run's advertised tools; the skill snippets resolved here must be
+    /// built with the same value as the context port's.
+    advertised_tools: AdvertisedTools,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -1545,6 +1591,8 @@ where
             attachment_read_port: None,
             stream_sink: None,
             prompt_diagnostic_sink: None,
+            record_model_calls: false,
+            advertised_tools: AdvertisedTools::Ordinary,
         }
     }
 
@@ -1573,11 +1621,27 @@ where
             attachment_read_port: None,
             stream_sink: None,
             prompt_diagnostic_sink: None,
+            record_model_calls: false,
+            advertised_tools: AdvertisedTools::Ordinary,
         }
+    }
+
+    /// Record every model call's time and model in the conversation's
+    /// tool-selection activity, so turn-start selection can tell after an
+    /// idle gap or a restart whether the prompt cache could still be warm.
+    pub fn with_model_call_recording(mut self) -> Self {
+        self.record_model_calls = true;
+        self
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// The tools this run advertises; must match the run's context port.
+    pub fn with_advertised_tools(mut self, advertised_tools: AdvertisedTools) -> Self {
+        self.advertised_tools = advertised_tools;
         self
     }
 
@@ -1863,6 +1927,10 @@ where
             self.gateway.stream_model(host_request).await
         };
 
+        if self.record_model_calls {
+            self.record_model_call(&model_profile_id, request.fallback_index)
+                .await;
+        }
         let diagnostic_effective_model = match &gateway_result {
             Ok(response) => response
                 .diagnostic_effective_model
@@ -1969,6 +2037,39 @@ where
     S: SessionThreadService + ?Sized + Send + Sync,
     G: HostManagedModelGateway + ?Sized + Send + Sync,
 {
+    /// Record that a model call just returned. Best effort: a failed write
+    /// only means a later turn may treat the prompt cache as warm when it is
+    /// not, which costs nothing but a missed re-selection.
+    async fn record_model_call(&self, model_profile_id: &ModelProfileId, fallback_index: u32) {
+        let profile = self.gateway.prompt_cache_profile(
+            model_profile_id,
+            fallback_index,
+            self.run_context.resolved_model_route.as_ref(),
+        );
+        let request = ironclaw_threads::RecordToolSelectionActivityRequest {
+            scope: self.thread_scope.clone(),
+            thread_id: self.run_context.thread_id.clone(),
+            update: ironclaw_threads::ToolSelectionActivityUpdate::ModelCall(
+                ironclaw_threads::ModelCallMark {
+                    turn_id: self.run_context.turn_id,
+                    called_at: Utc::now(),
+                    model: profile.model,
+                },
+            ),
+        };
+        if let Err(error) = self
+            .thread_service
+            .record_tool_selection_activity(request)
+            .await
+        {
+            tracing::debug!(
+                target: crate::tool_prefetch::TOOL_PREFETCH_LOG_TARGET,
+                error_kind = error.kind_name(),
+                "recording the model call for turn-start tool selection failed"
+            );
+        }
+    }
+
     async fn emit_model_started(&self, requested_model_profile_id: Option<ModelProfileId>) {
         if let Some(milestone_sink) = &self.milestone_sink {
             let milestones =
@@ -2261,8 +2362,12 @@ where
         let Some(source) = self.skill_context_source.as_deref() else {
             return Ok(HashMap::new());
         };
-        let mut snippets =
-            skill_context::build_skill_instruction_snippets(source, &self.run_context).await?;
+        let mut snippets = skill_context::build_skill_instruction_snippets(
+            source,
+            &self.run_context,
+            &self.advertised_tools,
+        )
+        .await?;
         sort_instruction_snippets_for_prompt(&mut snippets);
         let mut messages = HashMap::with_capacity(snippets.len());
         for (ordinal, snippet) in snippets.into_iter().enumerate() {
@@ -2288,6 +2393,17 @@ where
     }
 }
 
+/// What the host knows about the prompt cache one model call uses: which
+/// provider and model it goes to, and how long the provider keeps the prompt
+/// cached after its last use.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HostManagedPromptCacheProfile {
+    /// Opaque provider-and-model identity, compared for equality only. `None`
+    /// when the gateway cannot tell.
+    pub model: Option<String>,
+    pub lifetime: ironclaw_llm::PromptCacheLifetime,
+}
+
 /// Host-managed text-only model gateway. Implementations own provider selection,
 /// profile policy, retry/circuit behavior, and sanitization.
 #[async_trait]
@@ -2305,6 +2421,23 @@ pub trait HostManagedModelGateway: Send + Sync {
             return None;
         }
         resolved_model_route.and_then(|route| ProviderModelId::new(route.model_id()).ok())
+    }
+
+    /// The prompt cache a call with these inputs uses. Gateways that own
+    /// provider selection should override this. The default knows only a
+    /// resolved route's provider and model, and never the cache lifetime.
+    fn prompt_cache_profile(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> HostManagedPromptCacheProfile {
+        HostManagedPromptCacheProfile {
+            model: resolved_model_route
+                .filter(|_| fallback_index == 0)
+                .map(|route| format!("{}/{}", route.provider_id(), route.model_id())),
+            lifetime: ironclaw_llm::PromptCacheLifetime::Unknown,
+        }
     }
 
     async fn stream_model(
@@ -3104,7 +3237,7 @@ fn bounded_limit(requested: usize, configured: usize) -> usize {
     }
 }
 
-fn accepted_task_message_id(run_context: &LoopRunContext) -> Option<ThreadMessageId> {
+pub(crate) fn accepted_task_message_id(run_context: &LoopRunContext) -> Option<ThreadMessageId> {
     let message_ref = run_context.accepted_message_ref.as_ref()?.as_str();
     let raw_message_id = message_ref.strip_prefix("msg:")?;
     ThreadMessageId::parse(raw_message_id).ok()

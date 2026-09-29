@@ -97,6 +97,15 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         after_turn_hook_wiring: false,
         communication_context_provider: true, // :3337-3357 Some whenever local_runtime present
         scheduler_wake_wiring: false,         // :2847-2857 None outside Production/MigrationDryRun
+        // None unless a deployment sets `RebornRuntimeInput::tool_retrieval_provider`;
+        // nothing binds an alternate ranker by default, so `tool_search` keeps
+        // the host-bundled BM25F ranker.
+        tool_retrieval_provider: false,
+        // None unless the operator sets `REBORN_TOOL_PREFETCH` (default `off`):
+        // the tool surface stays today's core-plus-caps disclosure.
+        tool_prefetch: false,
+        // Bound only alongside `tool_prefetch`, which is off by default.
+        tool_availability: false,
     };
 
 /// Deliberate test-double substitutions: `(field, reason)`. Every other field
@@ -185,6 +194,9 @@ fn mask(
         }
         "after_turn_hook_wiring" => shape.after_turn_hook_wiring = from.after_turn_hook_wiring,
         "scheduler_wake_wiring" => shape.scheduler_wake_wiring = from.scheduler_wake_wiring,
+        "tool_retrieval_provider" => shape.tool_retrieval_provider = from.tool_retrieval_provider,
+        "tool_prefetch" => shape.tool_prefetch = from.tool_prefetch,
+        "tool_availability" => shape.tool_availability = from.tool_availability,
         other => panic!(
             "ALLOWED_DIVERGENCES references unknown field {other:?} — update this match and \
              DefaultPlannedRuntimePartsShape together"

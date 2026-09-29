@@ -917,6 +917,10 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.cache_write_multiplier()
     }
 
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        self.primary.prompt_cache_lifetime()
+    }
+
     fn cache_read_discount(&self) -> Decimal {
         self.primary.cache_read_discount()
     }

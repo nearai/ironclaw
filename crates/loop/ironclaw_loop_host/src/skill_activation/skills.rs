@@ -470,7 +470,10 @@ mod tests {
 
         let context_source = SkillBundleContextSource::new(extension.bundle_source());
         let candidates = context_source
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap();
         let snapshot = build_skill_run_snapshot(candidates).unwrap();
@@ -540,7 +543,10 @@ mod tests {
 
         let candidates = extension
             .host_skill_context_source()
-            .load_skill_context_candidates(&context)
+            .load_skill_context_candidates(
+                &context,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap();
         let snapshot = build_skill_run_snapshot(candidates).unwrap();

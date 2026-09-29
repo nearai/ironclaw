@@ -79,6 +79,16 @@ pub enum SessionThreadError {
         message_id: ThreadMessageId,
         reason: &'static str,
     },
+    #[error(
+        "tool selection history for thread {thread_id} changed: expected {expected_entries} entries, found {actual_entries}"
+    )]
+    ToolSelectionHistoryConflict {
+        thread_id: ThreadId,
+        expected_entries: usize,
+        actual_entries: usize,
+    },
+    #[error("tool selection history entry is invalid: {reason}")]
+    InvalidToolSelection { reason: String },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
     #[error("serialization error: {0}")]
@@ -114,6 +124,8 @@ impl SessionThreadError {
             Self::StructuredFinalizationPublishMismatch { .. } => {
                 "structured_finalization_publish_mismatch"
             }
+            Self::ToolSelectionHistoryConflict { .. } => "tool_selection_history_conflict",
+            Self::InvalidToolSelection { .. } => "invalid_tool_selection",
             Self::GeneratedThreadId(_) => "generated_thread_id",
             Self::Serialization(_) => "serialization",
             Self::Deserialization(_) => "deserialization",

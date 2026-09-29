@@ -40,6 +40,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `tool_args.rs` | Shared sub-step primitives for provider tool-call parsing: fail-loud and silent-fallback JSON arg parsing, ordered reasoning-field probe (Layer 2 of RC3/M9 framework) |
 | `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
 | `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
+| `embeddings/{mod,factory,openai_compatible}.rs` | Text-embeddings port (`EmbeddingProvider`, `EmbeddingError`), the fail-closed id factory (`create_embedding_provider`), and the OpenAI-compatible `/v1/embeddings` client |
 | `image_models.rs` | Image-generation model metadata table |
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
 | `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
@@ -49,7 +50,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 ## Sub-owner map
 
 The File Map above says what each file *is*. This map says who **owns** it —
-which of the crate's ten concerns a change belongs to, and what must not drift
+which of the crate's eleven concerns a change belongs to, and what must not drift
 into it. PROPOSAL §6.4.13 asks for this map and names five sub-owners
 (providers / auth-sessions / registry / decorators / recording); measured
 against the tree those five cover 28 of 48 files, so five more are named here
@@ -72,6 +73,7 @@ owner, and a deleted one fails until its entry goes.
 | `model-catalog` | Facts about **models**: what an endpoint lists, and which models see images, generate images, or think natively | Provider identity or routing | `models.rs`, `reasoning_models.rs`, `vision_models.rs`, `image_models.rs` |
 | `recording` | Trace capture and replay, and binding recorded tool arguments to earlier results | Live provider behavior | `recording.rs`, `trace_binding.rs` |
 | `transcription` | The `TranscriptionProvider` trait and its implementations — a **different trait** from `LlmProvider`, sharing only transports | Anything implementing `LlmProvider` | `transcription/mod.rs`, `transcription/chat_completions.rs`, `transcription/openai.rs` |
+| `embeddings` | The `EmbeddingProvider` port and its implementations — a **different trait** from `LlmProvider`, sharing only the hardened transport and the base-URL SSRF guard. Owns the provider-id catalog and the fail-closed construction rule; the composition root only decides when to build and who receives it | Anything implementing `LlmProvider`; reading the config file | `embeddings/mod.rs`, `embeddings/factory.rs`, `embeddings/openai_compatible.rs` |
 | `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs`, `anthropic_oauth/tests.rs`, `anthropic_oauth/tests/prompt_cache_tests.rs` |
 
 Four placement calls worth stating, because each is a file whose *shape*
@@ -292,6 +294,20 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 **Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.5` — must be a model the ChatGPT account is entitled to; codex-only slugs like `gpt-5.3-codex` are rejected with HTTP 400 in subscription mode), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
 
+## Embeddings
+
+`embeddings/` is a separate port from `LlmProvider`: `EmbeddingProvider::embed(&[String]) -> Result<Vec<Vec<f32>>, EmbeddingError>` returns one vector per input, in input order. Consumers hold only `Arc<dyn EmbeddingProvider>`.
+
+**Selection (`embeddings/factory.rs`).** `create_embedding_provider(EmbeddingProviderSettings, env)` applies the `EMBEDDING_*` env overrides (env wins over the `[embeddings]` config section), then selects by provider id: `openai` (base URL defaults to `https://api.openai.com/v1`, API key required) or `openai_compatible` (base URL required, key optional). The key is read from the env var named by `api_key_env` (default `EMBEDDING_API_KEY`); config never holds it. Fail closed: an unset id gives `None` quietly; an unknown id, a missing model/base URL/required key, an unparseable numeric override, or a rejected base URL gives `None` with a warning. An unknown id is never routed to OpenAI. The id catalog lives here rather than in composition because module-specific initialization stays in the owning crate; composition (`ironclaw_composition::embedding_provider_factory`) only maps the config section and calls it.
+
+`OpenAiCompatibleEmbeddings` rules:
+
+- **Endpoint.** `<base>/embeddings`, where `<base>` follows the chat providers' `/v1` rule (`normalize_openai_base_url`): a bare host gains `/v1` once, `…/v1` is never doubled, a base already ending in `/embeddings` is used as is, and any other path is kept.
+- **Transport.** The hardened builder with a `Duration` total timeout, the `check_models_url` SSRF guard run once at construction with the validated addresses pinned (`resolve_to_addrs`), no redirect following, loopback proxy bypass. Construction is `async` and returns `EmbeddingError::InvalidConfig` rather than degrading to a bare client.
+- **Batching.** Inputs are sent in requests of at most `max_batch_size`; an input over `max_input_bytes` (UTF-8 bytes) fails the whole call before any request.
+- **Response checks.** Vectors are re-ordered by their `index`; a wrong count, a duplicate or out-of-range index, or an empty vector is `InvalidResponse`. Every vector must match the configured dimension or, when none is configured, the first dimension this instance saw (`DimensionMismatch`).
+- **Errors.** 401/403 → `AuthFailed`, 429 → `RateLimited` (`Retry-After` parsed by `retry::parse_retry_after`), other non-2xx → `HttpStatus` with the body truncated to 512 chars, reqwest timeout → `Timeout`.
+
 ## Provider Chain Construction
 
 `build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `test-support` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
@@ -369,6 +385,14 @@ Downgrade-to-`none` decisions and their `tracing::warn!` go through the
 single `effective_cache_retention` chokepoint, shared by `with_cache_retention`
 and both transports' construction paths. Wire shape is pinned by
 capture-server tests in both files.
+
+**Cache lifetime.** `LlmProvider::prompt_cache_lifetime()` reports how long a
+prompt stays cached after its last use: both Anthropic transports report the
+effective retention (`short` 5 minutes, `long` 1 hour, `none` disabled);
+every other provider reports `Unknown` (the trait default), because it caches
+on its own terms. Every decorator delegates it. The loop host's turn-start
+tool selection reads it to decide whether the cached `tools` array could
+still be warm, and uses its own configured lifetime for `Unknown`.
 
 **OpenAI Responses `prompt_cache_key`**: `openai_codex_provider.rs` and
 `codex_chatgpt.rs` set `prompt_cache_key` on the wire to whatever value

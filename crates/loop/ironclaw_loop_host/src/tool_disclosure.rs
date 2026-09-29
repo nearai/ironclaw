@@ -22,6 +22,12 @@ const NAMESPACE_CATALOG_HEADER: &str = include_str!("../prompts/tool_search_name
 
 /// Canonical core tool names from the progressive-disclosure policy.
 ///
+/// With turn-start selection on (`crate::tool_prefetch`) these are not
+/// special: they are ranked like any other tool and deferred when the opening
+/// request does not predict them. The comments below say which ones other
+/// behaviour leans on; operators keep those advertised through
+/// `REBORN_TOOL_PREFETCH_ALWAYS` (documented in `.env.example`).
+///
 /// Builtin provider names may be encoded from capability ids by the host
 /// runtime (for example `builtin.read_file` can be exposed as
 /// `builtin__read_file`). Core matching also checks the canonical builtin
@@ -223,32 +229,45 @@ impl CapabilityCatalog {
         self.entries.iter().map(|entry| &entry.definition)
     }
 
+    /// Every authorized definition with its estimated schema tokens, in
+    /// catalog (provider-name) order.
+    pub(crate) fn effective_definitions_with_tokens<'a>(
+        &'a self,
+        policy: &'a CapabilitySurfacePolicy,
+    ) -> impl Iterator<Item = (&'a ProviderToolDefinition, u32)> + 'a {
+        self.effective_entries(policy)
+            .map(|entry| (&entry.definition, entry.est_schema_tokens))
+    }
+
     /// Historical global provider-name order used by the benchmark's compact
-    /// and signatures control arms.
-    fn discoverable_tool_names(&self, policy: &CapabilitySurfacePolicy) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter(|entry| {
-                entry.tier == ToolTier::Discoverable
-                    && policy.permits_capability_id(&entry.definition.capability_id)
-            })
+    /// and signatures control arms. `indexed` picks which authorized entries
+    /// the index lists.
+    fn indexed_tool_names(
+        &self,
+        policy: &CapabilitySurfacePolicy,
+        indexed: &dyn Fn(&CatalogEntry) -> bool,
+    ) -> Vec<String> {
+        self.effective_entries(policy)
+            .filter(|entry| indexed(entry))
             .map(|entry| entry.definition.name.to_string())
             .collect()
     }
 
-    /// Authorized discoverable tools grouped by model-facing semantic namespace.
-    /// Extension tools use their extension id; first-party tools use intent groups.
-    /// Core and pinned tools are omitted because their full definitions are already
-    /// directly visible. Both namespace and tool order are stable.
-    pub(crate) fn discoverable_namespaces(
+    /// Authorized tools grouped by model-facing semantic namespace; `indexed`
+    /// picks which entries are listed (the discoverable tier for ordinary
+    /// disclosure, whatever is not advertised for a turn-start selection).
+    /// Extension tools use their extension id; first-party tools use intent
+    /// groups. Both namespace and tool order are stable.
+    fn indexed_namespaces(
         &self,
         policy: &CapabilitySurfacePolicy,
+        indexed: &dyn Fn(&CatalogEntry) -> bool,
     ) -> Vec<NamespaceCatalogSummary> {
         let mut namespaces: BTreeMap<DiscoveryNamespace, Vec<String>> = BTreeMap::new();
-        for entry in self.entries.iter().filter(|entry| {
-            entry.tier == ToolTier::Discoverable
-                && policy.permits_capability_id(&entry.definition.capability_id)
-        }) {
+        for entry in self
+            .effective_entries(policy)
+            .filter(|entry| indexed(entry))
+        {
             namespaces
                 .entry(discovery_namespace(&entry.definition.capability_id))
                 .or_default()
@@ -421,7 +440,7 @@ fn builtin_discovery_namespace(local_id: &str) -> DiscoveryNamespace {
     }
 }
 
-fn is_core_tool_definition(definition: &ProviderToolDefinition) -> bool {
+pub(crate) fn is_core_tool_definition(definition: &ProviderToolDefinition) -> bool {
     CORE_TOOL_NAMES
         .iter()
         .any(|core_name| definition_matches_core_name(definition, core_name))
@@ -698,10 +717,35 @@ fn catalog_index_tool_search_description_for_mode(
     policy: &CapabilitySurfacePolicy,
     mode: ToolDisclosureMode,
 ) -> String {
+    catalog_index_description(catalog, policy, mode, &|entry| {
+        entry.tier == ToolTier::Discoverable
+    })
+}
+
+/// The `tool_search` catalog index for a turn-start selection: it lists every
+/// authorized tool that is *not* advertised, core tools included, because a
+/// selection defers core tools like any other.
+pub(crate) fn tool_search_description_excluding(
+    catalog: &CapabilityCatalog,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
+    advertised: &BTreeSet<String>,
+) -> String {
+    catalog_index_description(catalog, policy, mode, &|entry| {
+        !advertised.contains(entry.definition.name.as_str())
+    })
+}
+
+fn catalog_index_description(
+    catalog: &CapabilityCatalog,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
+    indexed: &dyn Fn(&CatalogEntry) -> bool,
+) -> String {
     if !mode.includes_namespace_summaries() {
-        return alphabetical_catalog_index_description(catalog, policy, mode);
+        return alphabetical_catalog_index_description(catalog, policy, mode, indexed);
     }
-    let namespaces = catalog.discoverable_namespaces(policy);
+    let namespaces = catalog.indexed_namespaces(policy, indexed);
     if namespaces.is_empty() {
         return EMPTY_CATALOG_DESCRIPTION.trim_end().to_string();
     }
@@ -759,10 +803,11 @@ fn alphabetical_catalog_index_description(
     catalog: &CapabilityCatalog,
     policy: &CapabilitySurfacePolicy,
     mode: ToolDisclosureMode,
+    indexed: &dyn Fn(&CatalogEntry) -> bool,
 ) -> String {
     const BUDGET_BYTES: usize = 3800;
     const TAIL_NOTE_RESERVE: usize = 80;
-    let names = catalog.discoverable_tool_names(policy);
+    let names = catalog.indexed_tool_names(policy, indexed);
     let workflow = if mode.includes_complete_signatures() {
         "Search results may include complete schemas; use tool_describe when schema_complete=false."
     } else {
@@ -903,6 +948,89 @@ pub(crate) fn select_active_set_for_mode(
         }
         advertised_non_bridge_count = next_advertised_non_bridge_count;
     }
+}
+
+/// The active set of a conversation whose tools were selected at turn start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrozenActiveSet {
+    pub(crate) active: ActiveSet,
+    /// Advertised names that are no longer usable (their authorization or
+    /// availability was revoked). They are left out of `active`.
+    pub(crate) unavailable: Vec<String>,
+}
+
+/// Rebuild the exact `tools` array a selection recorded: `advertised` in its
+/// stored order, bridges included, with the frozen `tool_search` description
+/// when one was recorded. Only names in `available` (authorized and usable
+/// now) are advertised; nothing outside `advertised` is ever added.
+pub(crate) fn frozen_active_set(
+    catalog: &CapabilityCatalog,
+    advertised: &[String],
+    tool_search_description: Option<&str>,
+    available: &BTreeSet<String>,
+) -> FrozenActiveSet {
+    let mut definitions = Vec::with_capacity(advertised.len());
+    let mut advertised_tokens = 0_u32;
+    let mut included_names: HashSet<String> = HashSet::new();
+    let mut unavailable = Vec::new();
+    for name in advertised {
+        let (definition, est_schema_tokens) = if is_bridge_name(name) {
+            let Some((bridge, tokens)) = bridge_tool_definitions_with_tokens()
+                .find(|(definition, _)| definition.name.as_str() == name)
+            else {
+                unavailable.push(name.clone());
+                continue;
+            };
+            let mut bridge = bridge.clone();
+            match tool_search_description.filter(|_| name == TOOL_SEARCH_NAME) {
+                Some(description) => {
+                    bridge.description = description.to_string();
+                    let tokens = estimate_definition_tokens(&bridge);
+                    (bridge, tokens)
+                }
+                None => (bridge, tokens),
+            }
+        } else {
+            match catalog
+                .entry_by_name(name)
+                .filter(|_| available.contains(name))
+            {
+                Some(entry) => (entry.definition.clone(), entry.est_schema_tokens),
+                None => {
+                    unavailable.push(name.clone());
+                    continue;
+                }
+            }
+        };
+        append_definition(
+            &mut definitions,
+            &mut advertised_tokens,
+            &mut included_names,
+            definition,
+            est_schema_tokens,
+        );
+    }
+    FrozenActiveSet {
+        active: ActiveSet {
+            definitions,
+            deferred: true,
+            advertised_tokens,
+        },
+        unavailable,
+    }
+}
+
+/// Estimated schema tokens of the three bridges as a deferred surface
+/// advertises them, used to charge the always-on floor against a selection's
+/// token budget.
+pub(crate) fn advertised_bridge_tokens(
+    catalog: &CapabilityCatalog,
+    policy: &CapabilitySurfacePolicy,
+    mode: ToolDisclosureMode,
+) -> u32 {
+    sum_definition_tokens(&advertised_bridge_tool_definitions_for_mode(
+        catalog, policy, mode,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2412,10 +2540,10 @@ mod tests {
         let index = crate::tool_search::AuthorizedToolSearchIndex::new(definitions.iter());
 
         assert_eq!(
-            index.search("search issue", 2).names,
+            index.search("search issue", 2).names(),
             vec!["github_issue_search"]
         );
-        assert_eq!(index.search("read", 2).names, vec!["read_file"]);
+        assert_eq!(index.search("read", 2).names(), vec!["read_file"]);
     }
 
     #[test]

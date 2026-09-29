@@ -1,12 +1,24 @@
-//! Bounded, authorization-fitted lexical retrieval for deferred tools.
+//! Bounded, authorization-fitted lexical retrieval for tools.
+//!
+//! [`NativeBm25fToolRetrieval`] is the host-bundled binding of the
+//! [`ToolRetrievalProvider`] port declared in `ironclaw_loop_contracts`, and
+//! the default ranker behind `tool_search`. A deployment binds another through
+//! `ToolDisclosureCapabilityDecorator::with_retrieval_provider`; the one other
+//! ranker this crate names, `HybridToolRetrieval`, fuses this one with an
+//! optional dense ranker and falls back to it.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     hash::{Hash, Hasher},
+    sync::Arc,
 };
 
+use async_trait::async_trait;
 use ironclaw_host_api::{capability::CapabilityDescriptionTrust, ids::CapabilityId};
-use ironclaw_loop_contracts::ProviderToolDefinition;
+use ironclaw_loop_contracts::{
+    ProviderToolDefinition, RankedTool, ToolRetrievalError, ToolRetrievalIndex,
+    ToolRetrievalProvider, ToolSearchOutcome, ToolSearchQueryClass,
+};
 use serde_json::Value;
 
 pub(crate) const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
@@ -25,6 +37,18 @@ const NAME_WEIGHT: f64 = 8.0;
 const PROVIDER_WEIGHT: f64 = 4.0;
 const PARAMETER_WEIGHT: f64 = 5.0;
 const DESCRIPTION_WEIGHT: f64 = 1.0;
+/// Added to the score of a document whose exact identifier equals the query.
+///
+/// This is what keeps an exact-identifier match first on the reported score
+/// scale, not only in the ordering: a lexical score is a sum over at most
+/// [`MAX_QUERY_TERMS`] terms, and each term contributes less than
+/// `ln(N + 1) * (BM25_K1 + 1)` for a corpus of `N` documents (IDF is at most
+/// `ln(N + 1)` because a matched term has a document frequency of at least one,
+/// and the BM25 saturation factor is below `BM25_K1 + 1`). So every lexical
+/// score is below `32 * 2.2 * ln(N + 1)`, about 70 * ln(N + 1), which stays
+/// far under this bonus for any corpus the host could hold. An exact match
+/// scores the bonus plus its lexical score, so it outranks every lexical-only
+/// match on the `f32` score as well as in rank order.
 const EXACT_IDENTIFIER_BONUS: f64 = 1_000_000.0;
 
 /// Fraction of a query's terms a document must match before it is offered at all.
@@ -47,7 +71,7 @@ const EXACT_IDENTIFIER_BONUS: f64 = 1_000_000.0;
 ///
 /// So short queries like "send message" or "list issues" match fully and are untouched, while
 /// "run shell command execute code python" — where several terms ARE answerable and a
-/// workflow-rerun tool matches only "run" — now yields `SearchQueryClass::NoMatch`, which is the
+/// workflow-rerun tool matches only "run" — now yields `ToolSearchQueryClass::NoMatch`, which is the
 /// honest answer and is already plumbed through.
 const MIN_QUERY_TERM_COVERAGE: f64 = 0.5;
 
@@ -78,27 +102,39 @@ struct IndexedDocument {
     length: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchQueryClass {
-    ExactIdentifier,
-    Lexical,
-    NoMatch,
-}
+/// The host-bundled ranker: bounded BM25F over name, provider, parameters and
+/// description, with an exact-identifier short circuit.
+///
+/// The default binding of [`ToolRetrievalProvider`]. It reports each tool's
+/// BM25F score (see [`EXACT_IDENTIFIER_BONUS`] for how an exact-identifier
+/// match stays on top), and it ranks whatever definitions it is fitted on:
+/// it does not treat core and deferred tools differently.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NativeBm25fToolRetrieval;
 
-impl SearchQueryClass {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactIdentifier => "exact_identifier",
-            Self::Lexical => "lexical",
-            Self::NoMatch => "no_match",
-        }
+#[async_trait]
+impl ToolRetrievalProvider for NativeBm25fToolRetrieval {
+    fn ranker_version(&self) -> &str {
+        RANKER_VERSION
+    }
+
+    async fn fit(
+        &self,
+        definitions: &[ProviderToolDefinition],
+    ) -> Result<Arc<dyn ToolRetrievalIndex>, ToolRetrievalError> {
+        Ok(Arc::new(AuthorizedToolSearchIndex::new(definitions.iter())))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SearchOutcome {
-    pub(crate) names: Vec<String>,
-    pub(crate) query_class: SearchQueryClass,
+#[async_trait]
+impl ToolRetrievalIndex for AuthorizedToolSearchIndex {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<ToolSearchOutcome, ToolRetrievalError> {
+        Ok(AuthorizedToolSearchIndex::search(self, query, limit))
+    }
 }
 
 impl AuthorizedToolSearchIndex {
@@ -132,23 +168,13 @@ impl AuthorizedToolSearchIndex {
         }
     }
 
-    pub(crate) fn search(&self, query: &str, limit: usize) -> SearchOutcome {
+    pub(crate) fn search(&self, query: &str, limit: usize) -> ToolSearchOutcome {
         if limit == 0 {
-            return SearchOutcome {
-                names: Vec::new(),
-                query_class: SearchQueryClass::NoMatch,
-            };
+            return ToolSearchOutcome::no_match();
         }
-        let normalized_query = query.trim().to_lowercase();
-        let query_terms: Vec<String> = tokenize(&normalized_query)
-            .into_iter()
-            .take(MAX_QUERY_TERMS)
-            .collect();
+        let (normalized_query, query_terms) = normalize_query(query);
         if query_terms.is_empty() {
-            return SearchOutcome {
-                names: Vec::new(),
-                query_class: SearchQueryClass::NoMatch,
-            };
+            return ToolSearchOutcome::no_match();
         }
 
         // Terms the catalog could answer at all. See `MIN_QUERY_TERM_COVERAGE`.
@@ -164,65 +190,155 @@ impl AuthorizedToolSearchIndex {
             .count();
         let required_terms = required_term_coverage(answerable_terms);
 
-        let exact = self
-            .documents
-            .iter()
-            .any(|document| document.exact_identifiers.contains(&normalized_query));
+        let exact = self.has_exact_identifier(&normalized_query);
         let mut scored = Vec::new();
         for document in &self.documents {
-            let mut score = if document.exact_identifiers.contains(&normalized_query) {
-                EXACT_IDENTIFIER_BONUS
-            } else {
-                0.0
-            };
-            let mut matched_terms = 0usize;
-            for term in &query_terms {
-                let Some(term_weight) = document.term_weights.get(term) else {
-                    continue;
-                };
-                matched_terms += 1;
-                let document_frequency = self
-                    .document_frequencies
-                    .get(term)
-                    .copied()
-                    .unwrap_or_default() as f64;
-                let document_count = self.documents.len() as f64;
-                let inverse_document_frequency = (1.0
-                    + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
-                    .ln();
-                let length_normalization =
-                    BM25_K1 * (1.0 - BM25_B + BM25_B * document.length / self.average_length);
-                score += inverse_document_frequency * term_weight * (BM25_K1 + 1.0)
-                    / (term_weight + length_normalization);
-            }
             // An exact identifier match is authoritative however few terms it shares.
             let exact_match = document.exact_identifiers.contains(&normalized_query);
+            let (lexical_score, matched_terms) = self.score_document(document, &query_terms);
+            let score = if exact_match {
+                EXACT_IDENTIFIER_BONUS + lexical_score
+            } else {
+                lexical_score
+            };
             if score > 0.0 && (exact_match || matched_terms >= required_terms) {
                 scored.push((document.name.clone(), document.capability_id.clone(), score));
             }
         }
-        scored.sort_by(|left, right| {
-            right
-                .2
-                .total_cmp(&left.2)
-                .then_with(|| left.1.cmp(&right.1))
-        });
-        let names: Vec<_> = scored
-            .into_iter()
-            .take(limit)
-            .map(|(name, _capability_id, _score)| name)
-            .collect();
-        SearchOutcome {
-            query_class: if names.is_empty() {
-                SearchQueryClass::NoMatch
+        let ranked = rank_scored(scored, limit);
+        ToolSearchOutcome {
+            query_class: if ranked.is_empty() {
+                ToolSearchQueryClass::NoMatch
             } else if exact {
-                SearchQueryClass::ExactIdentifier
+                ToolSearchQueryClass::ExactIdentifier
             } else {
-                SearchQueryClass::Lexical
+                ToolSearchQueryClass::Lexical
             },
-            names,
+            ranked,
         }
     }
+
+    /// Plain BM25F relevance of every document to `query`, best first, at most
+    /// `limit` entries.
+    ///
+    /// Unlike [`Self::search`], this applies neither the query-term coverage
+    /// rule (`MIN_QUERY_TERM_COVERAGE`) nor the exact-identifier bonus: any
+    /// document sharing a term with the query is listed. It is a ranking
+    /// input for fusion (`HybridToolRetrieval`), where a paraphrase that
+    /// shares only one or two words with the right tool must still count as
+    /// lexical evidence; it is not a model-facing answer on its own.
+    pub(crate) fn score_terms(&self, query: &str, limit: usize) -> Vec<RankedTool> {
+        self.score_terms_reading(query, limit, MAX_QUERY_TERMS)
+    }
+
+    /// [`Self::score_terms`], reading the query's first `max_terms` unique
+    /// terms instead of the `tool_search` bound. Turn-start selection ranks
+    /// a whole conversation segment, which is longer than a search query.
+    pub(crate) fn score_terms_reading(
+        &self,
+        query: &str,
+        limit: usize,
+        max_terms: usize,
+    ) -> Vec<RankedTool> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let (_normalized_query, query_terms) = normalize_query_reading(query, max_terms);
+        if query_terms.is_empty() {
+            return Vec::new();
+        }
+        let scored = self
+            .documents
+            .iter()
+            .filter_map(|document| {
+                let (score, _matched_terms) = self.score_document(document, &query_terms);
+                (score > 0.0)
+                    .then(|| (document.name.clone(), document.capability_id.clone(), score))
+            })
+            .collect();
+        rank_scored(scored, limit)
+    }
+
+    /// Whether `query`, normalized as [`Self::search`] normalizes it, is the
+    /// exact identifier of some fitted document.
+    pub(crate) fn is_exact_identifier_query(&self, query: &str) -> bool {
+        let (normalized_query, _query_terms) = normalize_query(query);
+        self.has_exact_identifier(&normalized_query)
+    }
+
+    /// Provider tool names of every fitted document.
+    pub(crate) fn document_names(&self) -> BTreeSet<String> {
+        self.documents
+            .iter()
+            .map(|document| document.name.clone())
+            .collect()
+    }
+
+    fn has_exact_identifier(&self, normalized_query: &str) -> bool {
+        self.documents
+            .iter()
+            .any(|document| document.exact_identifiers.contains(normalized_query))
+    }
+
+    /// BM25F score of one document against the query terms, and how many of
+    /// those terms it matched.
+    fn score_document(&self, document: &IndexedDocument, query_terms: &[String]) -> (f64, usize) {
+        let document_count = self.documents.len() as f64;
+        let mut score = 0.0;
+        let mut matched_terms = 0usize;
+        for term in query_terms {
+            let Some(term_weight) = document.term_weights.get(term) else {
+                continue;
+            };
+            matched_terms += 1;
+            let document_frequency = self
+                .document_frequencies
+                .get(term)
+                .copied()
+                .unwrap_or_default() as f64;
+            let inverse_document_frequency = (1.0
+                + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
+                .ln();
+            let length_normalization =
+                BM25_K1 * (1.0 - BM25_B + BM25_B * document.length / self.average_length);
+            score += inverse_document_frequency * term_weight * (BM25_K1 + 1.0)
+                / (term_weight + length_normalization);
+        }
+        (score, matched_terms)
+    }
+}
+
+/// The trimmed, lowercased query and its first [`MAX_QUERY_TERMS`] unique terms.
+fn normalize_query(query: &str) -> (String, Vec<String>) {
+    normalize_query_reading(query, MAX_QUERY_TERMS)
+}
+
+/// The trimmed, lowercased query and its first `max_terms` unique terms.
+fn normalize_query_reading(query: &str, max_terms: usize) -> (String, Vec<String>) {
+    let normalized_query = query.trim().to_lowercase();
+    let query_terms = tokenize(&normalized_query)
+        .into_iter()
+        .take(max_terms)
+        .collect();
+    (normalized_query, query_terms)
+}
+
+/// Order `(name, capability id, score)` by score descending, then capability
+/// id, and keep the first `limit`.
+fn rank_scored(mut scored: Vec<(String, CapabilityId, f64)>, limit: usize) -> Vec<RankedTool> {
+    scored.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    // Order is decided on the f64 score above; the f32 conversion is
+    // monotonic, so the reported scores never contradict that order.
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(name, _capability_id, score)| RankedTool::new(name, score as f32))
+        .collect()
 }
 
 impl IndexedDocument {
@@ -422,13 +538,81 @@ fn tokenize(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// What [`sanitize_provider_ranking`] removed or repaired, for telemetry.
+/// Counts only: nothing here names a tool or repeats the query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RankingRepairs {
+    pub(crate) dropped_unknown: usize,
+    pub(crate) dropped_duplicate: usize,
+    pub(crate) dropped_invalid_score: usize,
+    pub(crate) reordered: bool,
+    pub(crate) truncated: usize,
+}
+
+impl RankingRepairs {
+    pub(crate) fn any(&self) -> bool {
+        *self != Self::default()
+    }
+}
+
+/// Enforce the retrieval port's output contract on whatever a provider
+/// returned, before the host records ranks or renders anything.
+///
+/// A bound provider is not trusted to keep its own contract, so this:
+/// drops names outside the fitted corpus (a provider can never widen what the
+/// model sees), drops repeated names (keeping the first), drops entries whose
+/// score is not finite or is negative, re-sorts by score descending only when
+/// the provider broke its own order (the sort is stable, so the provider's
+/// tie-break survives), and truncates to `limit`. Output that already keeps
+/// the contract, such as the native ranker's, passes through unchanged.
+pub(crate) fn sanitize_provider_ranking(
+    ranked: Vec<RankedTool>,
+    fitted_corpus: &BTreeSet<String>,
+    limit: usize,
+) -> (Vec<RankedTool>, RankingRepairs) {
+    let mut repairs = RankingRepairs::default();
+    let mut seen = BTreeSet::new();
+    let mut kept = Vec::with_capacity(ranked.len().min(limit));
+    for tool in ranked {
+        if !fitted_corpus.contains(&tool.name) {
+            repairs.dropped_unknown += 1;
+            continue;
+        }
+        if !tool.score.is_finite() || tool.score < 0.0 {
+            repairs.dropped_invalid_score += 1;
+            continue;
+        }
+        if !seen.insert(tool.name.clone()) {
+            repairs.dropped_duplicate += 1;
+            continue;
+        }
+        kept.push(tool);
+    }
+    if kept.windows(2).any(|pair| pair[0].score < pair[1].score) {
+        repairs.reordered = true;
+        kept.sort_by(|left, right| right.score.total_cmp(&left.score));
+    }
+    if kept.len() > limit {
+        repairs.truncated = kept.len() - limit;
+        kept.truncate(limit);
+    }
+    (kept, repairs)
+}
+
 /// Stable for a fixed ranker version and effective authorized metadata. Object
 /// keys are sorted recursively so semantically identical schemas share a key.
-pub(crate) fn definitions_fingerprint(definitions: &[ProviderToolDefinition]) -> u64 {
+///
+/// `ranker_version` comes from the *bound* provider rather than a constant, so
+/// rebinding retrieval invalidates a cached index instead of silently serving
+/// the previous ranker's fitted corpus.
+pub(crate) fn definitions_fingerprint(
+    ranker_version: &str,
+    definitions: &[ProviderToolDefinition],
+) -> u64 {
     let mut definitions: Vec<_> = definitions.iter().collect();
     definitions.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    RANKER_VERSION.hash(&mut hasher);
+    ranker_version.hash(&mut hasher);
     definitions.len().hash(&mut hasher);
     for definition in definitions {
         definition.capability_id.hash(&mut hasher);
@@ -507,7 +691,7 @@ mod tests {
 
         for query in ["timezone", "recurrence", "start at"] {
             assert_eq!(
-                index.search(query, 5).names,
+                index.search(query, 5).names(),
                 vec!["calendar__create_event"],
                 "nested parameter query {query:?} must discover the tool"
             );
@@ -540,14 +724,14 @@ mod tests {
         assert!(
             AuthorizedToolSearchIndex::new([&untrusted])
                 .search("canary", 5)
-                .names
+                .names()
                 .is_empty(),
             "untrusted nested schema prose must not enter retrieval metadata"
         );
         assert_eq!(
             AuthorizedToolSearchIndex::new([&trusted])
                 .search("canary", 5)
-                .names,
+                .names(),
             vec!["catalog__lookup"]
         );
     }
@@ -582,11 +766,11 @@ mod tests {
 
         let index = AuthorizedToolSearchIndex::new([&tool]);
         assert_eq!(
-            index.search("nested", 1).names,
+            index.search("nested", 1).names(),
             vec!["fixture__adversarial"]
         );
-        assert!(index.search("63", 1).names.is_empty());
-        assert!(index.search("999", 1).names.is_empty());
+        assert!(index.search("63", 1).names().is_empty());
+        assert!(index.search("999", 1).names().is_empty());
     }
 
     #[test]
@@ -655,12 +839,12 @@ mod tests {
         assert_eq!(authorized_index.document_frequencies["assignee"], 2);
         assert_eq!(unfiltered_index.document_frequencies["assignee"], 3);
         assert_eq!(
-            unfiltered_index.search("assignee", 10).names,
+            unfiltered_index.search("assignee", 10).names(),
             vec!["denied__stuffed", "allowed__first", "allowed__second"],
             "a denied document would change corpus statistics, ordering, and result count if admitted"
         );
         assert_eq!(
-            authorized_index.search("assignee", 10).names,
+            authorized_index.search("assignee", 10).names(),
             vec!["allowed__first", "allowed__second"]
         );
     }
@@ -684,10 +868,10 @@ mod tests {
         let index = AuthorizedToolSearchIndex::new([&noisy, &exact]);
 
         for query in ["github.list_issues", "github__list_issues"] {
-            assert_eq!(index.search(query, 1).names, vec!["github__list_issues"]);
+            assert_eq!(index.search(query, 1).names(), vec!["github__list_issues"]);
             assert_eq!(
                 index.search(query, 1).query_class,
-                SearchQueryClass::ExactIdentifier
+                ToolSearchQueryClass::ExactIdentifier
             );
         }
     }
@@ -712,7 +896,7 @@ mod tests {
             AuthorizedToolSearchIndex::new([&later_id_earlier_name, &earlier_id_later_name]);
 
         assert_eq!(
-            index.search("shared vocabulary", 2).names,
+            index.search("shared vocabulary", 2).names(),
             vec!["zzz__tool", "aaa__tool"]
         );
     }
@@ -751,27 +935,61 @@ mod tests {
         assert!(
             index
                 .search(&format!("{first_terms} tail_canary"), 1)
-                .names
+                .names()
                 .is_empty(),
             "the 33rd unique term must not affect retrieval"
         );
         assert_eq!(
-            index.search(&format!("tail_canary {first_terms}"), 1).names,
+            index
+                .search(&format!("tail_canary {first_terms}"), 1)
+                .names(),
             vec!["fixture__tail"]
         );
+    }
+
+    #[test]
+    fn score_terms_skips_the_coverage_rule_and_the_exact_bonus_that_search_applies() {
+        let workflow = definition(
+            "ci.rerun_workflow",
+            "ci__rerun_workflow",
+            "Run a workflow again.",
+            json!({"type": "object", "properties": {}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let shell = definition(
+            "system.shell",
+            "system__shell",
+            "Shell command executor for code.",
+            json!({"type": "object", "properties": {}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let index = AuthorizedToolSearchIndex::new([&workflow, &shell]);
+        // Five answerable terms; the workflow tool matches only "run", below
+        // the coverage `search` requires.
+        let query = "run shell command code executor";
+        assert_eq!(index.search(query, 5).names(), vec!["system__shell"]);
+        assert_eq!(
+            index
+                .score_terms(query, 5)
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["system__shell", "ci__rerun_workflow"]
+        );
+        assert!(index.score_terms(query, 0).is_empty());
+        assert!(index.score_terms("  ", 5).is_empty());
+
+        let exact = index.score_terms("system.shell", 5);
+        assert!(exact[0].score < EXACT_IDENTIFIER_BONUS as f32);
+        assert!(index.is_exact_identifier_query(" System.Shell "));
+        assert!(!index.is_exact_identifier_query("shell"));
     }
 
     #[test]
     fn empty_index_returns_no_match() {
         let index = AuthorizedToolSearchIndex::new(std::iter::empty());
 
-        assert_eq!(
-            index.search("anything", 5),
-            SearchOutcome {
-                names: Vec::new(),
-                query_class: SearchQueryClass::NoMatch,
-            }
-        );
+        assert_eq!(index.search("anything", 5), ToolSearchOutcome::no_match());
     }
 
     #[test]
@@ -808,12 +1026,12 @@ mod tests {
         );
 
         assert_eq!(
-            definitions_fingerprint(std::slice::from_ref(&first)),
-            definitions_fingerprint(&[reordered])
+            definitions_fingerprint(RANKER_VERSION, std::slice::from_ref(&first)),
+            definitions_fingerprint(RANKER_VERSION, &[reordered])
         );
         assert_ne!(
-            definitions_fingerprint(&[first]),
-            definitions_fingerprint(&[changed])
+            definitions_fingerprint(RANKER_VERSION, &[first]),
+            definitions_fingerprint(RANKER_VERSION, &[changed])
         );
     }
 
@@ -835,9 +1053,190 @@ mod tests {
         );
 
         assert_eq!(
-            definitions_fingerprint(&[first.clone(), second.clone()]),
-            definitions_fingerprint(&[second, first])
+            definitions_fingerprint(RANKER_VERSION, &[first.clone(), second.clone()]),
+            definitions_fingerprint(RANKER_VERSION, &[second, first])
         );
+    }
+
+    #[test]
+    fn fingerprint_separates_rankers_over_an_identical_corpus() {
+        // Rebinding retrieval must invalidate a cached fitted index. If the
+        // fingerprint ignored the ranker, a swapped provider would keep serving
+        // the previous ranker's index until the surface happened to change.
+        let corpus = [definition(
+            "fixture.lookup",
+            "fixture__lookup",
+            "Lookup.",
+            json!({"type":"object","properties":{"city":{"type":"string"}}}),
+            CapabilityDescriptionTrust::Untrusted,
+        )];
+
+        assert_ne!(
+            definitions_fingerprint(RANKER_VERSION, &corpus),
+            definitions_fingerprint("some-other-ranker-v1", &corpus)
+        );
+    }
+
+    #[test]
+    fn native_provider_reports_the_ranker_version_it_fingerprints_with() {
+        assert_eq!(NativeBm25fToolRetrieval.ranker_version(), RANKER_VERSION);
+    }
+
+    #[test]
+    fn scores_are_finite_non_negative_descending_and_exact_matches_score_above_lexical() {
+        let exact = definition(
+            "github.list_issues",
+            "github__list_issues",
+            "List issues.",
+            json!({"type":"object","properties":{}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let noisy = definition(
+            "fixture.github_list_issues_helper",
+            "fixture__github_list_issues_helper",
+            "github list issues github list issues",
+            json!({"type":"object","properties":{}}),
+            CapabilityDescriptionTrust::Untrusted,
+        );
+        let index = AuthorizedToolSearchIndex::new([&noisy, &exact]);
+
+        let outcome = index.search("github.list_issues", 5);
+        assert_eq!(outcome.query_class, ToolSearchQueryClass::ExactIdentifier);
+        assert_eq!(
+            outcome.names(),
+            vec!["github__list_issues", "fixture__github_list_issues_helper"]
+        );
+        for tool in &outcome.ranked {
+            assert!(tool.score.is_finite() && tool.score >= 0.0, "{tool:?}");
+        }
+        assert!(outcome.ranked[0].score >= EXACT_IDENTIFIER_BONUS as f32);
+        assert!(outcome.ranked[1].score < EXACT_IDENTIFIER_BONUS as f32);
+
+        let lexical = index.search("issues", 5);
+        assert_eq!(lexical.query_class, ToolSearchQueryClass::Lexical);
+        assert!(
+            lexical
+                .ranked
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score),
+            "scores must be non-increasing in rank order: {lexical:?}"
+        );
+        assert!(lexical.ranked.iter().all(|tool| tool.score > 0.0));
+    }
+
+    #[test]
+    fn sanitize_provider_ranking_enforces_the_port_contract() {
+        let corpus: BTreeSet<String> = ["alpha", "beta", "gamma", "delta"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let provider_output = vec![
+            RankedTool::new("gamma", 3.0),
+            RankedTool::new("unknown_tool", 9.0),
+            RankedTool::new("alpha", f32::NAN),
+            RankedTool::new("beta", 5.0),
+            RankedTool::new("gamma", 1.0),
+            RankedTool::new("delta", -1.0),
+            RankedTool::new("alpha", f32::INFINITY),
+            RankedTool::new("alpha", 2.0),
+        ];
+
+        let (kept, repairs) = sanitize_provider_ranking(provider_output, &corpus, 2);
+
+        assert_eq!(
+            kept,
+            vec![RankedTool::new("beta", 5.0), RankedTool::new("gamma", 3.0)]
+        );
+        assert_eq!(
+            repairs,
+            RankingRepairs {
+                dropped_unknown: 1,
+                dropped_duplicate: 1,
+                dropped_invalid_score: 3,
+                reordered: true,
+                truncated: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn sanitize_provider_ranking_keeps_contract_abiding_output_and_its_tie_break() {
+        let corpus: BTreeSet<String> = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let provider_output = vec![
+            RankedTool::new("gamma", 2.0),
+            RankedTool::new("alpha", 2.0),
+            RankedTool::new("beta", 0.0),
+        ];
+
+        let (kept, repairs) = sanitize_provider_ranking(provider_output.clone(), &corpus, 10);
+
+        assert_eq!(kept, provider_output);
+        assert!(!repairs.any());
+    }
+
+    #[tokio::test]
+    async fn native_provider_ranks_core_tool_names_like_any_other_definition() {
+        // The port ranks exactly the corpus it is fitted on. A turn-start
+        // selector fits the whole authorized catalog, core tools included, so
+        // the native ranker must not skip or penalise core names.
+        let corpus = [
+            definition(
+                "builtin.outbound_deliver",
+                "outbound_deliver",
+                "Deliver an outbound message to a connected channel.",
+                json!({"type":"object","properties":{"channel":{"type":"string"},"message":{"type":"string"}}}),
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+            definition(
+                "builtin.trigger_create",
+                "trigger_create",
+                "Create a scheduled trigger.",
+                json!({"type":"object","properties":{"schedule":{"type":"string"}}}),
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+            definition(
+                "builtin.read_file",
+                "read_file",
+                "Read a workspace file.",
+                json!({"type":"object","properties":{"path":{"type":"string"}}}),
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+            definition(
+                "github.list_issues",
+                "github__list_issues",
+                "List GitHub issues.",
+                json!({"type":"object","properties":{"repo":{"type":"string"}}}),
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+        ];
+        let index = NativeBm25fToolRetrieval
+            .fit(&corpus)
+            .await
+            .expect("native fit is infallible");
+
+        let deliver = index
+            .search("deliver outbound message", 10)
+            .await
+            .expect("native search is infallible");
+        assert_eq!(deliver.names().first(), Some(&"outbound_deliver"));
+        let trigger = index
+            .search("create a scheduled trigger", 10)
+            .await
+            .expect("native search is infallible");
+        assert_eq!(trigger.names().first(), Some(&"trigger_create"));
+        let exact = index
+            .search("trigger_create", 10)
+            .await
+            .expect("native search is infallible");
+        assert_eq!(exact.query_class, ToolSearchQueryClass::ExactIdentifier);
+        assert_eq!(exact.names().first(), Some(&"trigger_create"));
+
+        // The port path reports exactly what the inherent ranker computes.
+        let direct = AuthorizedToolSearchIndex::new(corpus.iter());
+        assert_eq!(deliver, direct.search("deliver outbound message", 10));
     }
 
     #[derive(Debug, Deserialize)]
@@ -962,7 +1361,7 @@ mod tests {
         let candidate_rankings: Vec<_> = corpus
             .intents
             .iter()
-            .map(|intent| index.search(&intent.query, 10).names)
+            .map(|intent| index.search(&intent.query, 10).into_names())
             .collect();
         let candidate_query_micros = query_started.elapsed().as_micros();
         let baseline_started = Instant::now();
@@ -1112,7 +1511,7 @@ mod tests {
             let rankings: Vec<_> = corpus
                 .intents
                 .iter()
-                .map(|intent| index.search(&intent.query, 10).names)
+                .map(|intent| index.search(&intent.query, 10).into_names())
                 .collect();
             let query_total_micros = query_started.elapsed().as_micros();
             let quality = quality_metrics(&corpus.intents, &rankings);

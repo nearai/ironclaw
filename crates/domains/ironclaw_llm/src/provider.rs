@@ -1093,6 +1093,14 @@ pub trait LlmProvider: Send + Sync {
         Decimal::ONE
     }
 
+    /// How long the provider keeps this adapter's prompts cached after their
+    /// last use. `Unknown` by default; adapters that set the cache lifetime
+    /// themselves (Anthropic's `cache_control`) report it, and decorators
+    /// delegate.
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        crate::config::PromptCacheLifetime::Unknown
+    }
+
     /// Discount divisor for cache-read tokens.
     ///
     /// Cached-read cost = `input_rate / cache_read_discount()`.

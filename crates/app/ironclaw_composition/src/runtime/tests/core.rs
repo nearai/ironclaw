@@ -944,6 +944,7 @@ impl HostSkillContextSource for StaticSkillContextSource {
     async fn load_skill_context_candidates(
         &self,
         _run_context: &LoopRunContext,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         Ok(self.candidates.clone())
     }
@@ -1088,6 +1089,7 @@ impl HostSkillContextSource for FailingSkillContextSource {
     async fn load_skill_context_candidates(
         &self,
         _run_context: &LoopRunContext,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(HostSkillContextBuildError::SourceUnavailable)
@@ -7418,7 +7420,10 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
     .with_accepted_message_ref(accepted_message_ref)
     .with_actor(TurnActor::new(webui_user_id));
     let selected = source
-        .load_skill_context_candidates(&context)
+        .load_skill_context_candidates(
+            &context,
+            &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+        )
         .await
         .expect("webui-recorded skill context should load");
     let combined_skill_context = selected

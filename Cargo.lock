@@ -3730,6 +3730,7 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_slack_extension",
  "ironclaw_telegram_extension",
+ "ironclaw_tool_selection_jev",
  "ironclaw_trace_commons",
  "ironclaw_web_app",
  "ironclaw_web_app_extension",
@@ -4046,6 +4047,7 @@ dependencies = [
  "ironclaw_skills",
  "ironclaw_slack_extension",
  "ironclaw_threads",
+ "ironclaw_tool_retrieval",
  "ironclaw_trace_commons",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -4090,6 +4092,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
  "toml_edit",
+ "url",
 ]
 
 [[package]]
@@ -4642,6 +4645,8 @@ dependencies = [
  "ironclaw_stress",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
+ "ironclaw_tool_retrieval",
+ "ironclaw_tool_selection_jev",
  "ironclaw_trace_commons",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -5282,6 +5287,50 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_tool_retrieval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "deadpool-postgres",
+ "futures",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_llm",
+ "ironclaw_loop_contracts",
+ "libsql",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "testcontainers-modules",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ironclaw_tool_selection_jev"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ironclaw_host_api",
+ "ironclaw_loop_contracts",
+ "ironclaw_network",
+ "ironclaw_tool_selection_jev",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

@@ -46,6 +46,7 @@ mod token_refreshing;
 pub mod trace_binding;
 // arch-exempt: scaffolding, Phase A helpers awaiting first per-provider caller, plan #4522
 // Remove the allow once any production call site references these items.
+pub mod embeddings;
 #[allow(dead_code)]
 pub(crate) mod tool_args;
 pub mod tool_schema;
@@ -66,7 +67,7 @@ pub mod vision_models;
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
     BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
-    OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
+    OAUTH_PLACEHOLDER, OpenAiCodexConfig, PromptCacheLifetime, RegistryProviderConfig,
 };
 pub use error::{LlmConfigError, LlmError, UNCONFIGURED_PROVIDER_ID};
 pub use failover::{CooldownConfig, FailoverProvider};
@@ -1309,7 +1310,7 @@ pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPro
 /// **Note:** This is intentionally applied only to `OpenAiCompletions`-protocol
 /// providers. Ollama uses `/api/chat` (not `/v1/chat/completions`) and its
 /// rig-core client handles the path internally, so normalization is not needed.
-fn normalize_openai_base_url(url: &str) -> String {
+pub(crate) fn normalize_openai_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     if trimmed.to_ascii_lowercase().ends_with("/v1") {
         return trimmed.to_string();

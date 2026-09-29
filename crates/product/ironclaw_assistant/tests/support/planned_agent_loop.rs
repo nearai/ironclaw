@@ -442,6 +442,9 @@ impl ProductLiveAgentLoopHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             scheduler_wake_wiring: None,
+            tool_retrieval_provider: None,
+            tool_prefetch: None,
+            tool_availability: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 
@@ -939,6 +942,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            advertised_choice: Default::default(),
             callable_capability_ids: None,
             version: harness_surface_version(),
             descriptors: vec![CapabilityDescriptorView {
@@ -1054,6 +1058,7 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
         &self,
         _run_context: &LoopRunContext,
         _mode: PromptMode,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         Ok(Vec::new())
     }

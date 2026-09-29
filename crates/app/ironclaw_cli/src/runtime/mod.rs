@@ -152,6 +152,23 @@ where
     block_on_cli_future(future)
 }
 
+/// [`block_on_cli`] for a future that is not `Send`: `make` builds it on the
+/// thread that runs it, so only the closure crosses a thread boundary.
+fn block_on_cli_local<M, F, T, E>(make: M) -> anyhow::Result<T>
+where
+    M: FnOnce() -> F + Send + 'static,
+    F: Future<Output = Result<T, E>>,
+    T: Send + 'static,
+    E: Into<anyhow::Error>,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return thread::spawn(move || block_on_cli_future(make()))
+            .join()
+            .map_err(|_| anyhow::anyhow!("CLI async task thread panicked"))?;
+    }
+    block_on_cli_future(make())
+}
+
 fn block_on_cli_future<F, T, E>(future: F) -> anyhow::Result<T>
 where
     F: Future<Output = Result<T, E>>,
@@ -599,6 +616,17 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
+    // The `tool_search` ranker (`REBORN_TOOL_RETRIEVAL`, default `native`).
+    // `dense` sends search queries to the `[embeddings]` endpoint, so it is an
+    // explicit opt-in, and it refuses startup rather than falling back when no
+    // embeddings provider can be built.
+    runtime_input = with_tool_retrieval(runtime_input, runtime_services.config_file.as_ref())?;
+    // Turn-start tool selection (`[tool_selection]` / `REBORN_TOOL_PREFETCH*`,
+    // default `off`). A `semantic` local selection ranks with the ranker bound
+    // just above, so it refuses startup unless that ranker is `dense` or
+    // `hybrid`; the `jev` classifier refuses startup without its API key.
+    runtime_input = with_tool_prefetch(runtime_input, runtime_services.config_file.as_ref())?;
+
     if caller == RuntimeInputCaller::Serve {
         match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
             Ok(shared_key) => {
@@ -620,6 +648,107 @@ pub(crate) fn build_runtime_input_with_options(
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
     })
+}
+
+/// Bind the ranker `REBORN_TOOL_RETRIEVAL` selects; `native` (or unset)
+/// binds nothing. Errors refuse startup: a value that is not valid UTF-8, an
+/// unknown mode, or `dense`/`hybrid` without a buildable embeddings provider.
+fn with_tool_retrieval(
+    runtime_input: RebornRuntimeInput,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+) -> anyhow::Result<RebornRuntimeInput> {
+    let mode = tool_retrieval_mode_from_env()?;
+    if mode == ironclaw_config::ToolRetrievalMode::Native {
+        return Ok(runtime_input);
+    }
+    let embeddings = config_file.and_then(|file| file.embeddings.clone());
+    // The runtime build binds this to the per-user vector store.
+    let vector_store = runtime_input.tool_vector_store.clone();
+    // The embeddings resolver borrows a non-`Sync` env lookup across awaits,
+    // so its future is not `Send`; build it on the thread that runs it.
+    let provider = block_on_cli_local(move || async move {
+        ironclaw_composition::resolve_tool_retrieval_provider(
+            mode,
+            embeddings.as_ref(),
+            &optional_nonempty_env,
+            vector_store,
+        )
+        .await
+    })?;
+    Ok(match provider {
+        Some(provider) => runtime_input.with_tool_retrieval_provider(provider),
+        None => runtime_input,
+    })
+}
+
+fn tool_retrieval_mode_from_env() -> anyhow::Result<ironclaw_config::ToolRetrievalMode> {
+    let raw = match std::env::var(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "{} must contain valid UTF-8",
+            ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV
+        ),
+    };
+    Ok(ironclaw_config::ToolRetrievalMode::parse(raw.as_deref())?)
+}
+
+/// Bind turn-start tool selection when `[tool_selection]` or
+/// `REBORN_TOOL_PREFETCH` turns it on (env wins, field by field), with the
+/// classifier they choose. Errors refuse startup: an unknown mode or
+/// classifier, a malformed or out-of-range number, a local `semantic`
+/// selection without a `dense` or `hybrid` ranker, an always-on floor larger
+/// than the maximum advertised tools, or `jev` without its API key. There is
+/// no fallback from `jev` to `local`.
+fn with_tool_prefetch(
+    runtime_input: RebornRuntimeInput,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+) -> anyhow::Result<RebornRuntimeInput> {
+    let retrieval = tool_retrieval_mode_from_env()?;
+    let lookup = |name: &str| match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(ironclaw_config::ToolPrefetchSettingsError::NotUnicode {
+                name: name.to_string(),
+            })
+        }
+    };
+    let section = config_file.and_then(|file| file.tool_selection.as_ref());
+    let Some(settings) =
+        ironclaw_config::ToolPrefetchSettings::resolve(section, &lookup, retrieval)?
+    else {
+        return Ok(runtime_input);
+    };
+    match &settings.classifier {
+        ironclaw_config::ToolSelectionClassifierSettings::Local => {
+            if section.is_some_and(|section| section.jev.is_some()) {
+                tracing::debug!(
+                    target: "ironclaw::reborn::tool_prefetch",
+                    "[tool_selection.jev] is inert: the local classifier is selected"
+                );
+            }
+            Ok(runtime_input.with_tool_prefetch(settings)?)
+        }
+        ironclaw_config::ToolSelectionClassifierSettings::Jev(jev) => {
+            // Read host-side from the variable the operator named; the
+            // settings only checked that it is set. Never logged.
+            let key = std::env::var(&jev.api_key_env).map_err(|_| {
+                ironclaw_config::ToolPrefetchSettingsError::JevKeyMissing {
+                    api_key_env: jev.api_key_env.clone(),
+                }
+            })?;
+            // The settings checked the endpoint; the package checks it again
+            // as it derives the egress pin from its host.
+            let classifier = ironclaw_tool_selection_jev::JevToolClassifier::new(
+                ironclaw_tool_selection_jev::JevEndpoint::parse(&jev.endpoint)?,
+                jev.model.clone(),
+                ironclaw_tool_selection_jev::JevApiKey::new(key)?,
+                std::time::Duration::from_millis(jev.timeout_ms),
+            )?;
+            Ok(runtime_input.with_tool_prefetch_classifier(settings, classifier)?)
+        }
+    }
 }
 
 pub(crate) fn ironhub_manifest_url_from_env()
@@ -2579,6 +2708,244 @@ default_owner = "custom-owner"
         assert_eq!(runtime_input.identity.source_binding_id, "reborn-cli");
         assert_eq!(runtime_input.identity.reply_target_binding_id, "reborn-cli");
     }
+
+    #[test]
+    fn build_runtime_input_binds_no_tool_ranker_by_default() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _mode = EnvGuard::clear(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV);
+        // Embeddings configured, but not selected: nothing is bound.
+        let (_temp, config) =
+            boot_config_with_config_toml("local-dev", TOOL_RETRIEVAL_EMBEDDINGS_TOML);
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(runtime_input.tool_retrieval_provider.is_none());
+    }
+
+    #[test]
+    fn build_runtime_input_binds_the_dense_or_hybrid_tool_ranker_when_selected() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (_temp, config) =
+            boot_config_with_config_toml("local-dev", TOOL_RETRIEVAL_EMBEDDINGS_TOML);
+
+        for (mode, ranker_version) in [
+            ("dense", "dense-cosine-v1"),
+            ("hybrid", "hybrid-rrf-v1(bounded-bm25f-v1,dense-cosine-v1)"),
+        ] {
+            let _mode = EnvGuard::set(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV, mode);
+            let runtime_input =
+                build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+            let provider = runtime_input
+                .tool_retrieval_provider
+                .expect("the mode binds a tool ranker");
+            assert_eq!(provider.ranker_version(), ranker_version, "{mode}");
+        }
+    }
+
+    #[test]
+    fn build_runtime_input_refuses_dense_or_hybrid_without_embeddings_or_an_unknown_mode() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _embeddings = EnvGuard::clear_many(&[
+            "EMBEDDING_PROVIDER",
+            "EMBEDDING_BASE_URL",
+            "EMBEDDING_MODEL",
+        ]);
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        for mode in ["dense", "hybrid"] {
+            let _mode = EnvGuard::set(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV, mode);
+            let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+                Ok(_) => panic!("{mode} without embeddings must refuse startup"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("needs an embeddings provider"), "{error}");
+        }
+
+        let _mode = EnvGuard::set(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV, "semantic");
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("an unknown tool retrieval mode must refuse startup"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("not a known tool retrieval mode"), "{error}");
+    }
+
+    #[test]
+    fn build_runtime_input_binds_tool_prefetch_only_when_selected() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _retrieval = EnvGuard::clear(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV);
+        let _extras = EnvGuard::clear_many(&[
+            "REBORN_TOOL_PREFETCH_MAX_TOOLS",
+            "REBORN_TOOL_PREFETCH_ALWAYS",
+            "REBORN_TOOL_PREFETCH_MIN_SIMILARITY",
+            "REBORN_TOOL_PREFETCH_MIN_RELATIVE",
+            "REBORN_TOOL_PREFETCH_TOKEN_BUDGET",
+            ironclaw_config::REBORN_TOOL_PREFETCH_CLASSIFIER_ENV,
+        ]);
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        {
+            let _mode = EnvGuard::clear(ironclaw_config::REBORN_TOOL_PREFETCH_ENV);
+            let runtime_input =
+                build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+            assert!(runtime_input.tool_prefetch.is_none(), "off by default");
+        }
+
+        let _mode = EnvGuard::set(ironclaw_config::REBORN_TOOL_PREFETCH_ENV, "lexical");
+        let _always = EnvGuard::set("REBORN_TOOL_PREFETCH_ALWAYS", "outbound_deliver");
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let prefetch = runtime_input
+            .tool_prefetch
+            .expect("lexical selection is bound");
+        assert_eq!(prefetch.max_tools(), 100);
+        assert_eq!(prefetch.token_budget(), 32_000);
+    }
+
+    #[test]
+    fn build_runtime_input_refuses_misconfigured_tool_prefetch() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _retrieval = EnvGuard::clear(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV);
+        let _extras = EnvGuard::clear_many(&[
+            "REBORN_TOOL_PREFETCH_MIN_SIMILARITY",
+            "REBORN_TOOL_PREFETCH_MIN_RELATIVE",
+            "REBORN_TOOL_PREFETCH_TOKEN_BUDGET",
+        ]);
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let refusal = |mode: &str, max_tools: &str, always: &str| {
+            let _mode = EnvGuard::set(ironclaw_config::REBORN_TOOL_PREFETCH_ENV, mode);
+            let _max = EnvGuard::set("REBORN_TOOL_PREFETCH_MAX_TOOLS", max_tools);
+            let _always = EnvGuard::set("REBORN_TOOL_PREFETCH_ALWAYS", always);
+            match build_runtime_input(&config, RuntimeInputCaller::Run) {
+                Ok(_) => panic!("{mode}/{max_tools}/{always} must refuse startup"),
+                Err(error) => error.to_string(),
+            }
+        };
+        let semantic = refusal("semantic", "100", "");
+        assert!(semantic.contains("REBORN_TOOL_RETRIEVAL"), "{semantic}");
+        let floor = refusal("lexical", "5", "outbound_deliver,trigger_create");
+        assert!(floor.contains("max_tools = 5"), "{floor}");
+        let unknown = refusal("always", "100", "");
+        assert!(
+            unknown.contains("not a known tool prefetch mode"),
+            "{unknown}"
+        );
+    }
+
+    /// `[tool_selection]` choosing the Jev classifier, keyed by a variable
+    /// only these tests set.
+    const JEV_TOOL_SELECTION_TOML: &str = r#"
+[tool_selection]
+mode = "lexical"
+classifier = "jev"
+max_tools = 40
+
+[tool_selection.jev]
+api_key_env = "IRONCLAW_TEST_JEV_KEY"
+timeout_ms = 300
+"#;
+
+    #[test]
+    fn build_runtime_input_binds_the_jev_classifier_from_config_toml_only_with_its_key() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _retrieval = EnvGuard::clear(ironclaw_config::REBORN_TOOL_RETRIEVAL_ENV);
+        let _prefetch = EnvGuard::clear_many(&[
+            ironclaw_config::REBORN_TOOL_PREFETCH_ENV,
+            ironclaw_config::REBORN_TOOL_PREFETCH_CLASSIFIER_ENV,
+            ironclaw_config::REBORN_TOOL_PREFETCH_JEV_ENDPOINT_ENV,
+            "REBORN_TOOL_PREFETCH_MAX_TOOLS",
+            "REBORN_TOOL_PREFETCH_ALWAYS",
+            "REBORN_TOOL_PREFETCH_MIN_SIMILARITY",
+            "REBORN_TOOL_PREFETCH_MIN_RELATIVE",
+            "REBORN_TOOL_PREFETCH_TOKEN_BUDGET",
+        ]);
+        let (_temp, config) = boot_config_with_config_toml("local-dev", JEV_TOOL_SELECTION_TOML);
+
+        {
+            let _key = EnvGuard::clear("IRONCLAW_TEST_JEV_KEY");
+            let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+                Ok(_) => panic!("jev without its key must refuse startup"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("IRONCLAW_TEST_JEV_KEY"), "{error}");
+            assert!(error.contains("does not fall back"), "{error}");
+        }
+
+        let _key = EnvGuard::set("IRONCLAW_TEST_JEV_KEY", "jev-test-key");
+        let prefetch = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .expect("runtime input")
+            .tool_prefetch
+            .expect("selection is on");
+        assert_eq!(prefetch.classifier_name(), "jev");
+        assert_eq!(prefetch.max_tools(), 40);
+        // The config default names the model the package defaults to.
+        assert_eq!(
+            ironclaw_config::DEFAULT_JEV_MODEL,
+            ironclaw_tool_selection_jev::DEFAULT_JEV_MODEL
+        );
+        // And the endpoint the package defaults to, which the package's own
+        // parser accepts.
+        assert_eq!(
+            ironclaw_config::DEFAULT_JEV_ENDPOINT,
+            ironclaw_tool_selection_jev::DEFAULT_JEV_ENDPOINT
+        );
+        assert_eq!(
+            ironclaw_tool_selection_jev::JevEndpoint::parse(ironclaw_config::DEFAULT_JEV_ENDPOINT),
+            Ok(ironclaw_tool_selection_jev::JevEndpoint::default())
+        );
+
+        // An endpoint that is not a plain https URL refuses startup.
+        {
+            let _endpoint = EnvGuard::set(
+                ironclaw_config::REBORN_TOOL_PREFETCH_JEV_ENDPOINT_ENV,
+                "http://jev.example.test/v1/systemone",
+            );
+            let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+                Ok(_) => panic!("a plain-http Jev endpoint must refuse startup"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("[tool_selection.jev] endpoint"), "{error}");
+            assert!(error.contains("https"), "{error}");
+        }
+
+        // The environment picks the classifier over the file.
+        let _classifier = EnvGuard::set(
+            ironclaw_config::REBORN_TOOL_PREFETCH_CLASSIFIER_ENV,
+            "local",
+        );
+        let prefetch = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .expect("runtime input")
+            .tool_prefetch
+            .expect("selection is on");
+        assert_eq!(prefetch.classifier_name(), "local");
+
+        let _classifier = EnvGuard::set(
+            ironclaw_config::REBORN_TOOL_PREFETCH_CLASSIFIER_ENV,
+            "oracle",
+        );
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("an unknown classifier must refuse startup"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("not a known tool classifier"), "{error}");
+    }
+
+    /// An `[embeddings]` section on a closed loopback port: buildable without
+    /// any I/O, and unreachable if anything did try to embed.
+    const TOOL_RETRIEVAL_EMBEDDINGS_TOML: &str = r#"
+[embeddings]
+provider = "openai_compatible"
+base_url = "http://127.0.0.1:9"
+model = "test-embed"
+"#;
 
     #[test]
     fn build_runtime_input_maps_regex_skill_activation_config() {

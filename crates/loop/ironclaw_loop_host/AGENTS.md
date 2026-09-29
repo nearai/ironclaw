@@ -20,7 +20,7 @@ Working rules for the host-port adapter crate. Orientation lives in
 Base implementations of every `ironclaw_loop_contracts` port over host-owned
 kernel services — adapter glue, not the executor, runner, product workflow, or
 low-level runtime. `src/` has outgrown a hand-maintained file inventory (50+
-files, plus 17 `prompts/*.md`); re-derive the current one with
+files, plus 20 `prompts/*.md`); re-derive the current one with
 `ls crates/loop/ironclaw_loop_host/src/` and
 `ls crates/loop/ironclaw_loop_host/prompts/` rather than trusting a bullet
 list. Stable anchors, by category:
@@ -35,6 +35,14 @@ list. Stable anchors, by category:
   sanctioned provider-client exception in this family (PROPOSAL §6.7.2).
 - `tool_disclosure.rs` / `tool_disclosure_port.rs` / `tool_disclosure_mode.rs`
   — progressive tool disclosure and the `REBORN_TOOL_DISCLOSURE` switch.
+  `tool_prefetch.rs` — turn-start tool selection. Its `tools` array is part
+  of the prompt-cache prefix: while the cache could be warm, never re-rank,
+  promote, or add to it; only a revocation may change it. Re-selection
+  (`tool_prefetch/reselect.rs`) runs only at a turn boundary after an idle
+  gap past the cache lifetime, a model change, or a revocation — never
+  mid-turn or on compaction — and every unknown leans towards "warm".
+  The choice goes through the `ToolSelectionClassifier` port; a classifier's
+  answer is untrusted and the host, not the classifier, adds the floor.
 - `skill_activation/` — skill activation selection. **Arrived 2026-08-05
   (CHECKLIST WS8) as the whole of the dissolved
   `ironclaw_first_party_extension_ports` crate** (PROPOSAL §9 row 55); its old
@@ -47,7 +55,13 @@ list. Stable anchors, by category:
   (`DEFAULT_SYSTEM_PROMPT` seed text plus the protocol appendices resolved at
   runtime). Text lives in `prompts/*.md`, never inline in Rust. Evicted from
   the composition root, which owns assembly and boot-time seeding of the
-  on-disk `SYSTEM.md`, never the text (PROPOSAL §6.10.1).
+  on-disk `SYSTEM.md`, never the text (PROPOSAL §6.10.1). Prompt text that
+  names a tool follows the run's advertised tools (#7836): the context and
+  model ports hand each run's `AdvertisedTools` (from the host-build surface)
+  to the identity and skill sources, and `tool_naming_sections` picks the
+  system-prompt sections. Gating applies only to a turn-start selected
+  surface, so prompts with selection off stay byte-identical. Find the gates
+  with `rg -n "may_name\(" crates`.
 
 Everything else in `src/` (budget/compaction accounting, subagent prompt/spawn
 ports, tool search, context-window caching, model-visible output scrubbing,

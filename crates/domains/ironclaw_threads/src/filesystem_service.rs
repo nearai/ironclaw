@@ -100,7 +100,7 @@ use message_read::{MessageReadBudget, MessageReadResult};
 /// small enough to surface pathological loops loudly.
 const FILESYSTEM_CAS_RETRIES: usize = 8;
 
-/// [`RecordKind`] discriminants for the six record types persisted by this
+/// [`RecordKind`] discriminants for the eight record types persisted by this
 /// service. Setting `entry.kind` makes writes record-shaped so
 /// [`DiskFilesystem`] (which rejects record-shaped puts) triggers the
 /// fail-closed path on the CAS gate instead of accepting a byte-only first
@@ -111,6 +111,8 @@ const THREAD_SUMMARY_KIND: &str = "thread_summary";
 const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
 const THREAD_PREPARED_CONTEXT_KIND: &str = "thread_prepared_context";
 const THREAD_STRUCTURED_FINALIZATION_KIND: &str = "thread_structured_finalization";
+const THREAD_TOOL_SELECTION_KIND: &str = "thread_tool_selection";
+const THREAD_TOOL_SELECTION_ACTIVITY_KIND: &str = "thread_tool_selection_activity";
 
 /// Conservative fan-out for per-thread title derivation during sidebar listing.
 const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
@@ -528,6 +530,67 @@ where
         let record = deserialize::<crate::PreparedContextRecord>(&versioned.entry.body)?;
         crate::validate_output_contract(&record.declarations.output)?;
         Ok(Some(record))
+    }
+
+    fn tool_selection_entry(
+        history: &crate::ToolSelectionHistory,
+    ) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(history)?;
+        let kind = RecordKind::new(THREAD_TOOL_SELECTION_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!(
+                "invalid thread_tool_selection record kind: {error}"
+            ))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    fn tool_selection_activity_entry(
+        activity: &crate::ToolSelectionActivity,
+    ) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(activity)?;
+        let kind = RecordKind::new(THREAD_TOOL_SELECTION_ACTIVITY_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!(
+                "invalid thread_tool_selection_activity record kind: {error}"
+            ))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    /// Path of the current thread incarnation's tool-selection activity,
+    /// beside its history.
+    async fn tool_selection_activity_path(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<ScopedPath, SessionThreadError> {
+        let (thread, _) = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        tool_selection_activity_path(scope, thread_id, thread.incarnation_id)
+    }
+
+    /// Path of the current thread incarnation's tool-selection history, with
+    /// the non-enumerating `UnknownThread` shape for a missing or
+    /// cross-scope thread.
+    async fn tool_selection_history_path(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<ScopedPath, SessionThreadError> {
+        let (thread, _) = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        tool_selection_history_path(scope, thread_id, thread.incarnation_id)
     }
 
     async fn read_structured_finalization_record(
@@ -2561,6 +2624,112 @@ where
         }
     }
 
+    async fn read_tool_selection_history(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionHistory>, SessionThreadError> {
+        let path = self.tool_selection_history_path(scope, thread_id).await?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let history = deserialize::<crate::ToolSelectionHistory>(&versioned.entry.body)?;
+        crate::tool_selection_history::validate_stored_history(&history, scope, thread_id)?;
+        Ok(Some(history))
+    }
+
+    async fn append_tool_selection_entry(
+        &self,
+        request: crate::AppendToolSelectionEntryRequest,
+    ) -> Result<crate::ToolSelectionHistory, SessionThreadError> {
+        request.entry.validate()?;
+        let path = self
+            .tool_selection_history_path(&request.scope, &request.thread_id)
+            .await?;
+        let scope = request.scope.clone();
+        let thread_id = request.thread_id.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| {
+                let history = deserialize::<crate::ToolSelectionHistory>(body)?;
+                crate::tool_selection_history::validate_stored_history(
+                    &history, &scope, &thread_id,
+                )?;
+                Ok(history)
+            },
+            Self::tool_selection_entry,
+            |current| {
+                let next =
+                    crate::tool_selection_history::append_tool_selection_entry(current, &request);
+                async move {
+                    let next = next?;
+                    Ok(CasApply::new(next.clone(), next))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn read_tool_selection_activity(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionActivity>, SessionThreadError> {
+        let path = self.tool_selection_activity_path(scope, thread_id).await?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let activity = deserialize::<crate::ToolSelectionActivity>(&versioned.entry.body)?;
+        crate::tool_selection_history::validate_stored_activity(&activity, scope, thread_id)?;
+        Ok(Some(activity))
+    }
+
+    async fn record_tool_selection_activity(
+        &self,
+        request: crate::RecordToolSelectionActivityRequest,
+    ) -> Result<crate::ToolSelectionActivity, SessionThreadError> {
+        let path = self
+            .tool_selection_activity_path(&request.scope, &request.thread_id)
+            .await?;
+        let scope = request.scope.clone();
+        let thread_id = request.thread_id.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| {
+                let activity = deserialize::<crate::ToolSelectionActivity>(body)?;
+                crate::tool_selection_history::validate_stored_activity(
+                    &activity, &scope, &thread_id,
+                )?;
+                Ok(activity)
+            },
+            Self::tool_selection_activity_entry,
+            |current| {
+                let next = crate::tool_selection_history::record_tool_selection_activity(
+                    current, &request,
+                );
+                async move {
+                    let next = next?;
+                    Ok(CasApply::new(next.clone(), next))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
     async fn publish_structured_finalization_message(
         &self,
         request: PublishStructuredFinalizationMessageRequest,
@@ -4207,6 +4376,38 @@ fn structured_finalization_record_path(
         thread_id,
         incarnation_id,
         turn_run_id
+    ))
+}
+
+/// Tool-selection history lives beside, not under, the thread root and is
+/// partitioned by incarnation (as structured finalizations are): deleting the
+/// thread keeps this LLM-facing record, and a recreated thread id starts a
+/// fresh history.
+fn tool_selection_history_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    incarnation_id: Uuid,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/tool-selections/{}/{}.json",
+        scope_axes_string(scope),
+        thread_id,
+        incarnation_id
+    ))
+}
+
+/// Tool-selection activity lives beside the history, partitioned the same
+/// way.
+fn tool_selection_activity_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    incarnation_id: Uuid,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/tool-selections/{}/{}.activity.json",
+        scope_axes_string(scope),
+        thread_id,
+        incarnation_id
     ))
 }
 

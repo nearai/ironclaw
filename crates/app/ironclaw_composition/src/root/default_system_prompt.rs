@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::turn::TurnOriginKind;
-use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
+use ironclaw_loop_contracts::{AdvertisedTools, LoopRunContext, PromptMode};
 // The prompt *content* is owned by the loop tier — `ironclaw_loop_host`, beside
 // its other `prompts/*.md` assets and beside the `HostIdentityContextSource`
 // this module implements (PROPOSAL §6.10.1). What stays here is assembly and
@@ -17,7 +17,7 @@ use ironclaw_loop_host::{
     BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
     IdentityApplicability, IdentityFileName, SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT,
-    SELF_KNOWLEDGE_PROTOCOL_PROMPT, TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
+    SELF_KNOWLEDGE_PROTOCOL_PROMPT, identity_message_ref, tool_naming_sections,
 };
 use ironclaw_turns::LoopMessageRef;
 
@@ -54,6 +54,11 @@ pub(crate) struct SystemPromptProtocols {
     /// off ⇒ the prompt carries the file plus the unconditional self-knowledge
     /// section, and nothing that references the bridge tools.
     pub(crate) disclosure: bool,
+    /// When true (turn-start selection is on, which implies `disclosure`), a
+    /// run that advertises a selection gets the selection protocol after the
+    /// disclosure protocol; `ironclaw_loop_host::tool_naming_sections` picks a
+    /// run's tool-naming sections. Off leaves the prompt exactly as before.
+    pub(crate) tool_prefetch: bool,
     /// When true, the benchmarking-mode protocol is appended, telling the
     /// model no human is available to answer clarifying questions. Set from
     /// the `BENCHMARKING_MODE` env var at build time (see `runtime.rs`); off
@@ -102,17 +107,17 @@ impl DefaultSystemPromptIdentitySource {
     fn prompt_content(
         &self,
         run_context: &LoopRunContext,
+        advertised_tools: &AdvertisedTools,
     ) -> Result<String, DefaultSystemPromptError> {
         // Append in memory (not to the seeded, user-editable file) so these
         // sections are system invariants independent of user edits to SYSTEM.md
         // — and so existing installs get them, not just freshly seeded ones.
         let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
         append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
-        if let Some(guidance) = self.protocols.memory_guidance.as_deref() {
-            append_section(&mut content, guidance);
-        }
-        if self.protocols.disclosure {
-            append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
+        let (guidance, protocols) = (self.protocols.memory_guidance.as_deref(), &self.protocols);
+        let (disclosure, tool_prefetch) = (protocols.disclosure, protocols.tool_prefetch);
+        for section in tool_naming_sections(guidance, disclosure, tool_prefetch, advertised_tools) {
+            append_section(&mut content, section);
         }
         if self.protocols.benchmarking_mode {
             append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_PROMPT);
@@ -327,9 +332,10 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
         &self,
         run_context: &LoopRunContext,
         _mode: PromptMode,
+        advertised_tools: &AdvertisedTools,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         let content = self
-            .prompt_content(run_context)
+            .prompt_content(run_context, advertised_tools)
             .map_err(|_| HostIdentityContextBuildError::SourceUnavailable)?;
         let name = Self::identity_name()?;
         let message_ref = Self::message_ref_for(&content)?;

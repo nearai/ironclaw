@@ -431,6 +431,10 @@ impl LlmProvider for FailoverProvider {
         self.providers[self.last_used.load(Ordering::Relaxed)].cache_write_multiplier()
     }
 
+    fn prompt_cache_lifetime(&self) -> crate::config::PromptCacheLifetime {
+        self.providers[self.last_used.load(Ordering::Relaxed)].prompt_cache_lifetime()
+    }
+
     fn cache_read_discount(&self) -> Decimal {
         self.providers[self.last_used.load(Ordering::Relaxed)].cache_read_discount()
     }

@@ -1868,6 +1868,34 @@ def _routine_confirmation_follow_up_for_text(
     return None
 
 
+@dataclass(frozen=True)
+class ScriptedFollowUp:
+    """A fixed user message sent in the same conversation after the last reply.
+
+    Unlike the routine confirmation, which is derived from the reply text, a
+    scripted follow-up is decided by the caller before the case starts, so a
+    case can script a multi-turn conversation. Each follow-up's reply is
+    awaited with its own marker and required text.
+    """
+
+    prompt: str
+    marker: str | None
+    required_text: tuple[str, ...] = ()
+
+
+def _scripted_turn_record(
+    turn: int, prompt: str, marker: str | None, reply: AssistantReplyWaitResult,
+) -> dict[str, object]:
+    return {
+        "turn": turn,
+        "prompt": prompt,
+        "marker": marker,
+        "text_excerpt": reply.text_excerpt,
+        "assistant_reply_wait_ms": reply.final_reply_wait_ms,
+        "assistant_reply_wait_reason": reply.final_reply_reason,
+    }
+
+
 async def _live_chat_case(
     ctx: LiveQaContext,
     *,
@@ -1884,9 +1912,27 @@ async def _live_chat_case(
     expose_full_reply_text: bool = False,
     enforce_marker: bool = True,
     capture_submission_identity: bool = False,
+    scripted_follow_ups: list[ScriptedFollowUp] | None = None,
+    on_turn_complete: Callable[[int], Awaitable[None]] | None = None,
 ) -> ProbeResult:
+    """Drive one WebUI conversation and wait for the assistant's reply.
+
+    `scripted_follow_ups` sends further user messages in the same
+    conversation, one after each reply, and records every turn under
+    `scripted_turns`. `on_turn_complete(turn)` is awaited after each turn's
+    reply (turn 0 is the opening prompt) and before the next message is
+    sent, so a caller can take measurements at the turn boundary or leave the
+    conversation idle for a while. The top-level reply fields describe the
+    last reply. Scripted follow-ups cannot be combined with the routine
+    confirmation follow-up.
+    """
     from playwright.async_api import expect
 
+    if scripted_follow_ups and routine_confirmation_follow_up:
+        raise ValueError(
+            "scripted follow-ups and the routine confirmation follow-up are "
+            "mutually exclusive"
+        )
     started = time.monotonic()
     observed: dict[str, Any] = {}
     if extensions:
@@ -2088,6 +2134,43 @@ async def _live_chat_case(
                     enforce_marker=enforce_marker,
                 )
                 _record_assistant_reply_wait_result(observed, follow_up_reply)
+        if scripted_follow_ups:
+            observed["scripted_turns"] = [
+                _scripted_turn_record(0, prompt, marker, reply)
+            ]
+        if on_turn_complete is not None:
+            await on_turn_complete(0)
+        for turn, follow_up in enumerate(scripted_follow_ups or (), start=1):
+            follow_up_assistant_count_before = await page.locator(  # type: ignore[attr-defined]
+                "[data-testid='msg-assistant']"
+            ).count()
+            follow_up_error_count_before = await page.locator(  # type: ignore[attr-defined]
+                "[data-testid='msg-error']"
+            ).count()
+            await composer.fill(follow_up.prompt)
+            await composer.press("Enter")
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                follow_up.prompt[:80],
+                timeout=15000,
+            )
+            follow_up_reply = await _wait_for_assistant_reply(
+                page,
+                marker=follow_up.marker,
+                required_text=list(follow_up.required_text),
+                timeout=timeout,
+                semantic_goal=f"{prompt}\n{follow_up.prompt}",
+                assistant_count_before=follow_up_assistant_count_before,
+                error_count_before=follow_up_error_count_before,
+                enforce_marker=enforce_marker,
+            )
+            _record_assistant_reply_wait_result(observed, follow_up_reply)
+            observed["scripted_turns"].append(
+                _scripted_turn_record(
+                    turn, follow_up.prompt, follow_up.marker, follow_up_reply
+                )
+            )
+            if on_turn_complete is not None:
+                await on_turn_complete(turn)
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
             matches = [

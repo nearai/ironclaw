@@ -68,6 +68,15 @@ fn flatten_config(config: &ironclaw_config::RebornConfigFile) -> anyhow::Result<
         // well — this is the second, explicit half of the same statement.)
         retired_sections: Default::default(),
         memory: Some(config.memory.clone().unwrap_or_default()),
+        embeddings: Some(config.embeddings.clone().unwrap_or_default()),
+        // Nested tables expanded too, so `tool_selection.jev.model` and its
+        // siblings list even when unset.
+        tool_selection: Some({
+            let mut section = config.tool_selection.clone().unwrap_or_default();
+            section.local.get_or_insert_with(Default::default);
+            section.jev.get_or_insert_with(Default::default);
+            section
+        }),
         budget: Some(config.budget.clone().unwrap_or_default()),
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
     };
@@ -182,6 +191,17 @@ mod tests {
                 .iter()
                 .any(|e| e.key == "trigger_poller.poll_interval_secs"),
         );
+        for key in [
+            "tool_selection.mode",
+            "tool_selection.classifier",
+            "tool_selection.max_tools",
+            "tool_selection.local.min_relative",
+            "tool_selection.jev.model",
+            "tool_selection.jev.api_key_env",
+            "tool_selection.jev.timeout_ms",
+        ] {
+            assert!(entries.iter().any(|e| e.key == key), "{key}");
+        }
         for entry in &entries {
             let is_empty_list_default = matches!(
                 &entry.value,

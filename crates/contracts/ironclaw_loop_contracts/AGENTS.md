@@ -62,7 +62,11 @@ does **not** re-export them: one type, one import path.
 - Add a port trait when the loop needs a new host-owned capability — and add
   its row to `LOOP_PORT_OWNERS` in
   `crates/app/ironclaw_architecture_tests/tests/reborn_loop_port_location_scan.rs`
-  in the same change. The scan fails on an unowned port by design.
+  in the same change. The scan fails on an unowned port by design. The scan
+  only *finds* traits named `Loop…Port`; a port named otherwise (the
+  `ToolRetrievalProvider` / `ToolRetrievalIndex` pair and
+  `ToolSelectionClassifier` are the precedents) must
+  also be listed in that file's `NAMED_LOOP_PORTS`, or the scan never sees it.
 - Add a new file when a contract has a separate lifecycle or validation model.
   No `common`, `misc`, or `helpers` modules.
 - Ports are **not** sealed: they exist to be implemented by crates above this

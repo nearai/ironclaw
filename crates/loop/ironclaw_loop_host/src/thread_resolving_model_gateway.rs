@@ -7,9 +7,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
-    InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
-    LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
-    LoopPromptBundleAuthority,
+    AdvertisedTools, InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway,
+    LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
+    LoopModelResponse, LoopPromptBundleAuthority,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -41,6 +41,11 @@ where
     pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    /// Record each model call for turn-start tool selection
+    /// (see [`ThreadBackedLoopModelPort::with_model_call_recording`]).
+    pub record_model_calls: bool,
+    /// The run's advertised tools, the same value its context port holds.
+    pub advertised_tools: AdvertisedTools,
 }
 
 /// Resolves a thread's transcript into a host-managed model request.
@@ -68,6 +73,8 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    record_model_calls: bool,
+    advertised_tools: AdvertisedTools,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -89,6 +96,8 @@ where
             context_window_cache,
             attachment_read_port,
             prompt_diagnostic_sink,
+            record_model_calls,
+            advertised_tools,
         } = parts;
         Self {
             thread_service,
@@ -103,6 +112,8 @@ where
             context_window_cache,
             attachment_read_port,
             prompt_diagnostic_sink,
+            record_model_calls,
+            advertised_tools,
         }
     }
 }
@@ -146,7 +157,8 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
-        .with_prompt_bundle_authority(self.prompt_authority.clone());
+        .with_prompt_bundle_authority(self.prompt_authority.clone())
+        .with_advertised_tools(self.advertised_tools.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }
@@ -167,6 +179,9 @@ where
         }
         if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
             model_port = model_port.with_prompt_diagnostic_sink(Arc::clone(sink));
+        }
+        if self.record_model_calls {
+            model_port = model_port.with_model_call_recording();
         }
         if let Some(progress_sink) = progress_sink {
             model_port = model_port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {

@@ -73,7 +73,7 @@ use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallba
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_contracts::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-    LoopHostMilestone, LoopHostMilestoneSink, ModelProfileId,
+    LoopHostMilestone, LoopHostMilestoneSink, ModelProfileId, ToolRetrievalProvider,
 };
 use ironclaw_loop_host::{
     CapabilitySurfaceProfileResolver, HostManagedModelGateway, HostUserProfileSource,
@@ -211,6 +211,12 @@ pub(crate) struct GroupSharedStorage {
     /// Its `Drop` impl synchronously cancels the scheduler loop when the last
     /// `Arc<GroupSharedStorage>` is dropped.
     pub(crate) scheduler_handle: TurnRunSchedulerHandle,
+    /// Production parity: the planned runtime's tool-catalog indexer, running
+    /// on the capability backend's active-registry change signal exactly as
+    /// `build_reborn_runtime` spawns it (startup pass only when the backend
+    /// has no composed registry). `Some` only when a retrieval provider is
+    /// bound; dropping it aborts the task.
+    pub(crate) tool_catalog_indexer: Option<ironclaw_loop_host::ToolCatalogIndexerHandle>,
     /// Scope-keyed model-gateway registry. Every thread registers its scripted
     /// gateway here (`.thread(conv).script([...]).build()`) before submitting
     /// any turn; the loop-driver host resolves the per-scope gateway at host
@@ -368,6 +374,17 @@ pub(crate) enum GroupCapability {
 }
 
 impl GroupCapability {
+    /// The composed runtime's active-registry change signal, which drives
+    /// background tool-catalog indexing. `None` without a composed runtime.
+    pub(crate) fn tool_catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        match self {
+            Self::HostRuntime(harness) => harness
+                .reborn_services_for_test()
+                .map(|runtime| runtime.tool_catalog_changes_for_test()),
+            _ => None,
+        }
+    }
+
     /// Return a fresh `HarnessCapabilityMode` for one thread.
     ///
     /// Recording variants create a fresh echo port each call (ports are
@@ -511,6 +528,9 @@ impl RebornIntegrationGroup {
             narrowed_bridged_policy: None,
             budget: false,
             communication_context_provider: None,
+            tool_retrieval_provider: None,
+            tool_prefetch: None,
+            tool_availability: None,
             hook_dispatcher_builder_factory: None,
             memory_curation_interval_turns: None,
             trajectory_observer: None,
@@ -904,6 +924,15 @@ pub struct RebornIntegrationGroupBuilder {
     /// slice it resolves lands in the model request. Default `None` (no comm
     /// section, matching today's behavior).
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// Optional ranker behind `tool_search`, handed to the group's ONE planned
+    /// runtime. Default `None` (the host-bundled BM25F ranker).
+    tool_retrieval_provider: Option<Arc<dyn ToolRetrievalProvider>>,
+    /// Optional turn-start tool selection for the group's ONE planned
+    /// runtime. Default `None` (today's surface).
+    tool_prefetch: Option<ironclaw_loop_host::ToolPrefetchConfig>,
+    /// Optional availability predicate for turn-start selection candidates.
+    /// Default `None` (every authorized tool is a candidate).
+    tool_availability: Option<Arc<dyn ironclaw_loop_contracts::ToolAvailabilityPredicate>>,
     /// C-HOOKS / E-HOOK-INFRA: an optional per-run hook dispatcher builder
     /// factory wired into the group's ONE planned runtime, so hooks fire at the
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
@@ -1515,9 +1544,18 @@ impl RebornIntegrationGroupBuilder {
             // `runtime.rs`'s `local_runtime.gate_record_store`).
             gate_record_store: capability.gate_record_store(),
             scheduler_wake_wiring: None,
+            tool_retrieval_provider: self.tool_retrieval_provider,
+            tool_prefetch: self.tool_prefetch,
+            tool_availability: self.tool_availability,
         };
         let planned_runtime_parts_shape = harness_planned_runtime_parts_shape(&parts);
         let composition = build_default_planned_runtime(parts)?;
+        let tool_catalog_indexer = composition.tool_catalog_indexer.clone().map(|indexer| {
+            let changes = capability
+                .tool_catalog_changes()
+                .unwrap_or_else(|| tokio::sync::watch::channel(0).1);
+            indexer.spawn(changes)
+        });
 
         Ok(RebornIntegrationGroup {
             shared: Arc::new(GroupSharedStorage {
@@ -1537,6 +1575,7 @@ impl RebornIntegrationGroupBuilder {
                     ),
                 ),
                 scheduler_handle: composition.scheduler_handle,
+                tool_catalog_indexer,
                 scope_gateway,
                 process_system,
                 turn_runtime,

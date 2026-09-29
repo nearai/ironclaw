@@ -61,6 +61,7 @@ where
     async fn load_skill_context_candidates(
         &self,
         run_context: &LoopRunContext,
+        _advertised_tools: &ironclaw_loop_contracts::AdvertisedTools,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         let mut descriptors = self
             .bundle_source
@@ -293,7 +294,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(source);
 
         let candidates = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap();
 
@@ -316,7 +320,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -335,7 +342,10 @@ mod tests {
             let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
             let error = adapter
-                .load_skill_context_candidates(&run_context().await)
+                .load_skill_context_candidates(
+                    &run_context().await,
+                    &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+                )
                 .await
                 .unwrap_err();
 
@@ -361,9 +371,13 @@ mod tests {
         ]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
-        let snippets = build_skill_instruction_snippets(&adapter, &run_context().await)
-            .await
-            .unwrap();
+        let snippets = build_skill_instruction_snippets(
+            &adapter,
+            &run_context().await,
+            &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+        )
+        .await
+        .unwrap();
 
         assert!(source.reads().is_empty());
         assert_eq!(snippets.len(), 1);
@@ -387,9 +401,13 @@ mod tests {
         ]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
-        let snippets = build_skill_instruction_snippets(&adapter, &run_context().await)
-            .await
-            .unwrap();
+        let snippets = build_skill_instruction_snippets(
+            &adapter,
+            &run_context().await,
+            &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(snippets.len(), 1);
         assert!(
@@ -423,9 +441,13 @@ mod tests {
         ]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
-        let snippets = build_skill_instruction_snippets(&adapter, &run_context().await)
-            .await
-            .unwrap();
+        let snippets = build_skill_instruction_snippets(
+            &adapter,
+            &run_context().await,
+            &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+        )
+        .await
+        .unwrap();
 
         assert!(snippets.is_empty());
         assert!(source.reads().is_empty());
@@ -442,7 +464,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -461,7 +486,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -489,7 +517,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -518,7 +549,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(source);
 
         let candidates = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap();
 
@@ -554,7 +588,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(source);
 
         let candidates = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap();
         let ordering_keys = candidates
@@ -597,7 +634,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let candidates = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap();
 
@@ -631,7 +671,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(source);
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -647,7 +690,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(source);
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -663,7 +709,10 @@ mod tests {
         let adapter = SkillBundleContextSource::new(source);
 
         let error = adapter
-            .load_skill_context_candidates(&run_context().await)
+            .load_skill_context_candidates(
+                &run_context().await,
+                &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+            )
             .await
             .unwrap_err();
 
@@ -684,7 +733,10 @@ mod tests {
             let adapter = SkillBundleContextSource::new(source);
 
             let error = adapter
-                .load_skill_context_candidates(&run_context().await)
+                .load_skill_context_candidates(
+                    &run_context().await,
+                    &ironclaw_loop_contracts::AdvertisedTools::Ordinary,
+                )
                 .await
                 .unwrap_err();
 

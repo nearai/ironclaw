@@ -17,7 +17,7 @@
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_turn_runner::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 20 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 23 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
@@ -43,11 +43,14 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub after_turn_hook_wiring: bool,
     pub communication_context_provider: bool,
     pub scheduler_wake_wiring: bool,
+    pub tool_retrieval_provider: bool,
+    pub tool_prefetch: bool,
+    pub tool_availability: bool,
 }
 
 /// Exhaustive, no-`..` destructure of `parts` into its Option-field shape.
 ///
-/// Every one of the 39 fields is named explicitly here (the 19 required
+/// Every one of the 42 fields is named explicitly here (the 19 required
 /// fields bound to `_`), so this function FAILS TO COMPILE the moment a
 /// field is added to or removed from `DefaultPlannedRuntimeParts` — the
 /// tripwire `wiring_parity.rs` relies on. Match ergonomics on `&parts` bind
@@ -98,6 +101,9 @@ where
         after_turn_hook_wiring,
         communication_context_provider,
         scheduler_wake_wiring,
+        tool_retrieval_provider,
+        tool_prefetch,
+        tool_availability,
     } = parts;
     DefaultPlannedRuntimePartsShape {
         model_route_resolver: model_route_resolver.is_some(),
@@ -120,5 +126,8 @@ where
         after_turn_hook_wiring: after_turn_hook_wiring.is_some(),
         communication_context_provider: communication_context_provider.is_some(),
         scheduler_wake_wiring: scheduler_wake_wiring.is_some(),
+        tool_retrieval_provider: tool_retrieval_provider.is_some(),
+        tool_prefetch: tool_prefetch.is_some(),
+        tool_availability: tool_availability.is_some(),
     }
 }
