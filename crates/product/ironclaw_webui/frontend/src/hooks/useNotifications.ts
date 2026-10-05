@@ -137,7 +137,10 @@ export function useNotifications(
     }),
     enabled: enabled && Boolean(tenantId && userId),
     refetchInterval: NOTIFICATION_REFETCH_MS,
-    refetchIntervalInBackground: false,
+    // The inbox must keep moving while the tab is backgrounded: a run that
+    // settles in a background tab is exactly when the user needs the event
+    // (and any consumer listening on this query) to arrive in real time.
+    refetchIntervalInBackground: true,
   });
 
   const messages = React.useMemo(
@@ -232,10 +235,11 @@ export function useNotifications(
     setLoadedPages((current) => Math.min(current + 1, NOTIFICATION_PAGE_MAX));
   }, []);
   /* Paging widens the polled read, and the poll does not stop when the panel
-   * closes — only when the tab is backgrounded. Left alone, a reader who paged
-   * to the ceiling would keep 20 serial requests every ten seconds running
-   * behind a closed panel, forever. Collapse back to the head on close: the
-   * badge is all that a closed panel shows, and reopening pages again. */
+   * closes. (This query also polls in background tabs, so it never pauses.)
+   * Left alone, a reader who paged to the ceiling would keep 20 serial requests
+   * every ten seconds running behind a closed panel, forever. Collapse back to
+   * the head on close: the badge is all that a closed panel shows, and
+   * reopening pages again. */
   const collapsePages = React.useCallback(() => {
     setLoadedPages(1);
   }, []);
