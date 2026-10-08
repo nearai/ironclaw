@@ -23,6 +23,7 @@
 //! /threads[/.../...]/threads/<thread_id>/messages/<message_id>.json
 //! /threads[/.../...]/threads/<thread_id>/summaries/<summary_id>.json
 //! /threads[/.../...]/structured-finalizations/<thread_id>/<incarnation>/<run_id>.json
+//! /threads[/.../...]/tool-selections/<thread_id>/<incarnation>.json
 //! /threads/idempotency/<sha256>.json
 //! ```
 //!
@@ -111,6 +112,7 @@ const THREAD_SUMMARY_KIND: &str = "thread_summary";
 const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
 const THREAD_PREPARED_CONTEXT_KIND: &str = "thread_prepared_context";
 const THREAD_STRUCTURED_FINALIZATION_KIND: &str = "thread_structured_finalization";
+const THREAD_TOOL_SELECTION_KIND: &str = "thread_tool_selection";
 
 /// Conservative fan-out for per-thread title derivation during sidebar listing.
 const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
@@ -496,6 +498,42 @@ where
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
         Ok(entry)
+    }
+
+    fn tool_selection_entry(
+        record: &crate::ToolSelectionRecord,
+    ) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(THREAD_TOOL_SELECTION_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!(
+                "invalid thread_tool_selection record kind: {error}"
+            ))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    /// Path of the current thread incarnation's tool selection, with the
+    /// non-enumerating `UnknownThread` shape for a missing or cross-scope
+    /// thread.
+    async fn tool_selection_path(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<ScopedPath, SessionThreadError> {
+        let (thread, _) = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        scoped_path(&format!(
+            "{}/tool-selections/{}/{}.json",
+            scope_axes_string(scope),
+            thread_id,
+            thread.incarnation_id
+        ))
     }
 
     fn structured_finalization_entry(
@@ -2559,6 +2597,55 @@ where
             )),
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn read_tool_selection(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionRecord>, SessionThreadError> {
+        let path = self.tool_selection_path(scope, thread_id).await?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<crate::ToolSelectionRecord>(&versioned.entry.body)?;
+        record.validate()?;
+        Ok(Some(record))
+    }
+
+    async fn record_tool_selection(
+        &self,
+        request: crate::RecordToolSelectionRequest,
+    ) -> Result<crate::ToolSelectionRecord, SessionThreadError> {
+        request.record.validate()?;
+        let path = self
+            .tool_selection_path(&request.scope, &request.thread_id)
+            .await?;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| {
+                let record = deserialize::<crate::ToolSelectionRecord>(body)?;
+                record.validate()?;
+                Ok(record)
+            },
+            Self::tool_selection_entry,
+            |stored| {
+                // Write-once: a stored record wins, so racing runs serve it.
+                let applied = match stored {
+                    Some(stored) => CasApply::no_op(stored.clone(), stored),
+                    None => CasApply::new(request.record.clone(), request.record.clone()),
+                };
+                async move { Ok(applied) }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
     }
 
     async fn publish_structured_finalization_message(

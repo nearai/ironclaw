@@ -70,6 +70,11 @@ fn flatten_config(config: &ironclaw_config::RebornConfigFile) -> anyhow::Result<
         memory: Some(config.memory.clone().unwrap_or_default()),
         budget: Some(config.budget.clone().unwrap_or_default()),
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
+        tool_selection: Some({
+            let mut tool_selection = config.tool_selection.clone().unwrap_or_default();
+            tool_selection.jev.get_or_insert_with(Default::default);
+            tool_selection
+        }),
     };
 
     let value = serde_json::to_value(&expanded)?;

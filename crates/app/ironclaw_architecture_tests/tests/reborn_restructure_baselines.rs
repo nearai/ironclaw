@@ -214,7 +214,12 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// into #7875. Main contributes the resource-block observer wiring and #7875
 /// adds the durable auth notification observer wiring. Both lifecycle policies
 /// remain in `ironclaw_assistant`; composition only supplies dependencies.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_935;
+///
+/// **42935 -> 43101 on 2026-10-04:** turn-start tool selection adds the
+/// `tool_selection` runtime input and its builder; the tree was already 142
+/// lines into the working slack. Selection behavior stays in
+/// `ironclaw_loop_host`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_101;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

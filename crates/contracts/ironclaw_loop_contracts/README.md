@@ -29,6 +29,12 @@ Almost purely trait + DTO, re-exported flat from `src/lib.rs`:
 - `LoopExit` and its evidence-reference DTOs — the *claim* a loop makes about
   how its turn ended; only the kernel validates it into a durable transition.
   Compiler-checked variant guards live beside the `#[non_exhaustive]` enums.
+- `ToolSelectionClassifier` (+ `ToolSelectionRequest`,
+  `ToolSelectionCandidate`, `ConversationContext`, `ToolSelection`,
+  `ChosenTool`, `ToolSelectionError`): the port that chooses which deferred
+  tools a conversation advertises at turn start. The loop host consumes it; a
+  provider package implements it. Its answer is untrusted: the host re-checks
+  names against the candidates and enforces the caps.
 - `RedactedCheckpointPayload` + `MAX_CHECKPOINT_STATE_PAYLOAD_BYTES`;
   loop-side error and safe-summary vocabulary (`AgentLoopHostError*`,
   `LoopSafeSummary`).

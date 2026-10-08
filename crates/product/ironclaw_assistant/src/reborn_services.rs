@@ -7548,6 +7548,7 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::ToolResultRecordRead(_)
         | SessionThreadError::InvalidStructuredFinalization { .. }
+        | SessionThreadError::InvalidToolSelection { .. }
         | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => ProductSurfaceError::service_unavailable(true),
     }

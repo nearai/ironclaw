@@ -1,6 +1,6 @@
 # `crates/extensions/` — everything "installable package"
 
-**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 9 (re-derive: `find crates/extensions -maxdepth 3 -name Cargo.toml | wc -l` — 4 family crates + 5 crate-bearing packages under `ls -d crates/extensions/packages/*/`, which lists 15 packages total) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
+**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers, the Jev tool-selection provider) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 10 (re-derive: `find crates/extensions -maxdepth 3 -name Cargo.toml | wc -l` — 4 family crates + 6 crate-bearing packages under `ls -d crates/extensions/packages/*/`, which lists 16 packages total) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
 
 ## What this family is
 
@@ -52,6 +52,7 @@ follows here is family-specific and has no root-file counterpart:
 | [`packages/web-app`](./packages/web-app) (`ironclaw_web_app_extension`) | Delivery-only browser-push translator; authenticated-session ingress is host-owned (the one required absence), and its `stream` reply sink is the product projection sink composition attaches to the binding's `surfaces.reply` slot | Web Push-shaped bytes only |
 | [`packages/memory-native`](./packages/memory-native) (`ironclaw_memory_native`) | The default `[memory]` provider: filesystem-backed `MemoryService` implementation | the bundled memory backend's behavior |
 | [`packages/mem0`](./packages/mem0) (`ironclaw_memory_mem0`) | The alternative `[memory]` provider over an external mem0 REST service | the mem0 mapping or its hardened transport |
+| [`packages/tool-selection-jev`](./packages/tool-selection-jev) (`ironclaw_tool_selection_jev`) | The opt-in Jev classifier behind turn-start tool selection's classifier port, calling a configured decisions endpoint (TypeSafe's by default; any provider serving the same decisions API) pinned to that endpoint's host (sends the opening request and the tool catalog to that third party); not an installable extension, so no manifest | how Jev requests are built, sliced, and turned into a selection or a failure |
 
 ## `packages/` — the directory rules
 
@@ -73,9 +74,11 @@ time:
 > that logic lives as a module inside the shared `extension_support` crate,
 > registered against the package's manifest identity.
 
-**Anatomy.** `manifest.toml` always; `prompts/` and `schemas/` for the
+**Anatomy.** `manifest.toml` in every installable package
+(`tool-selection-jev/` has none: it is a provider behind a loop-host port, not
+an extension, and declares no capability surface); `prompts/` and `schemas/` for the
 model-visible copy and tool schemas; `Cargo.toml` + `src/` + `tests/` only in
-the four crate-bearing packages; `wasm/` + `wasm-src/` only where tools compile
+the crate-bearing packages; `wasm/` + `wasm-src/` only where tools compile
 to a WASM guest. The **artifact boundary**: committed `wasm/*.wasm` guests are
 built out-of-band (`./scripts/build-wasm-extensions.sh --first-party` — the
 `wasm-src/` guest crates are excluded from the workspace build graph), and

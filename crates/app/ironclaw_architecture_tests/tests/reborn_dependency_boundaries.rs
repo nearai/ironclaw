@@ -437,6 +437,24 @@ fn reborn_crate_dependency_boundaries_hold() {
             .filter(|name| !memory_native_allowed.contains(name))
             .collect::<Vec<_>>(),
     );
+    // Jev tool classifier package: the selection port it implements, the
+    // network-policy vocabulary its requests carry, and the policy egress
+    // every request goes through — nothing from the loop host, the kernel,
+    // or composition.
+    let tool_selection_jev_allowed = [
+        "ironclaw_tool_selection_jev",
+        "ironclaw_loop_contracts",
+        "ironclaw_host_api",
+        "ironclaw_network",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_tool_selection_jev",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !tool_selection_jev_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
 
     // Canonical Reborn identity layer: it maps external identities to a stable
     // `UserId` at the bottom of the stack, so among internal ironclaw crates it
@@ -1056,7 +1074,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // production prompt validation checks structural limits and control
         // characters only; decoded Basic-auth samples remain test-only. Count
         // read from this test's own failure message after merging #7416 and #6985.
-        ("ironclaw_loop_contracts", 13_608),
+        // 13_608 -> 14_011 (2026-10-04, turn-start tool selection): the
+        // `ToolSelectionClassifier` port and its request/answer/error DTOs,
+        // which the loop host consumes and a provider package implements.
+        // Port and vocabulary only — candidate building, answer checking and
+        // the selection record stay in ironclaw_loop_host and
+        // ironclaw_threads. The count also absorbs the 147 lines of slack the
+        // previous ceiling had drifted by. Count read from this test's own
+        // failure message.
+        ("ironclaw_loop_contracts", 14_011),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -1438,6 +1464,53 @@ fn only_the_sanctioned_residue_names_a_memory_provider() {
         "stale MEMORY_PROVIDER_DEPENDENT_RESIDUE entries — the edge is gone, delete the \
          entry so the residue only ever shrinks:\n{}",
         stale.join("\n")
+    );
+}
+
+/// Packages that implement a loop-tier tool port (the vendor tool
+/// classifier). Same rule as the memory providers (PROPOSAL §8.2): only the
+/// binary links one; composition and everything below it reach them through
+/// the neutral port. There is no residue list: no other crate links one
+/// today, and none may start.
+const TOOL_PORT_PROVIDER_CRATES: &[&str] = &["ironclaw_tool_selection_jev"];
+
+#[test]
+fn only_the_binary_links_a_tool_port_provider_package() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+
+    for provider in TOOL_PORT_PROVIDER_CRATES {
+        assert!(
+            dependencies.contains_key(*provider),
+            "{provider} is not in cargo metadata, so this gate would check no edges at all. \
+             If it was renamed or moved, repoint TOOL_PORT_PROVIDER_CRATES in the same change."
+        );
+    }
+
+    let mut violations = Vec::new();
+    for provider in TOOL_PORT_PROVIDER_CRATES {
+        for (crate_name, deps) in &dependencies {
+            if crate_name == "ironclaw" || !deps.iter().any(|dependency| dependency == provider) {
+                continue;
+            }
+            violations.push(format!(
+                "{crate_name} takes a normal dependency on {provider}; only the `ironclaw` \
+                 binary may link a tool port provider package, and hand composition the \
+                 neutral port (tests may use a dev-dependency)"
+            ));
+        }
+    }
+    violations.sort_unstable();
+    assert!(
+        violations.is_empty(),
+        "tool port provider linking gate failed:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -1953,8 +2026,13 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             // their neutral binding contracts.
             "ironclaw_web_app",
             "ironclaw_web_app_extension",
+            // The vendor-specific Jev turn-start tool classifier package: the
+            // binary reads its API key host-side, builds it, and hands
+            // composition only the neutral `ToolSelectionClassifier` port, so
+            // composition never links the vendor package.
+            "ironclaw_tool_selection_jev",
         ],
-        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer), and ironclaw_tool_selection_jev (the binary-built Jev tool classifier). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,

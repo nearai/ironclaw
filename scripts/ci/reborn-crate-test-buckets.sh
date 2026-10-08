@@ -72,6 +72,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_network: "llm-mcp",
       ironclaw_outbound: "llm-mcp",
       ironclaw_sandbox: "llm-mcp",
+      ironclaw_tool_selection_jev: "llm-mcp",
       ironclaw_processes: "llm-mcp",
 
       ironclaw_conversations: "events-conversations",

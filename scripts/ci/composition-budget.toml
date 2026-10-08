@@ -298,7 +298,14 @@ observed_date = "2026-08-08"
 # in ironclaw_assistant/ironclaw_notifications; composition only supplies their
 # dependencies. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-loc_ceiling = 42935
+# Re-measured 42935 -> 43101 on 2026-10-04 for turn-start tool selection.
+# The tree stood at 43077 (142 lines into the working slack) before it; the
+# change adds 24 lines of pass-through wiring: the `tool_selection` runtime
+# input and its builder, handed unchanged to the planned runtime config. The
+# selection behavior is in ironclaw_loop_host and the classifier in its own
+# package. Measured with `bash scripts/ci/check-composition-budget.sh
+# --print`, not padded.
+loc_ceiling = 43101
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -309,8 +316,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42935
-loc_observed_date = "2026-08-28"
+loc_observed = 43101
+loc_observed_date = "2026-10-04"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

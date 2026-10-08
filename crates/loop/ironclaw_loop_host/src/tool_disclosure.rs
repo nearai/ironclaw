@@ -223,6 +223,25 @@ impl CapabilityCatalog {
         self.entries.iter().map(|entry| &entry.definition)
     }
 
+    /// Whether the authorized surface is too wide to advertise whole, so only
+    /// core tools, bridges and promoted tools are advertised.
+    pub(crate) fn defers(&self, policy: &CapabilitySurfacePolicy, caps: DisclosureCaps) -> bool {
+        let (count, tokens) = self.effective_metrics(policy);
+        tokens > caps.defer_threshold_tokens() || count > caps.max_tools
+    }
+
+    /// Every authorized deferred (non-core) definition with its estimated
+    /// schema tokens, in catalog (provider-name) order: the candidates of a
+    /// turn-start tool selection.
+    pub(crate) fn deferred_definitions_with_tokens<'a>(
+        &'a self,
+        policy: &'a CapabilitySurfacePolicy,
+    ) -> impl Iterator<Item = (&'a ProviderToolDefinition, u32)> + 'a {
+        self.effective_entries(policy)
+            .filter(|entry| entry.tier == ToolTier::Discoverable)
+            .map(|entry| (&entry.definition, entry.est_schema_tokens))
+    }
+
     /// Historical global provider-name order used by the benchmark's compact
     /// and signatures control arms.
     fn discoverable_tool_names(&self, policy: &CapabilitySurfacePolicy) -> Vec<String> {
@@ -535,6 +554,29 @@ impl PromotedSet {
     pub(crate) fn len(&self) -> usize {
         self.names.len()
     }
+
+    /// This set without a conversation's turn-start selection. A selected
+    /// tool is advertised from its record, in its recorded place; were it
+    /// also counted as promoted once the model called it, it would take a
+    /// promotion slot and move ahead of the rest of the selection, changing
+    /// the `tools` array mid-conversation.
+    pub(crate) fn without_selected(
+        &self,
+        catalog: &CapabilityCatalog,
+        selected: &[CapabilityId],
+    ) -> Self {
+        let names = self
+            .names
+            .iter()
+            .filter(|name| {
+                catalog
+                    .definition_by_name(name)
+                    .is_none_or(|definition| !selected.contains(&definition.capability_id))
+            })
+            .cloned()
+            .collect();
+        Self { names }
+    }
 }
 
 impl Default for DisclosureCaps {
@@ -830,9 +872,7 @@ pub(crate) fn select_active_set_for_mode(
     let effective_schema_tokens = effective_entries.iter().fold(0_u32, |total, entry| {
         total.saturating_add(entry.est_schema_tokens)
     });
-    if effective_schema_tokens <= caps.defer_threshold_tokens()
-        && effective_entries.len() <= caps.max_tools
-    {
+    if !catalog.defers(policy, caps) {
         return ActiveSet {
             definitions: effective_entries
                 .iter()
@@ -902,6 +942,42 @@ pub(crate) fn select_active_set_for_mode(
             };
         }
         advertised_non_bridge_count = next_advertised_non_bridge_count;
+    }
+}
+
+/// Advertise a conversation's turn-start selection (`crate::tool_selection`)
+/// beside a deferred surface: each selected tool that is still authorized is
+/// appended once, in its recorded order. The selection has its own budget, so
+/// it is not counted against the promotion caps. A surface that is not
+/// deferred already advertises everything and is left alone.
+pub(crate) fn append_selected_tools(
+    active: &mut ActiveSet,
+    catalog: &CapabilityCatalog,
+    selected: &[CapabilityId],
+    policy: &CapabilitySurfacePolicy,
+) {
+    if !active.deferred {
+        return;
+    }
+    let mut included_names: HashSet<String> = active
+        .definitions
+        .iter()
+        .map(|definition| definition.name.to_string())
+        .collect();
+    for capability_id in selected {
+        let Some(entry) = catalog
+            .effective_entries(policy)
+            .find(|entry| &entry.definition.capability_id == capability_id)
+        else {
+            continue;
+        };
+        append_definition(
+            &mut active.definitions,
+            &mut active.advertised_tokens,
+            &mut included_names,
+            entry.definition.clone(),
+            entry.est_schema_tokens,
+        );
     }
 }
 

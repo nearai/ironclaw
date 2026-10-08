@@ -732,9 +732,13 @@ def server_env(
     reborn_home: Path,
     process_home: Path,
     extra_env: dict[str, str] | None = None,
+    base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    """`base_env` replaces the caller's own environment as the starting point,
+    for a caller that passes the server a filtered one."""
     process_home.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
+    base = os.environ if base_env is None else base_env
+    env = dict(base)
     if extra_env:
         env.update(extra_env)
     env.update(
@@ -747,7 +751,7 @@ def server_env(
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
             "RUST_BACKTRACE": "1",
-            "RUST_LOG": os.environ.get(
+            "RUST_LOG": base.get(
                 "RUST_LOG",
                 "ironclaw=warn,ironclaw_turn_runner=warn,ironclaw_webui=info",
             ),
@@ -939,6 +943,7 @@ async def start_reborn_server(
     reborn_home: Path,
     output_dir: Path,
     extra_env: dict[str, str] | None = None,
+    base_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen[str], str]:
     port = reserve_loopback_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -975,7 +980,7 @@ async def start_reborn_server(
         stdout=out,
         stderr=err,
         text=True,
-        env=server_env(reborn_home, output_dir / "os-home", process_extra_env),
+        env=server_env(reborn_home, output_dir / "os-home", process_extra_env, base_env),
         cwd=workspace_dir,
     )
     try:

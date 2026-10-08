@@ -3725,11 +3725,13 @@ dependencies = [
  "ironclaw_extension_support",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_loop_contracts",
  "ironclaw_operator",
  "ironclaw_product_contracts",
  "ironclaw_secrets",
  "ironclaw_slack_extension",
  "ironclaw_telegram_extension",
+ "ironclaw_tool_selection_jev",
  "ironclaw_trace_commons",
  "ironclaw_web_app",
  "ironclaw_web_app_extension",
@@ -5282,6 +5284,26 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_tool_selection_jev"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ironclaw_host_api",
+ "ironclaw_loop_contracts",
+ "ironclaw_network",
+ "ironclaw_tool_selection_jev",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

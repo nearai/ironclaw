@@ -271,6 +271,37 @@ See [Routines](/capabilities/routines/cron).
 
 </Accordion>
 
+<Accordion title="tool_selection — choosing tools at the start of a conversation" icon="wrench">
+
+Off by default. With many tools installed, the agent advertises a core set and finds the
+rest by searching. Turn-start tool selection asks a classifier which of the remaining tools
+a conversation's first message is likely to need, and advertises those too, so the agent
+can call them without searching first. The choice is made once per conversation.
+
+- `tool_selection.classifier` — `off` (default) or `jev`. `REBORN_TOOL_SELECTION`
+  overrides it.
+- `tool_selection.max_tools` — most tools selected per conversation (default 16, from 1
+  to 128).
+- `tool_selection.token_budget` — most schema tokens the selected tools may add
+  (default 8000, more than 0).
+- `tool_selection.jev.endpoint`, `.model`, `.api_key_env`, `.timeout_ms` — the Jev
+  decisions endpoint (an `https` URL), the model id (default `jev-latest`), the name of
+  the environment variable holding the API key (default `TYPESAFE_API_KEY`), and the
+  time allowed for one classification (default 2000 ms, at most 30000).
+
+<Warning>
+`jev` is a hosted classifier. It receives the first message of each conversation and the
+name, description and parameter names of every tool that could be selected. A subagent
+selects its own tools, so the task it was handed is sent as well.
+</Warning>
+
+If the classifier fails, the conversation carries on with the core tools and search.
+Selection adds to progressive tool disclosure, so it needs that left on.
+`ironclaw serve` refuses to start if `jev` is selected and its API key is not set, a
+value is out of range, or tool disclosure is off.
+
+</Accordion>
+
 <Accordion title="channels and providers" icon="message">
 
 Channels are not configured in this file. Slack and Telegram are turned on by installing

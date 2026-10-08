@@ -3119,6 +3119,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_manifest_url,
         runner,
         tool_disclosure,
+        tool_selection,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -4101,6 +4102,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
             tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
+            tool_selection,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,

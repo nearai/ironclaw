@@ -1,0 +1,46 @@
+[package]
+name = "ironclaw_tool_selection_jev"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Jev turn-start tool classifier for IronClaw Reborn: a ToolSelectionClassifier over a hosted Jev decisions API (TypeSafe by default)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[features]
+default = []
+# Dev-only seam: point the classifier at a loopback stub server with a policy
+# that allows it. Off in every production build, which can only reach the
+# configured HTTPS endpoint's host.
+test-support = []
+
+[dependencies]
+# Internal IronClaw crates: the loop-tier selection port this crate
+# implements, the network-policy vocabulary its requests carry, and the
+# policy-enforcing HTTP egress every request goes through. Pinned by
+# `reborn_dependency_boundaries.rs` (`tool_selection_jev_allowed`).
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_loop_contracts = { path = "../../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_network = { path = "../../../substrates/ironclaw_network", version = "0.1.0" }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+# Parses and checks the configured endpoint before its host becomes the egress pin.
+url = "2"
+zeroize = "1"
+
+[dev-dependencies]
+# Self dev-dependency turns on `test-support` for the integration tests.
+ironclaw_tool_selection_jev = { path = ".", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "net", "io-util", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

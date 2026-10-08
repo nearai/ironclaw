@@ -2471,6 +2471,7 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
         | SessionThreadError::InvalidSubagentResult { .. }
         | SessionThreadError::PreparedContextKeyMismatch { .. }
         | SessionThreadError::InvalidStructuredFinalization { .. }
+        | SessionThreadError::InvalidToolSelection { .. }
         | SessionThreadError::StructuredFinalizationPublishMismatch { .. } => {
             "thread_invalid_request"
         }

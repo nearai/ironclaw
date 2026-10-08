@@ -27,6 +27,11 @@ dumping ground.
   context-window reads (`LoadContextWindowRequest`, `ContextMessages`),
   tool-result records/references, summary artifacts, goal statements.
 - `SessionThreadError`; `ThreadMessageId` / `SummaryArtifactId`.
+- `ToolSelectionRecord` (+ `SelectedTool`, `ToolSelectionFallbackReason`,
+  `RecordToolSelectionRequest`): the deferred tools a conversation selected
+  at turn start. Written once per thread incarnation and never rewritten; a
+  second writer is handed the stored record. Stored beside the thread root,
+  so deleting the thread keeps it.
 - Re-exported attachment vocabulary (`AttachmentKind`, `AttachmentRef` from
   `ironclaw_common`) so transcript consumers need no extra dependency.
 

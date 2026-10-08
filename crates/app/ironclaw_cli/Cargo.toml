@@ -71,6 +71,11 @@ ironclaw_extension_support = { path = "../../extensions/ironclaw_extension_suppo
 ironclaw_auth = { path = "../../domains/ironclaw_auth", version = "0.1.0" }
 ironclaw_slack_extension = { path = "../../extensions/packages/slack", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "../../extensions/packages/telegram", version = "0.1.0" }
+# The Jev turn-start tool classifier (a hosted decisions API, TypeSafe's by
+# default). The binary builds it and hands composition only the neutral
+# `ToolSelectionClassifier` port, so composition never links the vendor
+# package.
+ironclaw_tool_selection_jev = { path = "../../extensions/packages/tool-selection-jev", version = "0.1.0" }
 ironclaw_web_app = { path = "../../domains/ironclaw_web_app", version = "0.1.0" }
 ironclaw_web_app_extension = { path = "../../extensions/packages/web-app", version = "0.1.0" }
 ironclaw_webui = { path = "../../product/ironclaw_webui", version = "0.1.0" }
@@ -122,6 +127,10 @@ ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version =
 # (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../../substrates/ironclaw_secrets", version = "0.1.0" }
+# The `jev_select_tools` example (`examples/jev_select_tools.rs`) builds the
+# selection port's request types by hand. Dev-only: the binary still reaches
+# the runtime only through `ironclaw_composition`.
+ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
 toml = "1.1"
 
 [[bin]]

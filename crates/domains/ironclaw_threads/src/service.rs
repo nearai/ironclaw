@@ -155,6 +155,35 @@ pub trait SessionThreadService: Send + Sync {
         ))
     }
 
+    /// Read a conversation's turn-start tool selection, or `None` before it
+    /// selected. Missing and cross-scope threads return the non-enumerating
+    /// `UnknownThread` shape. The record belongs to one thread incarnation:
+    /// a deleted-and-recreated thread id reads `None`.
+    async fn read_tool_selection(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionRecord>, SessionThreadError> {
+        let _ = (scope, thread_id);
+        Err(SessionThreadError::Backend(
+            "tool selection records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Record a conversation's turn-start tool selection. Write-once: when a
+    /// record is already stored it is returned unchanged, so racing writers
+    /// all serve the first one's list.
+    async fn record_tool_selection(
+        &self,
+        _request: crate::RecordToolSelectionRequest,
+    ) -> Result<crate::ToolSelectionRecord, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool selection records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
     async fn replay_accepted_inbound_message(
         &self,
         request: ReplayAcceptedInboundMessageRequest,
@@ -567,6 +596,21 @@ where
         self.as_ref()
             .publish_structured_finalization_message(request)
             .await
+    }
+
+    async fn read_tool_selection(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionRecord>, SessionThreadError> {
+        self.as_ref().read_tool_selection(scope, thread_id).await
+    }
+
+    async fn record_tool_selection(
+        &self,
+        request: crate::RecordToolSelectionRequest,
+    ) -> Result<crate::ToolSelectionRecord, SessionThreadError> {
+        self.as_ref().record_tool_selection(request).await
     }
 
     async fn replay_accepted_inbound_message(

@@ -167,6 +167,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
     tool_disclosure: ToolDisclosureMode,
+    /// Turn-start tool selection for the planned runtime; `None` (the
+    /// default) leaves it off. See `with_tool_selection`.
+    tool_selection: Option<ironclaw_loop_host::ToolSelectionConfig>,
     /// Test-only override for the Bridged-mode capability surface policy.
     /// `None` preserves today's forced `CapabilitySurfacePolicy::allow_all()` behavior.
     bridged_policy_override: Option<CapabilitySurfacePolicy>,
@@ -486,6 +489,14 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Bind turn-start tool selection into the planned runtime config, the
+    /// field production's composition root sets from the operator's
+    /// `[tool_selection]` settings. Needs a deferring disclosure mode.
+    pub fn with_tool_selection(mut self, config: ironclaw_loop_host::ToolSelectionConfig) -> Self {
+        self.tool_selection = Some(config);
+        self
+    }
+
     /// Select an exact disclosure comparison arm without mutating process env.
     pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
         self.tool_disclosure = mode;
@@ -770,6 +781,9 @@ impl RebornIntegrationHarnessBuilder {
             group_builder = group_builder.with_durable_milestone_event_store_for_test();
         }
         group_builder = group_builder.with_tool_disclosure_mode(self.tool_disclosure);
+        if let Some(config) = self.tool_selection {
+            group_builder = group_builder.with_tool_selection(config);
+        }
         if let Some(policy) = self.bridged_policy_override {
             group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
         }
@@ -917,6 +931,7 @@ impl RebornIntegrationHarness {
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
             tool_disclosure: ToolDisclosureMode::Off,
+            tool_selection: None,
             bridged_policy_override: None,
             budget_accounting: false,
             communication_context_provider: None,

@@ -21,7 +21,8 @@ use ironclaw_loop_host::{
     RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
     SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
     SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnLimits,
-    ToolDisclosureCapabilityDecorator, ToolDisclosureMode, verify_product_live_cancellation_probe,
+    ToolDisclosureCapabilityDecorator, ToolDisclosureMode, ToolSelectionConfig,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
 use ironclaw_outbound::ReplyAttachmentIntentPort;
@@ -147,6 +148,11 @@ pub struct DefaultPlannedRuntimeConfig {
     /// Profile-owned visibility preferences, keyed by capability-surface
     /// profile id. Values are canonical capability ids and never grant access.
     pub tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
+    /// Turn-start tool selection. `None` (the default) keeps the ordinary
+    /// disclosure surface. When `Some`, each conversation also advertises the
+    /// deferred tools its classifier chooses for the opening request,
+    /// recorded in the thread store. Requires tool disclosure.
+    pub tool_selection: Option<ToolSelectionConfig>,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Override for the default family's model availability-retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
@@ -168,6 +174,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
             tool_disclosure_profile_pins: HashMap::new(),
+            tool_selection: None,
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
         }
@@ -504,6 +511,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     SubagentCompletion(String),
     SteeringReconcileObserver(String),
     AfterTurnHooks(String),
+    ToolSelection(&'static str),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -523,6 +531,12 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             }
             Self::AfterTurnHooks(error) => {
                 write!(formatter, "after-turn hook wiring failed: {error}")
+            }
+            Self::ToolSelection(error) => {
+                write!(
+                    formatter,
+                    "turn-start tool selection is misconfigured: {error}"
+                )
             }
         }
     }
@@ -848,10 +862,34 @@ where
             mode = ?parts.config.tool_disclosure,
             "reborn tool disclosure decorator wired"
         );
-        Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+        let decorator = ToolDisclosureCapabilityDecorator::new(
             Arc::clone(&parts.capability_result_writer),
             parts.config.tool_disclosure,
-        )))
+        );
+        let decorator = match parts.config.tool_selection.clone() {
+            Some(config) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    classifier = config.classifier_name(),
+                    max_tools = config.max_tools(),
+                    "reborn turn-start tool selection bound"
+                );
+                decorator.with_tool_selection(
+                    config,
+                    Arc::clone(&parts.thread_service),
+                    parts.thread_scope.clone(),
+                )
+            }
+            None => decorator,
+        };
+        Some(Arc::new(decorator))
+    } else if parts.config.tool_selection.is_some() {
+        // Selection adds to the deferred surface and relies on the discovery
+        // bridges for everything else; without disclosure there is neither.
+        return Err(DefaultPlannedRuntimeBuildError::ToolSelection(
+            "it needs tool disclosure, which resolved to off; set REBORN_TOOL_DISCLOSURE to \
+             namespaces, bridged, compact or signatures, or leave it unset",
+        ));
     } else {
         None
     };

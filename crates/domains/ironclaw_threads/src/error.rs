@@ -79,6 +79,9 @@ pub enum SessionThreadError {
         message_id: ThreadMessageId,
         reason: &'static str,
     },
+    /// A tool-selection record, written or stored, breaks the record shape.
+    #[error("tool selection record is invalid: {reason}")]
+    InvalidToolSelection { reason: String },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
     #[error("serialization error: {0}")]
@@ -114,6 +117,7 @@ impl SessionThreadError {
             Self::StructuredFinalizationPublishMismatch { .. } => {
                 "structured_finalization_publish_mismatch"
             }
+            Self::InvalidToolSelection { .. } => "invalid_tool_selection",
             Self::GeneratedThreadId(_) => "generated_thread_id",
             Self::Serialization(_) => "serialization",
             Self::Deserialization(_) => "deserialization",

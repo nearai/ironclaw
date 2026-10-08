@@ -120,6 +120,14 @@ has_core_code=true
 has_legacy_tests=false
 has_reborn_tests=true"
 
+assert_scope \
+  "reborn tool-selection-jev package crate" \
+  "crates/extensions/packages/tool-selection-jev/src/classifier.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
 # A data-only package owns no crate BY DESIGN — no Cargo.toml, just manifest,
 # prompts, schemas and committed wasm. Its data is embedded by
 # `ironclaw_extension_support`, so it lights the same lane that crate does.

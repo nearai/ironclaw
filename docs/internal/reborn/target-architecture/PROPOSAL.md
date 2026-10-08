@@ -313,6 +313,9 @@ crates/
 │       │                               mem0 REST backend (moved from domains/, amended 2026-07-29)
 │       ├── web-app/                 ▣ ironclaw_web_app_extension [products] — outbound-only browser-push
 │       │                               ChannelAdapter + codec + target provider (added 2026-08-08)
+│       ├── tool-selection-jev/       ▣ ironclaw_tool_selection_jev [substrates] — Jev turn-start tool classifier
+│       │                               over a configured decisions endpoint (TypeSafe by default) behind the
+│       │                               loop-tier tool selection port; no manifest (added 2026-10-04)
 │       └── <ext>/                    ▢ data-only packages (github, gmail, google-*, web-access, notion-mcp,
 │                                       nearai-mcp, …): manifest.toml, prompts/, schemas/, wasm/, ◇ wasm-src/
 ├── product/                          ▢ first-party userland above the kernel

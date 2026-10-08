@@ -508,6 +508,7 @@ impl RebornIntegrationGroup {
             // General integration groups stay hermetic across production
             // default changes. Disclosure-specific tests opt into Bridged.
             tool_disclosure: ToolDisclosureMode::Off,
+            tool_selection: None,
             narrowed_bridged_policy: None,
             budget: false,
             communication_context_provider: None,
@@ -889,6 +890,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
     /// `Bridged` only by `.with_tool_disclosure_bridged()`.
     tool_disclosure: ToolDisclosureMode,
+    /// Turn-start tool selection; `None` (off) unless a test binds it with
+    /// `.with_tool_selection()`.
+    tool_selection: Option<ironclaw_loop_host::ToolSelectionConfig>,
     /// #5647 RED-pin seam: opt-in override of the forced `CapabilitySurfacePolicy::allow_all()`
     /// for Bridged-mode groups. `None` preserves today's behavior; only
     /// consumed when `tool_disclosure == Bridged` (`into_group` fails fast otherwise).
@@ -1377,6 +1381,7 @@ impl RebornIntegrationGroupBuilder {
                 // Enabler (b): test groups are hermetically pinned and never
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
+                tool_selection: self.tool_selection,
                 tool_disclosure_profile_pins: std::collections::HashMap::from([(
                     ironclaw_loop_contracts::CapabilitySurfaceProfileId::new("interactive_tools")
                         .expect("valid integration capability profile id"),

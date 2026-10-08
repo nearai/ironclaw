@@ -1,3 +1,4 @@
+// arch-exempt: large_file, in-memory thread service decomposition, plan #5662
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -50,6 +51,9 @@ struct InMemoryState {
     inbound_idempotency: HashMap<InboundIdempotencyKey, InboundIdempotencyRecord>,
     prepared_contexts: HashMap<ThreadId, crate::PreparedContextRecord>,
     structured_finalizations: HashMap<StructuredFinalizationKey, StructuredFinalizationRecord>,
+    /// Keyed by thread incarnation, like structured finalizations: kept after
+    /// the thread is deleted, never read by a recreated thread id.
+    tool_selections: HashMap<ToolSelectionKey, crate::ToolSelectionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +81,37 @@ struct InboundIdempotencyRecord {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
     replay_metadata: InboundMessageReplayMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolSelectionKey {
+    scope: ThreadScope,
+    thread_id: ThreadId,
+    incarnation_id: Uuid,
+}
+
+impl ToolSelectionKey {
+    /// The key of the thread's current incarnation, with the same
+    /// non-enumerating `UnknownThread` shape for missing and cross-scope
+    /// threads as every other read.
+    fn for_thread(
+        state: &InMemoryState,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Self, SessionThreadError> {
+        let stored = state
+            .threads
+            .get(thread_id)
+            .filter(|stored| &stored.record.scope == scope)
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        Ok(Self {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            incarnation_id: stored.incarnation_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -545,6 +580,30 @@ impl SessionThreadService for InMemorySessionThreadService {
             .structured_finalizations
             .insert(key, request.record.clone());
         Ok(request.record)
+    }
+
+    async fn read_tool_selection(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::ToolSelectionRecord>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let key = ToolSelectionKey::for_thread(&state, scope, thread_id)?;
+        Ok(state.tool_selections.get(&key).cloned())
+    }
+
+    async fn record_tool_selection(
+        &self,
+        request: crate::RecordToolSelectionRequest,
+    ) -> Result<crate::ToolSelectionRecord, SessionThreadError> {
+        request.record.validate()?;
+        let mut state = self.state.lock().await;
+        let key = ToolSelectionKey::for_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(state
+            .tool_selections
+            .entry(key)
+            .or_insert(request.record)
+            .clone())
     }
 
     async fn publish_structured_finalization_message(

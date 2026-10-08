@@ -64,6 +64,7 @@ mod tool_disclosure;
 mod tool_disclosure_mode;
 mod tool_disclosure_port;
 mod tool_search;
+mod tool_selection;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -189,6 +190,7 @@ pub use tool_diagnostics::{HostManagedToolDiagnosticEmitter, PreparedToolDiagnos
 pub use tool_disclosure::bridge_capability_ids;
 pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
 pub use tool_disclosure_port::ToolDisclosureCapabilityDecorator;
+pub use tool_selection::{ToolSelectionConfig, ToolSelectionConfigError};
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");

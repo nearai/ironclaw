@@ -31,6 +31,14 @@ and the loop tier's system-prompt content assets.
 - Progressive tool disclosure (`tool_disclosure*.rs`): catalog/selector, the
   deferring `LoopCapabilityPort` decorator, the `REBORN_TOOL_DISCLOSURE`
   switch.
+- Turn-start tool selection (`tool_selection.rs`, off unless a deployment
+  binds a `ToolSelectionConfig`): on a deferred surface, the bound
+  `ToolSelectionClassifier` chooses which deferred tools a conversation
+  advertises beside the core tools and bridges, from its opening request.
+  The host checks the answer against the candidates and the caps, records it
+  once per conversation in `ironclaw_threads`, and every later turn rebuilds
+  the same list from the record. A classifier failure is recorded as an
+  empty selection, so the conversation keeps the ordinary surface.
 - Prompt-context builders (`identity_context.rs`, `skill_context.rs`) and
   `skill_activation/` (the dissolved `ironclaw_first_party_extension_ports`
   crate, WS8).

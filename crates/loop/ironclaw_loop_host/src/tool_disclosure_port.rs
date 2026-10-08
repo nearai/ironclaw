@@ -24,13 +24,15 @@ use tracing::debug;
 
 use crate::tool_disclosure::{
     ActiveSet, CapabilityCatalog, CatalogSearchResult, DisclosureCaps, PromotedSet, TOOL_CALL_NAME,
-    TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json,
-    definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
+    TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, append_selected_tools, bridge_tool_definitions,
+    canonicalize_json, definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
     select_active_set_for_mode,
 };
 use crate::tool_search::{
     AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
 };
+use crate::tool_selection::{ToolSelectionConfig, TurnStartToolSelection};
+use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
@@ -66,6 +68,8 @@ pub struct ToolDisclosureCapabilityDecorator {
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
     mode: crate::ToolDisclosureMode,
+    /// Turn-start tool selection, off unless a deployment binds it.
+    tool_selection: Option<TurnStartToolSelection>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
@@ -78,7 +82,25 @@ impl ToolDisclosureCapabilityDecorator {
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
             mode,
+            tool_selection: None,
         }
+    }
+
+    /// Turn on turn-start tool selection (`crate::tool_selection`): each
+    /// conversation also advertises the deferred tools `config`'s classifier
+    /// chooses for its opening request, recorded in `thread_service`.
+    pub fn with_tool_selection(
+        mut self,
+        config: ToolSelectionConfig,
+        thread_service: Arc<dyn SessionThreadService>,
+        thread_scope: ThreadScope,
+    ) -> Self {
+        self.tool_selection = Some(TurnStartToolSelection::new(
+            config,
+            thread_service,
+            thread_scope,
+        ));
+        self
     }
 
     /// Wrap one run's capability port with disclosure using the exact
@@ -111,6 +133,8 @@ impl ToolDisclosureCapabilityDecorator {
             mode: self.mode,
             policy,
             profile_pins,
+            tool_selection: self.tool_selection.clone(),
+            selected_tools: tokio::sync::OnceCell::new(),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -133,6 +157,11 @@ struct ToolDisclosureCapabilityPort {
     /// Reviewed visibility preferences from the run-profile owner. These are
     /// not grants; catalog construction sees only authorized definitions.
     profile_pins: Vec<CapabilityId>,
+    tool_selection: Option<TurnStartToolSelection>,
+    /// The conversation's turn-start selection, resolved once per run before
+    /// the first surface is built. Empty when selection is off or does not
+    /// apply to this run.
+    selected_tools: tokio::sync::OnceCell<Vec<CapabilityId>>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -585,6 +614,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .iter()
             .map(|descriptor| descriptor.capability_id.clone())
             .collect();
+        if self.tool_selection.is_some() {
+            // Boxed, and skipped when selection is off, so the classifier
+            // path adds nothing to the decorator chain's poll frame.
+            Box::pin(self.resolve_selected_tools(&surface)).await?;
+        }
         let mut state = self.refresh_turn_state(&surface)?;
         let Some(state) = state.as_mut() else {
             surface.callable_capability_ids = Some(callable_capability_ids);
@@ -778,6 +812,51 @@ impl ToolDisclosureCapabilityPort {
         Ok(batch)
     }
 
+    /// Resolve the conversation's turn-start selection once for this run, so
+    /// every surface the run builds advertises the same selected tools.
+    async fn resolve_selected_tools(
+        &self,
+        surface: &VisibleCapabilitySurface,
+    ) -> Result<(), AgentLoopHostError> {
+        let Some(tool_selection) = &self.tool_selection else {
+            return Ok(());
+        };
+        if self.selected_tools.initialized() {
+            return Ok(());
+        }
+        let authorized: Vec<ProviderToolDefinition> = {
+            let authorized_ids: BTreeSet<&CapabilityId> = surface
+                .descriptors
+                .iter()
+                .map(|descriptor| &descriptor.capability_id)
+                .collect();
+            self.inner
+                .tool_definitions()?
+                .into_iter()
+                .filter(|definition| authorized_ids.contains(&definition.capability_id))
+                .collect()
+        };
+        let pins: &[CapabilityId] = if self.mode.includes_profile_pins() {
+            &self.profile_pins
+        } else {
+            &[]
+        };
+        let catalog = CapabilityCatalog::new(&authorized, pins);
+        self.selected_tools
+            .get_or_init(|| {
+                // Boxed so the classifier call's state lives on the heap, not
+                // in the decorator chain's poll frame.
+                Box::pin(tool_selection.selected_tools(
+                    &self.run_context,
+                    &catalog,
+                    &self.policy,
+                    self.caps,
+                ))
+            })
+            .await;
+        Ok(())
+    }
+
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
@@ -860,9 +939,17 @@ impl ToolDisclosureCapabilityPort {
                 metadata_fingerprint = fingerprint,
                 "rebuilt authorized deferred-tool search index"
             );
-            let promoted = self.promoted_for_scope()?;
-            let active =
+            let selected = self
+                .selected_tools
+                .get()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let promoted = self
+                .promoted_for_scope()?
+                .without_selected(&catalog, selected);
+            let mut active =
                 select_active_set_for_mode(&catalog, &promoted, self.caps, &self.policy, self.mode);
+            append_selected_tools(&mut active, &catalog, selected, &self.policy);
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
@@ -4266,6 +4353,8 @@ mod tests {
             // Unnarrowed — unit tests here exercise disclosure mechanics, not
             // profile narrowing (that's the integration tier).
             policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
+            tool_selection: None,
+            selected_tools: tokio::sync::OnceCell::new(),
             profile_pins: Vec::new(),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),

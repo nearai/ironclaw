@@ -125,6 +125,13 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Bind turn-start tool selection into the group's ONE planned runtime
+    /// config. Off by default.
+    pub fn with_tool_selection(mut self, config: ironclaw_loop_host::ToolSelectionConfig) -> Self {
+        self.tool_selection = Some(config);
+        self
+    }
+
     /// Select an exact disclosure comparison arm without mutating process env.
     pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
         self.tool_disclosure = mode;

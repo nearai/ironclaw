@@ -29,7 +29,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
-use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_loop_host::{ToolDisclosureMode, ToolSelectionConfig, ToolSelectionConfigError};
 use ironclaw_triggers::TriggerFireAccessChecker;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turn_runner::runtime::{
@@ -334,6 +334,9 @@ pub struct RebornRuntimeInput {
     pub ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
+    /// Turn-start tool selection, bound by the binary when the operator
+    /// turns it on. `None` (the default) keeps the ordinary tool surface.
+    pub tool_selection: Option<ToolSelectionConfig>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: KeepaliveSweepSettings,
     /// Explicit fire-time access checker override. Primarily a test/advanced
@@ -414,6 +417,7 @@ impl RebornRuntimeInput {
             ironhub_manifest_url,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
+            tool_selection: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: KeepaliveSweepSettings::default(),
             trigger_fire_access_checker: None,
@@ -579,6 +583,23 @@ impl RebornRuntimeInput {
     pub fn with_tool_disclosure(mut self, mode: ToolDisclosureMode) -> Self {
         self.tool_disclosure = Some(mode);
         self
+    }
+
+    /// Turn on turn-start tool selection: each conversation also advertises
+    /// up to `max_tools` deferred tools (within `token_budget` estimated
+    /// schema tokens) that `classifier` chooses for its opening request.
+    pub fn with_tool_selection(
+        mut self,
+        max_tools: usize,
+        token_budget: u32,
+        classifier: Arc<dyn ironclaw_loop_contracts::ToolSelectionClassifier>,
+    ) -> Result<Self, ToolSelectionConfigError> {
+        self.tool_selection = Some(ToolSelectionConfig::new(
+            max_tools,
+            token_budget,
+            classifier,
+        )?);
+        Ok(self)
     }
 
     pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
