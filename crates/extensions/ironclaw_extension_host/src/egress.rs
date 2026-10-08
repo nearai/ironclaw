@@ -54,6 +54,8 @@ pub struct DeclaredChannelEgress {
     pub methods: Vec<NetworkMethod>,
     pub credential_handle: Option<SecretHandle>,
     pub injection: Option<RuntimeCredentialTarget>,
+    pub header_credentials:
+        Vec<ironclaw_extension_contracts::channel::ChannelHeaderCredentialDescriptor>,
     /// Declared body-credential bindings: each maps a handle to the RFC 6901
     /// JSON pointer where the host inserts its resolved value. A request
     /// naming an undeclared handle is rejected before any transport activity.
@@ -90,6 +92,7 @@ pub struct ApprovedChannelEgress {
     /// The single host the transport must pin its network policy to.
     pub host: String,
     pub credential: Option<ApprovedChannelCredential>,
+    pub header_credentials: Vec<ApprovedChannelCredential>,
     /// Declared body credentials this call opted into: handle plus its
     /// manifest-declared `BodyJsonPointer` target. Resolution and insertion
     /// are the transport's job, host-side.
@@ -176,6 +179,11 @@ impl PolicyEnforcedChannelEgress {
             if HOST_OWNED_HEADERS
                 .iter()
                 .any(|owned| name.eq_ignore_ascii_case(owned))
+                || declared
+                    .header_credentials
+                    .iter()
+                    .any(|c| name.eq_ignore_ascii_case(&c.name))
+                || matches!(&declared.injection, Some(RuntimeCredentialTarget::Header { name: injected, .. }) if name.eq_ignore_ascii_case(injected))
             {
                 return Err(RestrictedEgressError::HostOwnedHeader { name: name.clone() });
             }
@@ -198,6 +206,21 @@ impl PolicyEnforcedChannelEgress {
                     handle: handle.as_str().to_string(),
                 });
             }
+        };
+        let header_credentials = if credential.is_some() {
+            declared
+                .header_credentials
+                .iter()
+                .map(|binding| ApprovedChannelCredential {
+                    handle: binding.handle.clone(),
+                    target: RuntimeCredentialTarget::Header {
+                        name: binding.name.clone(),
+                        prefix: None,
+                    },
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
         let mut body_credentials = Vec::new();
         for handle in &request.body_credentials {
@@ -242,6 +265,7 @@ impl PolicyEnforcedChannelEgress {
             body,
             host,
             credential,
+            header_credentials,
             body_credentials,
             request_body_limit: declared.request_body_limit_bytes,
             response_body_limit: declared
@@ -338,6 +362,7 @@ impl DeclaredChannelEgress {
             methods: descriptor.methods.clone(),
             credential_handle: descriptor.credential_handle.clone(),
             injection: descriptor.injection.clone(),
+            header_credentials: descriptor.header_credentials.clone(),
             body_credentials: descriptor.body_credentials.clone(),
             paths: descriptor.paths.clone(),
             path_prefixes: descriptor.path_prefixes.clone(),
@@ -418,6 +443,7 @@ mod tests {
             methods: vec![NetworkMethod::Post],
             credential_handle: Some(SecretHandle::new("vendor_bot_token").unwrap()),
             injection: None,
+            header_credentials: Vec::new(),
             body_credentials: Vec::new(),
             paths: Vec::new(),
             path_prefixes: Vec::new(),
@@ -495,6 +521,47 @@ mod tests {
             RestrictedEgressError::HostOwnedHeader { .. }
         ));
         assert!(transport.approved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn required_header_credentials_are_host_owned_and_bound_to_the_primary() {
+        let mut declarations = declared_vendor();
+        declarations[0].header_credentials = vec![
+            ironclaw_extension_contracts::channel::ChannelHeaderCredentialDescriptor {
+                handle: SecretHandle::new("vendor_key_id").unwrap(),
+                name: "x-vendor-key-id".into(),
+            },
+        ];
+        let (egress, transport) = egress_over(declarations);
+        egress
+            .send(post("https://vendor.example/send"))
+            .await
+            .unwrap();
+        {
+            let calls = transport.approved.lock().unwrap();
+            assert_eq!(calls[0].header_credentials.len(), 1);
+            assert_eq!(
+                calls[0].header_credentials[0].handle.as_str(),
+                "vendor_key_id"
+            );
+        }
+        let mut spoofed = post("https://vendor.example/send");
+        spoofed
+            .headers
+            .push(("X-VENDOR-KEY-ID".into(), "attacker".into()));
+        assert!(matches!(
+            egress.send(spoofed).await,
+            Err(RestrictedEgressError::HostOwnedHeader { .. })
+        ));
+        assert_eq!(transport.approved.lock().unwrap().len(), 1);
+        let mut anonymous = post("https://vendor.example/send");
+        anonymous.credential = None;
+        egress.send(anonymous).await.unwrap();
+        assert!(
+            transport.approved.lock().unwrap()[1]
+                .header_credentials
+                .is_empty()
+        );
     }
 
     #[tokio::test]

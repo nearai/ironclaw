@@ -89,7 +89,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Always Available
 
-- **Multi-channel** - REPL, HTTP webhooks, WASM channels (Telegram, Slack), and web gateway
+- **Multi-channel** - REPL, HTTP webhooks, Telegram, Slack, [Sendblue iMessage/SMS](crates/extensions/packages/sendblue/README.md), and web gateway
 - **Docker Sandbox** - Isolated container execution with per-job tokens and orchestrator/worker pattern
 - **Web Gateway** - Browser UI with real-time SSE/WebSocket streaming
 - **Routines** - Cron schedules, event triggers, webhook handlers for background automation

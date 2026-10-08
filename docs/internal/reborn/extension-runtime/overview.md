@@ -235,6 +235,17 @@ Notes on the sections:
   `with_session_reply_channel`) gets the host's projection sink, attached by
   composition through the same `surfaces.reply` slot every package-bound
   sink uses. Every delivery section binds `ChannelDelivery`.
+- **Additional credential headers:** a channel egress target may declare up to
+  eight `header_credentials = [{ handle = "vendor_key_id", name = "x-key-id" }]`.
+  These are required host-side injections when the adapter requests that target's
+  primary `credential_handle`. Every handle must be a secret administrator field;
+  duplicate handles/header names, collisions with the primary header, and
+  transport-owned headers fail manifest validation. Adapters may not supply an
+  injected header. Missing any value prevents network I/O. Absent/empty preserves
+  existing manifests and their serialized form. Tests:
+  `ironclaw_extension_contracts::channel::tests::multiple_header_credentials_parse_and_validate`,
+  `ironclaw_extension_host::egress::tests::required_header_credentials_are_host_owned_and_bound_to_the_primary`,
+  and `ironclaw_extension_host::channel_egress::tests::additional_header_credentials_reach_wire_and_missing_values_fail_closed`.
 - **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
   segment-bounded `path_prefixes`, and request/response byte limits. Empty path
   lists preserve the legacy host+method policy. Path-placeholder credentials

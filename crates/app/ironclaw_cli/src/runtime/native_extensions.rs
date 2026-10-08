@@ -27,7 +27,10 @@ use secrecy::ExposeSecret as _;
 /// Every native factory the binary assembles (`first_party`-runtime
 /// extensions bind their adapters through these).
 pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensionFactory>> {
-    vec![Arc::new(TelegramExtensionFactory)]
+    vec![
+        Arc::new(TelegramExtensionFactory),
+        Arc::new(SendblueExtensionFactory),
+    ]
 }
 
 /// The binary-assembled channel extension set.
@@ -46,6 +49,16 @@ pub(crate) fn bundled_channel_extensions(
     web_app_vapid_subject: Option<String>,
 ) -> BundledChannelExtensions {
     let bindings = vec![
+        ChannelExtensionBinding {
+            extension_id: ExtensionId::from_trusted("sendblue".to_string()),
+            surfaces: ironclaw_sendblue_extension::sendblue_surfaces(),
+            preference_target_codec: Some(Arc::new(
+                ironclaw_sendblue_extension::SendbluePreferenceTargetCodec,
+            )),
+            outbound_target_provider: None,
+            first_party_initializer: None,
+            registration_document_path: None,
+        },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("slack".to_string()),
             // Every half: a webhook ingress, a message reply, a message
@@ -185,6 +198,26 @@ impl FirstPartyChannelInitializer for WebAppChannelInitializer {
 /// `runtime.service = "telegram.extension/v1"` — the Telegram extension: the
 /// bot channel, the linked-device auth surface, and the linked-account
 /// standard-op tools, all bound from one entrypoint.
+struct SendblueExtensionFactory;
+#[async_trait]
+impl NativeExtensionFactory for SendblueExtensionFactory {
+    fn service(&self) -> &str {
+        "sendblue.extension/v1"
+    }
+    async fn load(&self, _ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError> {
+        Ok(Box::new(SendblueExtensionEntrypoint))
+    }
+}
+struct SendblueExtensionEntrypoint;
+impl ExtensionEntrypoint for SendblueExtensionEntrypoint {
+    fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+        Ok(ExtensionBindings {
+            channel: ironclaw_sendblue_extension::sendblue_surfaces(),
+            ..ExtensionBindings::default()
+        })
+    }
+}
+
 struct TelegramExtensionFactory;
 
 #[async_trait::async_trait]
@@ -332,6 +365,21 @@ mod tests {
         assert!(
             telegram.preference_target_codec.is_some(),
             "the shipping Telegram binding must expose outbound preference targets"
+        );
+        let sendblue = bindings
+            .iter()
+            .find(|binding| binding.extension_id.as_str() == "sendblue")
+            .expect("Sendblue is linked into the shipping binary");
+        assert!(sendblue.preference_target_codec.is_some());
+        assert!(
+            sendblue.surfaces.ingress.is_some()
+                && sendblue.surfaces.reply.is_some()
+                && sendblue.surfaces.delivery.is_some()
+        );
+        assert!(
+            bundled_native_extension_factories()
+                .iter()
+                .any(|factory| factory.service() == "sendblue.extension/v1")
         );
     }
 

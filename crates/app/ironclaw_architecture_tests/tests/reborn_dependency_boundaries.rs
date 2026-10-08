@@ -1945,6 +1945,9 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_config",
             "ironclaw_trace_commons",
             "ironclaw_webui",
+            // The binary links the concrete Sendblue package; composition
+            // continues to consume only neutral extension bindings.
+            "ironclaw_sendblue_extension",
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
             // The web-app channel package (adapter/codec/target provider) and

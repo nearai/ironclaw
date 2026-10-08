@@ -66,6 +66,9 @@ run_lib_test_exact() {
 
 run_architecture_boundaries() {
   run_test ironclaw_architecture_tests reborn_dependency_boundaries
+  # Pins extension-runtime/overview.md's multi-header channel credential contract.
+  run_lib_test_exact ironclaw_extension_host channel_egress::tests::additional_header_credentials_reach_wire_and_missing_values_fail_closed
+  run_test ironclaw_sendblue_extension channel_conformance
   # Pins docs/internal/reborn/contracts/turns-agent-loop.md: terminal model
   # provider authentication and transcript persistence failures remain durable,
   # actionable, redacted, and never issue duplicate model/tool side effects.

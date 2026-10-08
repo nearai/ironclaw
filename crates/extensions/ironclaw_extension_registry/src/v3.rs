@@ -892,6 +892,9 @@ fn validate_channel_admin_configuration(
         if let Some(handle) = &egress.credential_handle {
             require_field(handle, true, "channel egress credential")?;
         }
+        for credential in &egress.header_credentials {
+            require_field(&credential.handle, true, "channel egress header credential")?;
+        }
         for body_credential in &egress.body_credentials {
             require_field(
                 &body_credential.handle,

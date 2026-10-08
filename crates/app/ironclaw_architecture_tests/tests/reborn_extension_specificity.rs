@@ -859,8 +859,11 @@ const REBORN_LAYERS: &[&str] = &[
 /// Crates that are the concrete product code (present or planned). A missing
 /// directory is tolerated so the planned extension crates are covered from
 /// the day they appear.
-const CONCRETE_EXTENSION_CRATES: &[&str] =
-    &["ironclaw_slack_extension", "ironclaw_telegram_extension"];
+const CONCRETE_EXTENSION_CRATES: &[&str] = &[
+    "ironclaw_slack_extension",
+    "ironclaw_telegram_extension",
+    "ironclaw_sendblue_extension",
+];
 
 /// Generic-side crates excluded from the scan for a documented structural
 /// reason (see the module header).

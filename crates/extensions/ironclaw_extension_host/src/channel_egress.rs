@@ -268,6 +268,7 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
         let approved_credentials = approved
             .credential
             .iter()
+            .chain(approved.header_credentials.iter())
             .chain(approved.body_credentials.iter());
         for credential in approved_credentials {
             let material = self
@@ -540,11 +541,84 @@ mod tests {
             body: b"{}".to_vec(),
             host: host.to_string(),
             credential,
+            header_credentials: Vec::new(),
             body_credentials: Vec::new(),
             request_body_limit: None,
             response_body_limit: 64 * 1024,
             timeout_ms: 5_000,
         }
+    }
+
+    #[tokio::test]
+    async fn additional_header_credentials_reach_wire_and_missing_values_fail_closed() {
+        // safety: execute calls below exercise a recording HTTP transport, not DB operations.
+        use ironclaw_secrets::SecretStorePort as _;
+        let scope = test_scope();
+        let store = Arc::new(SecretStore::ephemeral());
+        let primary = SecretHandle::new("vendor_secret").unwrap();
+        let secondary = SecretHandle::new("vendor_key_id").unwrap();
+        store
+            .put(
+                scope.clone(),
+                primary.clone(),
+                SecretString::from("fixture-secret".to_string()),
+                None,
+            )
+            .await
+            .unwrap();
+        let credentials = Arc::new(SecretStoreChannelEgressCredentials::new(
+            store.clone(),
+            scope.clone(),
+        ));
+        let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope.clone());
+        let mut plan = approved(
+            "https://vendor.example/send",
+            "vendor.example",
+            Some(ApprovedChannelCredential {
+                handle: primary,
+                target: RuntimeCredentialTarget::Header {
+                    name: "x-secret".into(),
+                    prefix: None,
+                },
+            }),
+        );
+        plan.header_credentials.push(ApprovedChannelCredential {
+            handle: secondary.clone(),
+            target: RuntimeCredentialTarget::Header {
+                name: "x-key-id".into(),
+                prefix: None,
+            },
+        });
+        assert!(matches!(
+            transport.execute(plan.clone()).await,
+            Err(RestrictedEgressError::AuthRequired { .. })
+        ));
+        assert!(requests.lock().unwrap().is_empty());
+        store
+            .put(
+                scope,
+                secondary,
+                SecretString::from("fixture-key".to_string()),
+                None,
+            )
+            .await
+            .unwrap();
+        transport.execute(plan).await.unwrap();
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0]
+                .headers
+                .iter()
+                .any(|(name, value)| name == "x-secret" && value == "fixture-secret")
+        );
+        assert!(
+            calls[0]
+                .headers
+                .iter()
+                .any(|(name, value)| name == "x-key-id" && value == "fixture-key")
+        );
     }
 
     #[tokio::test]

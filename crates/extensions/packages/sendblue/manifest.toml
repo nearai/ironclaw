@@ -1,0 +1,76 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "sendblue"
+name = "Sendblue"
+version = "0.1.0"
+description = "Chat with IronClaw through direct iMessage and SMS text messages on a Sendblue line."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "sendblue.extension/v1"
+
+[admin_configuration]
+group_id = "extension.sendblue"
+display_name = "Sendblue messaging configuration"
+description = "Create a Sendblue account, verify your personal phone, and configure a public HTTPS receive webhook at /webhooks/extensions/sendblue/messages. See the package README for free-plan setup."
+fields = [
+  { handle = "sendblue_api_key", label = "API key ID", secret = true, required = true },
+  { handle = "sendblue_api_secret", label = "API secret key", secret = true, required = true },
+  { handle = "sendblue_webhook_secret", label = "Webhook shared secret", secret = true, required = true },
+  { handle = "sendblue_from_number", label = "Assigned Sendblue line", secret = false, required = true, description = "The assigned +E164 number, not your personal phone." },
+  { handle = "sendblue_allow_from", label = "Allowed sender phones", secret = false, required = true, description = "Comma-separated +E164 numbers. Empty denies all; * explicitly allows all. IronClaw pairing still applies." },
+]
+
+[channel]
+id = "messages"
+display_name = "iMessage / SMS"
+conversation_model = "continuous"
+commands = ["model", "status", "new", "stop", "interrupt"]
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
+
+[channel.connection]
+provider = "sendblue"
+strategy = "web_generated_code"
+instructions = "Text the generated code from your verified personal phone to the assigned Sendblue line. Free-plan contacts must also be verified with Sendblue."
+input_placeholder = ""
+submit_label = "Connect phone"
+error_message = "Phone pairing failed. Generate a new code and text it to the assigned line."
+connection_success_message = "Your phone is connected. Text the assigned line to talk to IronClaw."
+
+[channel.connection.notices]
+connect_required = "Connect your phone from the Sendblue extension in IronClaw, then text the generated code here."
+paired = "Phone connected. You can now chat with IronClaw here."
+already_paired_same_user = "This phone is already connected to your IronClaw user."
+already_bound_to_other_user = "This phone is already connected to another IronClaw user."
+expired_or_unknown = "That code expired or is unknown. Generate a new code in IronClaw."
+
+[channel.ingress]
+route_suffix = "messages"
+method = "post"
+body_limit_bytes = 65536
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "sendblue_webhook_secret"
+header = "sb-signing-secret"
+
+[[channel.egress]]
+scheme = "https"
+host = "api.sendblue.com"
+methods = ["post"]
+paths = ["/api/send-message"]
+credential_handle = "sendblue_api_secret"
+injection = { type = "header", name = "sb-api-secret-key" }
+header_credentials = [{ handle = "sendblue_api_key", name = "sb-api-key-id" }]
+request_body_limit_bytes = 131072
+response_body_limit_bytes = 65536
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = false
+can_reply_in_threads = false

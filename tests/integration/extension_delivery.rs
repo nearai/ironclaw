@@ -3758,3 +3758,221 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+/// Sendblue uses a real installed extension, generated-code phone pairing,
+/// production ingress, the real model decorator chain, and coordinated replies.
+#[tokio::test(flavor = "multi_thread")]
+async fn sendblue_phone_pairing_and_text_reply_use_the_production_host() {
+    Box::pin(sendblue_phone_pairing_and_text_reply_impl()).await;
+}
+
+async fn sendblue_phone_pairing_and_text_reply_impl() {
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .extension_delivery()
+        .await
+        .expect("group");
+    let services = reborn_services(&group);
+    let inbound = group
+        .thread("sendblue-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("thread");
+    let assembly = services
+        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+            thread_service: inbound.thread_service_for_test().expect("threads"),
+            turn_coordinator: inbound.turn_coordinator_for_test(),
+            run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
+            identity: ChannelHostIdentity {
+                tenant_id: inbound.binding.tenant_id.clone(),
+                agent_id: inbound.binding.agent_id.clone().expect("agent"),
+                project_id: inbound.binding.project_id.clone(),
+                operator_user_id: inbound.binding.actor_user_id.clone(),
+            },
+        })
+        .expect("production assembly");
+    configure_admin_group(
+        &group,
+        "extension.sendblue",
+        0,
+        json!([
+            {"handle":"sendblue_api_key","value":"fixture-sendblue-key"},
+            {"handle":"sendblue_api_secret","value":"fixture-sendblue-secret"},
+            {"handle":"sendblue_webhook_secret","value":"fixture-sendblue-webhook"},
+            {"handle":"sendblue_from_number","value":"+15555550100"},
+            {"handle":"sendblue_allow_from","value":"+15555550101"}
+        ]),
+    )
+    .await;
+    let lifecycle = group
+        .thread("sendblue-install")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id":"sendblue"}),
+            ),
+            RebornScriptedReply::text("installed"),
+        ])
+        .build()
+        .await
+        .expect("lifecycle thread");
+    lifecycle
+        .submit_turn("Install Sendblue")
+        .await
+        .expect("install");
+    let binding = wait_for_production_registration(&assembly, services, "sendblue").await;
+    let ingress = VendorIngress::production(services.extension_ingress_parts().expect("ingress"));
+    let payload = |id: &str, text: &str| {
+        json!({"from_number":"+15555550101","to_number":"+15555550100","message_handle":id,"content":text,"status":"RECEIVED","is_outbound":false}).to_string()
+    };
+    let route = "/webhooks/extensions/sendblue/messages";
+    let headers = || vec![("sb-signing-secret", "fixture-sendblue-webhook".to_string())];
+    let (code, _, _) = services
+        .pairing_issue_for_test("sendblue", &inbound.binding.actor_user_id)
+        .await
+        .expect("pair code");
+    assert_eq!(
+        ingress
+            .post(route, &payload("pair-1", &code), headers())
+            .await,
+        StatusCode::OK
+    );
+    ingress.drain().await;
+    assert!(
+        group
+            .channel_connection()
+            .expect("connection")
+            .caller_channel_connected("sendblue", &inbound.binding.actor_user_id)
+            .await
+            .expect("paired")
+    );
+    let body = payload("message-1", "Reply with cobalt");
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "sb-signing-secret".into(),
+        },
+        "sendblue",
+    );
+    let (scope, actor) = preresolve_vendor_turn_scope(
+        &binding,
+        &ironclaw_sendblue_extension::SendblueChannelAdapter,
+        "sendblue",
+        "sendblue",
+        &[
+            ("sendblue_from_number".into(), "+15555550100".into()),
+            ("sendblue_allow_from".into(), "+15555550101".into()),
+        ],
+        &evidence,
+        &body,
+        false,
+    )
+    .await;
+    assert_eq!(actor, inbound.binding.actor_user_id);
+    group
+        .register_scope_script_for_test(
+            scope.clone(),
+            "sendblue-reply",
+            [RebornScriptedReply::text("cobalt")],
+        )
+        .await
+        .expect("scripted SDK seam");
+    let before = inbound.captured_network_requests_for_test().len();
+    assert_eq!(
+        ingress
+            .post(route, &body, vec![("sb-signing-secret", "wrong".into())])
+            .await,
+        StatusCode::UNAUTHORIZED
+    );
+    ingress.drain().await;
+    assert_eq!(inbound.captured_network_requests_for_test().len(), before);
+    assert_eq!(ingress.post(route, &body, headers()).await, StatusCode::OK);
+    ingress.drain().await;
+    // The fixture provider only accepted/queued the message. Persist uncertainty,
+    // never Delivered, and do not leave an automatic replayable attempt.
+    let (outbound_store, _, _, _, _) = services
+        .outbound_delivery_stores_for_test()
+        .expect("outbound stores");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let attempts = outbound_store
+            .list_delivery_attempts(scope.clone())
+            .await
+            .expect("attempts");
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.status != OutboundDeliveryStatus::Delivered)
+        );
+        if attempts
+            .iter()
+            .any(|attempt| attempt.status == OutboundDeliveryStatus::Unknown)
+            && attempts.iter().all(|attempt| {
+                !matches!(
+                    attempt.status,
+                    OutboundDeliveryStatus::Prepared
+                        | OutboundDeliveryStatus::Sending
+                        | OutboundDeliveryStatus::Pending
+                )
+            })
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queued reply must settle Unknown"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = inbound.captured_network_requests_for_test();
+        if let Some(sent) = requests.iter().find(|r| {
+            r.url == "https://api.sendblue.com/api/send-message"
+                && String::from_utf8_lossy(&r.body).contains("cobalt")
+        }) {
+            let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(body["number"], "+15555550101");
+            assert_eq!(body["from_number"], "+15555550100");
+            assert!(
+                sent.headers
+                    .iter()
+                    .any(|(n, v)| n == "sb-api-key-id" && v == "fixture-sendblue-key")
+            );
+            assert!(
+                sent.headers
+                    .iter()
+                    .any(|(n, v)| n == "sb-api-secret-key" && v == "fixture-sendblue-secret")
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reply must reach provider wire"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for secret in [
+        "fixture-sendblue-key",
+        "fixture-sendblue-secret",
+        "fixture-sendblue-webhook",
+    ] {
+        lifecycle
+            .assert_conversation_history_lacks(secret)
+            .await
+            .expect("no credentials in transcript");
+    }
+    assert_eq!(ingress.post(route, &body, headers()).await, StatusCode::OK);
+    ingress.drain().await;
+    assert_eq!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .filter(|r| r.url == "https://api.sendblue.com/api/send-message"
+                && String::from_utf8_lossy(&r.body).contains("cobalt"))
+            .count(),
+        1
+    );
+    drop(assembly);
+}

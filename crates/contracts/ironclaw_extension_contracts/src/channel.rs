@@ -435,6 +435,52 @@ impl ChannelDescriptor {
                     });
                 }
             }
+            if egress.header_credentials.len() > 8
+                || (!egress.header_credentials.is_empty() && egress.credential_handle.is_none())
+            {
+                return Err(ChannelDescriptorError::InvalidEgressInjection {
+                    host: egress.host.clone(),
+                });
+            }
+            let primary_header = match &egress.injection {
+                Some(ironclaw_host_api::http::RuntimeCredentialTarget::Header { name, .. }) => {
+                    Some(name.as_str())
+                }
+                None => Some("authorization"),
+                _ => None,
+            };
+            let mut header_names = std::collections::HashSet::new();
+            let mut header_handles = std::collections::HashSet::new();
+            for credential in &egress.header_credentials {
+                let target = ironclaw_host_api::http::RuntimeCredentialTarget::Header {
+                    name: credential.name.clone(),
+                    prefix: None,
+                };
+                if target.validate_declaration().is_err()
+                    || [
+                        "authorization",
+                        "host",
+                        "content-length",
+                        "connection",
+                        "transfer-encoding",
+                        "upgrade",
+                        "proxy-authorization",
+                        "te",
+                        "trailer",
+                        "content-type",
+                    ]
+                    .iter()
+                    .any(|name| credential.name.eq_ignore_ascii_case(name))
+                    || primary_header.is_some_and(|name| credential.name.eq_ignore_ascii_case(name))
+                    || egress.credential_handle.as_ref() == Some(&credential.handle)
+                    || !header_names.insert(credential.name.to_ascii_lowercase())
+                    || !header_handles.insert(&credential.handle)
+                {
+                    return Err(ChannelDescriptorError::InvalidEgressInjection {
+                        host: egress.host.clone(),
+                    });
+                }
+            }
             let mut seen_body_handles: Vec<&str> = Vec::new();
             for body_credential in &egress.body_credentials {
                 if !body_credential.pointer.starts_with('/')
@@ -713,6 +759,10 @@ pub struct ChannelEgressDescriptor {
     /// means no body credential may be injected for this target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub body_credentials: Vec<ChannelBodyCredentialDescriptor>,
+    /// Additional required headers, injected host-side whenever this target's
+    /// primary credential is requested. Adapters cannot supply these headers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_credentials: Vec<ChannelHeaderCredentialDescriptor>,
     /// Exact URL paths this target permits. Empty preserves the legacy
     /// host+method-only policy; first-party manifests should declare paths.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -731,6 +781,14 @@ pub struct ChannelEgressDescriptor {
     /// clamps declarations to its global safety ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body_limit_bytes: Option<u64>,
+}
+
+/// One additional host-custodied credential for a multi-header API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelHeaderCredentialDescriptor {
+    pub handle: SecretHandle,
+    pub name: String,
 }
 
 /// Maximum request or response body bound a channel manifest may request.
@@ -1406,6 +1464,41 @@ kind = "authenticated_session"
         }
         assert!(RouteSuffix::new("events").is_ok());
         assert!(RouteSuffix::new("events-v2_beta").is_ok());
+    }
+
+    #[test]
+    fn multiple_header_credentials_parse_and_validate() {
+        let source = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\nheader_credentials = [{ handle = \"vendor_key_id\", name = \"x-vendor-key-id\" }]",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&source).unwrap();
+        channel.validate().unwrap();
+    }
+
+    #[test]
+    fn additional_header_credentials_reject_conflicting_or_unsafe_headers() {
+        for name in [
+            "host",
+            "Content-Length",
+            "connection",
+            "authorization",
+            "x-bad\r\nheader",
+        ] {
+            let mut channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+            channel.egress[0].header_credentials = vec![ChannelHeaderCredentialDescriptor {
+                handle: SecretHandle::new("vendor_key_id").unwrap(),
+                name: name.into(),
+            }];
+            assert!(channel.validate().is_err(), "accepted {name:?}");
+        }
+        let mut channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        let item = ChannelHeaderCredentialDescriptor {
+            handle: SecretHandle::new("vendor_key_id").unwrap(),
+            name: "x-vendor-id".into(),
+        };
+        channel.egress[0].header_credentials = vec![item.clone(), item];
+        assert!(channel.validate().is_err());
     }
 
     #[test]

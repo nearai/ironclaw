@@ -1778,3 +1778,27 @@ fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
     assert_eq!(rehydrated_descriptor.standard_op, None);
     assert_eq!(rehydrated_descriptor.id, descriptor.id);
 }
+
+#[test]
+fn additional_channel_headers_require_secret_admin_fields() {
+    let source = ACME_MANIFEST.replace("credential_handle = \"acme_bot_token\"", "credential_handle = \"acme_bot_token\"\nheader_credentials = [{ handle = \"acme_secondary_key\", name = \"x-acme-key\" }]");
+    assert!(
+        parse_v3(&source).is_err(),
+        "undeclared credential must fail closed"
+    );
+    let source = source.replacen("fields = [", "fields = [\n  { handle = \"acme_secondary_key\", label = \"Second key\", secret = true, required = true },", 1);
+    let record = parse_v3(&source).expect("declared credential parses");
+    assert_eq!(
+        record.resolved().channel.as_ref().unwrap().egress[0]
+            .header_credentials
+            .len(),
+        1
+    );
+    assert!(
+        parse_v3(&source.replace(
+            "label = \"Second key\", secret = true",
+            "label = \"Second key\", secret = false"
+        ))
+        .is_err()
+    );
+}

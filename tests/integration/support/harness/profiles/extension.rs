@@ -1940,6 +1940,48 @@ pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 /// assembly in `crates/app/ironclaw_cli/src/runtime/native_extensions.rs`
 /// (mirrored here because the integration harness composes its own runtime
 /// and cannot depend on the CLI crate).
+struct SendblueFixtureFactory;
+#[async_trait::async_trait]
+impl ironclaw_extension_host::NativeExtensionFactory for SendblueFixtureFactory {
+    fn service(&self) -> &str {
+        "sendblue.extension/v1"
+    }
+    async fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(SendblueFixtureEntrypoint))
+    }
+}
+struct SendblueFixtureEntrypoint;
+impl ironclaw_extension_host::ExtensionEntrypoint for SendblueFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            channel: sendblue_channel_extension_binding().surfaces,
+            ..Default::default()
+        })
+    }
+}
+fn sendblue_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("sendblue".into()),
+        surfaces: ironclaw_sendblue_extension::sendblue_surfaces(),
+        preference_target_codec: Some(Arc::new(
+            ironclaw_sendblue_extension::SendbluePreferenceTargetCodec,
+        )),
+        outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
+    }
+}
+
 struct TelegramFixtureFactory;
 
 /// Hermetic native factory for WebUI/lifecycle tests that install the bundled
@@ -2067,6 +2109,12 @@ fn delivery_vendor_router(
     if request.url.contains("/api/conversations.replies") {
         return Some((200, br#"{"ok":true,"messages":[]}"#.to_vec()));
     }
+    if request.url == "https://api.sendblue.com/api/send-message" {
+        return Some((
+            200,
+            br#"{"message_handle":"fixture-sendblue-out","status":"QUEUED"}"#.to_vec(),
+        ));
+    }
     if request.url.contains("api.telegram.org") {
         if request.url.contains("api.telegram.org/file/") {
             // The manifest's path-prefixed download target streams raw bytes.
@@ -2128,6 +2176,12 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
             standalone_all_effects(),
         ));
     }
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ids::ExtensionId::new("sendblue")?,
+            standalone_all_effects(),
+        ));
+    }
     let network_egress = Arc::new(
         RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
             .with_vendor_router(delivery_vendor_router_with_flaky_get_file()),
@@ -2135,6 +2189,8 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     profile.options = profile
         .options
         .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
+        .with_native_extension_factory(Arc::new(SendblueFixtureFactory))
+        .with_channel_extension_binding(sendblue_channel_extension_binding())
         .with_channel_extension_binding(slack_channel_extension_binding())
         .with_channel_extension_binding(telegram_channel_extension_binding())
         .with_recording_network_egress(network_egress);

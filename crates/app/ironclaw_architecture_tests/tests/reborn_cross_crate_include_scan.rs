@@ -111,7 +111,12 @@ const WS0_CROSS_CRATE_INCLUDE_SITES: usize = 19;
 /// that removes a reach-in must lower this constant in the same change and a PR
 /// that adds one is red. When it reaches **0**, flip `REPORT_ONLY` and delete
 /// this constant with the gate that reads it.
-const CROSS_CRATE_INCLUDE_SITES: usize = 17;
+// The Sendblue package follows the current bundled-package contract: its
+// manifest is embedded by extension_support, as Slack/Telegram's are. This
+// adds one site in that existing category; an upward runtimes -> products
+// dependency would violate the layer matrix. Keep this explicit inventory
+// amendment with the package until #7093 resolves the package-asset ownership.
+const CROSS_CRATE_INCLUDE_SITES: usize = 18;
 
 /// This file's own fixtures are include-shaped strings; skip it the way the
 /// shared type-def scanner skips the ratchet files (defense in depth).
