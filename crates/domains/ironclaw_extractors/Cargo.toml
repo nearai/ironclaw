@@ -17,4 +17,4 @@ layer = "substrates"
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
 pdf-extract = "0.12"
 thiserror = "2"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }

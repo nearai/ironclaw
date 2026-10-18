@@ -38,7 +38,7 @@ async-trait = "0.1"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = "0.14"
-libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.10", default-features = false, features = ["core", "replication", "remote", "tls"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 futures = "0.3"
 ironclaw_event_log = { path = "../../events/ironclaw_event_log" }

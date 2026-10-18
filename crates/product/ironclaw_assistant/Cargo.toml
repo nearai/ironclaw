@@ -113,7 +113,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # embedded; Postgres leg needs a DB URL.
 deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
-libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.10", default-features = false, features = ["core", "replication", "remote", "tls"] }
 # Captures per-test tracing output so the command-palette parse/rejection
 # debug! logging (item 5 of the PR-2 review fix wave) can be asserted on
 # through the caller, not just trusted by inspection.
