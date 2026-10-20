@@ -7602,6 +7602,8 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         atomic::{AtomicBool, Ordering},
     };
     let temp = tempfile::tempdir().expect("isolated fixture");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("separate fixture workspace");
     let home = temp.path().join("reborn-home");
     let legacy_home = temp.path().join("v1-home");
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("fixture MCP");
@@ -7695,7 +7697,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
             }
         })),
     );
-    let enroll = isolated_no_llm_command(temp.path(), &home)
+    let enroll = isolated_no_llm_command(&workspace, &home)
         .env("IRONCLAW_BASE_DIR", &legacy_home)
         .args([
             "extension",
@@ -7714,7 +7716,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         "enrollment: {}",
         String::from_utf8_lossy(&enroll.stderr)
     );
-    let install = isolated_no_llm_command(temp.path(), &home)
+    let install = isolated_no_llm_command(&workspace, &home)
         .env("IRONCLAW_BASE_DIR", &legacy_home)
         .args(["extension", "install", "mcp-pipe-fixture", "--json"])
         .output()
@@ -7725,7 +7727,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         String::from_utf8_lossy(&install.stderr)
     );
     let import = |token: &str, account: Option<&str>| {
-        let mut command = isolated_no_llm_command(temp.path(), &home);
+        let mut command = isolated_no_llm_command(&workspace, &home);
         command.env("IRONCLAW_BASE_DIR", &legacy_home);
         command.args([
             "extension",
@@ -7737,18 +7739,34 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         if let Some(account) = account {
             command.args(["--expected-account", account]);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+        let fifo_path = temp.path().join("private-input.fifo");
+        let fifo_name =
+            std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).expect("FIFO path");
+        // SAFETY: a NUL-terminated path inside this test's private directory,
+        // no other owner, and mode 0600; no plaintext regular file is created.
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&fifo_path)
+            .expect("private FIFO reader");
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&fifo_path)
+            .expect("private FIFO writer");
+        std::fs::remove_file(&fifo_path).expect("unlink private FIFO before handoff");
+        let child = command
+            .stdin(Stdio::from(reader))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("private setup process");
-        child
-            .stdin
-            .take()
-            .expect("pipe")
+        writer
             .write_all(token.as_bytes())
             .expect("private pipe input");
+        drop(writer);
         let output = child.wait_with_output().expect("private setup exit");
         assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
         assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
