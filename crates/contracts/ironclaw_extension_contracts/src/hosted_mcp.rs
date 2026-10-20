@@ -194,7 +194,7 @@ impl<'de> Deserialize<'de> for HostedMcpEndpoint {
 /// Caller-selected hosted MCP authentication shape. Credentials never cross
 /// this request boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostedMcpAuthSelection {
     /// Probe without credentials during registration. Resolve no-auth or OAuth
     /// only when the protocol proves it; an otherwise unexplained 401 requires
@@ -212,6 +212,7 @@ pub enum HostedMcpAuthSelection {
 
 /// Untrusted request to create or join a caller-owned hosted MCP package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegisterHostedMcpRequest {
     pub desired_id: LifecyclePackageId,
     pub desired_name: String,
@@ -250,6 +251,32 @@ pub struct HostedMcpDiscoveredToolAnnotations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_refuses_inline_headers_tokens_and_enrollment_flags() {
+        let request = serde_json::json!({
+            "desired_id":"local", "desired_name":"Local",
+            "endpoint":"http://127.0.0.1:43127/mcp",
+            "auth_selection":{"kind":"bearer"}
+        });
+        for field in [
+            "headers",
+            "authorization",
+            "bearer",
+            "token",
+            "allow_loopback",
+        ] {
+            let mut supplied = request.clone();
+            supplied[field] = serde_json::json!("synthetic-never-accepted");
+            assert!(
+                serde_json::from_value::<RegisterHostedMcpRequest>(supplied).is_err(),
+                "{field}"
+            );
+        }
+        let mut supplied = request;
+        supplied["auth_selection"]["token"] = serde_json::json!("synthetic-never-accepted");
+        assert!(serde_json::from_value::<RegisterHostedMcpRequest>(supplied).is_err());
+    }
 
     #[test]
     fn register_request_wire_omits_auth_when_not_supplied() {

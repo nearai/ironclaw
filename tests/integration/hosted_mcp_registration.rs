@@ -3206,3 +3206,136 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
 // `crates/extensions/ironclaw_extension_host/src/product_lifecycle.rs`'s
 // `concurrent_register_and_import_bundle_do_not_deadlock` test, which can
 // construct `ExtensionLifecycleManager` directly with that double.
+
+/// Exact local registration uses the real network boundary, not the HTTPS
+/// fixture URL mapper. Registration, setup, discovery, grant and dispatch all
+/// consume the same enrolled endpoint and scoped credential account.
+#[tokio::test]
+async fn enrolled_loopback_bearer_reaches_native_discovery_and_call() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::ExactBearerWithoutChallenge {
+            token: "loopback-fixture-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only(
+            "search",
+            json!("reflected loopback-fixture-token"),
+        )],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "local-mcp-enrollment-owner",
+        Some(live_network_egress()),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("local-mcp-enrollment-owner");
+    let model_outcome = invoke_with_standalone_approval(
+        &services,
+        "builtin.extension_register_hosted_mcp",
+        runtime_context(scope.clone(), "builtin.extension_register_hosted_mcp"),
+        json!({"desired_id":"fixture", "desired_name":"Local MCP",
+            "endpoint":server.mcp_url(), "auth_type":"bearer"}),
+    )
+    .await;
+    assert!(
+        !matches!(
+            model_outcome,
+            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+        ),
+        "even an approved model tool cannot enroll a local endpoint"
+    );
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("id"))
+            .await
+            .expect("definition readback")
+            .is_none(),
+        "model enrollment refusal has no registration side effects"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "no model enrollment network probe"
+    );
+    let mut request = registration_request(HostedMcpAuthSelection::Bearer);
+    request.endpoint = HostedMcpEndpoint::new(server.mcp_url()).expect("literal fixture endpoint");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+        )
+        .await
+        .expect("authenticated operator explicitly registers local MCP");
+    let pending = install_fixture(&services, scope.clone()).await;
+    assert!(
+        pending
+            .blockers
+            .iter()
+            .any(|blocker| matches!(blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+    )),
+        "a missing secret remains a credential setup blocker"
+    );
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|request| request.rpc_method.as_deref() == Some("tools/call"))
+    );
+    let provider = credential_provider_from_response(&pending);
+    submit_fixture_bearer(&services, scope.clone(), provider, "loopback-fixture-token")
+        .await
+        .expect("native scoped account setup succeeds");
+    install_fixture(&services, scope.clone()).await;
+    let capabilities = services
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capability readback");
+    let capability = capabilities
+        .into_iter()
+        .find(|capability| capability.id.as_str().ends_with(".search"))
+        .expect("discovered local tool");
+    let mut context = runtime_context(scope, capability.id.as_str());
+    let policy = ironclaw_extension_host::capability_surface::extension_network_policy(&capability);
+    assert!(
+        !policy.deny_private_ip_ranges,
+        "only enrolled local MCP gets the exception"
+    );
+    assert_eq!(policy.allowed_targets.len(), 1);
+    assert_eq!(policy.allowed_targets[0].scheme, Some(NetworkScheme::Http));
+    assert_eq!(policy.allowed_targets[0].host_pattern, "127.0.0.1");
+    assert_eq!(
+        policy.allowed_targets[0].port,
+        url::Url::parse(&server.mcp_url())
+            .expect("fixture URL")
+            .port()
+    );
+    context.grants.grants[0].constraints.network = policy;
+    let outcome =
+        invoke_with_standalone_approval(&services, capability.id.as_str(), context, json!({}))
+            .await;
+    assert!(
+        matches!(
+            outcome,
+            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+        ),
+        "local call must cross production credential and network mediation: {outcome:#?}"
+    );
+    assert!(
+        !format!("{outcome:?}").contains("loopback-fixture-token"),
+        "a reflected scoped bearer must not cross the capability result boundary"
+    );
+    for method in ["initialize", "tools/list", "tools/call"] {
+        assert!(
+            server
+                .requests()
+                .iter()
+                .any(|request| request.rpc_method.as_deref() == Some(method)
+                    && request.authorization_matches),
+            "native {method} carries the selected scoped account bearer"
+        );
+    }
+}

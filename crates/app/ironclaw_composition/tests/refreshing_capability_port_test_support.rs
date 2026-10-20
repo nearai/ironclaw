@@ -523,6 +523,7 @@ async fn production_factory_grants_only_caller_visible_placeholder_credentials_t
                       owner: ironclaw_extension_registry::InstallationOwner|
      -> ironclaw_extension_host::ActiveExtensionCapability {
         ironclaw_extension_host::ActiveExtensionCapability {
+        enrolled_loopback_target: None,
         id: CapabilityId::new(id).expect("capability id"),
         provider: ExtensionId::new(id.split('.').next().expect("provider prefix"))
             .expect("provider id"),

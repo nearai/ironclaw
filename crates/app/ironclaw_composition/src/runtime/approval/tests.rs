@@ -36,6 +36,7 @@ async fn extension_capability_missing_from_builtin_policy_gets_one_shot_lease_te
     let caller = ExtensionId::new("caller").expect("caller id");
     let source = ExtensionCapabilitySurfaceSource::from_surface(
         ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: capability.clone(),
             provider,
             effects: vec![EffectKind::Network, EffectKind::UseSecret],
@@ -90,6 +91,7 @@ async fn extension_spawn_capability_uses_extension_surface_terms_before_default_
     let secret = SecretHandle::new("gmail_token").expect("secret handle");
     let source = ExtensionCapabilitySurfaceSource::from_surface(
         ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: capability.clone(),
             provider,
             effects: vec![
@@ -162,6 +164,7 @@ async fn active_extension_capability_allows_persistent_approval_when_manifest_al
     let caller = ExtensionId::new("caller").expect("caller id");
     let source = ExtensionCapabilitySurfaceSource::from_surface(
         ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: capability.clone(),
             provider,
             effects: vec![EffectKind::Network],
@@ -202,6 +205,7 @@ async fn active_extension_capability_allows_persistent_approval_when_manifest_as
     let caller = ExtensionId::new("caller").expect("caller id");
     let source = ExtensionCapabilitySurfaceSource::from_surface(
         ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: capability.clone(),
             provider,
             effects: vec![EffectKind::Network],
@@ -280,6 +284,7 @@ async fn active_extension_capability_rejects_persistent_approval_when_manifest_d
     let caller = ExtensionId::new("caller").expect("caller id");
     let source = ExtensionCapabilitySurfaceSource::from_surface(
         ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: capability.clone(),
             provider,
             effects: vec![EffectKind::Network],

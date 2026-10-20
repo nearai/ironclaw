@@ -188,6 +188,112 @@ impl std::fmt::Display for HttpsEndpoint {
     }
 }
 
+/// A hosted MCP server endpoint. Plain HTTP requires exact local enrollment;
+/// auth recipe endpoints continue to use the separate HTTPS-only type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct McpServerEndpoint(String);
+
+impl McpServerEndpoint {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        if Self::literal_loopback_target(&value).is_none() {
+            HttpsEndpoint::new(value.clone())?;
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Recognize the original literal spelling, before any URL normalization.
+    /// A native registration of this value is the explicit enrollment; callers
+    /// must also require user-registered provenance before waiving policy.
+    pub fn literal_loopback_target(
+        value: &str,
+    ) -> Option<ironclaw_host_api::action::NetworkTargetPattern> {
+        use ironclaw_host_api::action::{NetworkScheme, NetworkTargetPattern};
+        let port_text = value
+            .strip_prefix("http://127.0.0.1:")?
+            .strip_suffix("/mcp")?;
+        let port: u16 = port_text.parse().ok()?;
+        if port == 0 || port.to_string() != port_text {
+            return None;
+        }
+        Some(NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(port),
+        })
+    }
+
+    pub fn network_target(&self) -> ironclaw_host_api::action::NetworkTargetPattern {
+        use ironclaw_host_api::action::{NetworkScheme, NetworkTargetPattern};
+        if let Some(target) = Self::literal_loopback_target(self.as_str()) {
+            return target;
+        }
+        // The HTTPS constructor already validated authority and denied userinfo.
+        let authority = self
+            .0
+            .strip_prefix("https://")
+            .unwrap_or_default()
+            .split(['/', '?'])
+            .next()
+            .unwrap_or_default();
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, text)) => (host, text.parse::<u16>().ok().filter(|port| *port != 443)),
+            None => (authority, None),
+        };
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: host.to_ascii_lowercase(),
+            port,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerEndpoint {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod mcp_server_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn exact_loopback_mcp_enrollment_preserves_port_and_rejects_aliases() {
+        let endpoint = McpServerEndpoint::new("http://127.0.0.1:3021/mcp")
+            .expect("explicitly enrolled local MCP endpoint");
+        assert_eq!(endpoint.as_str(), "http://127.0.0.1:3021/mcp");
+        for value in [
+            "http://localhost:3021/mcp",
+            "http://127.1:3021/mcp",
+            "http://127.0.0.2:3021/mcp",
+            "http://[::1]:3021/mcp",
+            "http://127.0.0.1:0/mcp",
+            "http://127.0.0.1:65536/mcp",
+            "http://127.0.0.1:03021/mcp",
+            "http://127.0.0.1/mcp",
+            "http://127.0.0.1:3021/a/../mcp",
+            "http://127.0.0.1:3021/mcp/",
+            "http://127.0.0.1:3021/mcp?",
+            "http://127.0.0.1:3021/mcp#",
+            "http://user@127.0.0.1:3021/mcp",
+            "http://example.test:3021/mcp",
+        ] {
+            assert!(McpServerEndpoint::new(value).is_err(), "{value}");
+            assert!(serde_json::from_value::<McpServerEndpoint>(serde_json::json!(value)).is_err());
+        }
+        assert!(
+            HttpsEndpoint::new(endpoint.as_str()).is_err(),
+            "the exception never changes auth recipe endpoint validation"
+        );
+    }
+}
+
 /// One vendor's auth recipe (`[auth.<vendor>]` in a v3 manifest). The tag is
 /// the auth *method* the host engine implements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

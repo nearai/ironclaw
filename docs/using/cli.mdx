@@ -87,6 +87,8 @@ See [Inference Providers](/capabilities/llm-providers) for the full catalog.
 
 | Command | What it does |
 | --- | --- |
+| `ironclaw extension enroll-mcp <id> --name <name> --endpoint <url>` | Explicit trusted enrollment of a hosted or exact loopback MCP endpoint; bearer by default |
+| `ironclaw extension import-mcp-token <id> --token-fd <fd>` | One-time local bearer setup through an inherited private pipe; rotation requires `--expected-account` |
 | `ironclaw extension search <query>` | Search available extension packages |
 | `ironclaw extension install <name>` | Install an extension package |
 | `ironclaw extension remove <name>` | Remove an installed extension |

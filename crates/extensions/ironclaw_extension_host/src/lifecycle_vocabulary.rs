@@ -16,6 +16,8 @@ pub struct ActiveExtensionCapability {
     pub network_targets: Vec<NetworkTargetPattern>,
     /// Manifest-declared per-capability egress cap in bytes. `None` means no cap.
     pub max_egress_bytes: Option<u64>,
+    /// Derived from the validated user-registered MCP package, never tool input.
+    pub enrolled_loopback_target: Option<NetworkTargetPattern>,
     /// Owner of the providing extension installation.
     pub owner: InstallationOwner,
 }
@@ -30,6 +32,7 @@ impl ActiveExtensionCapability {
             runtime_credentials: descriptor.runtime_credentials.clone(),
             network_targets: descriptor.network_targets.clone(),
             max_egress_bytes: descriptor.max_egress_bytes,
+            enrolled_loopback_target: None,
             owner,
         }
     }

@@ -22,12 +22,31 @@ pub(crate) struct ExtensionCommand {
 
 #[derive(Debug, Subcommand)]
 enum ExtensionSubcommand {
+    /// Explicit operator enrollment of a hosted MCP endpoint (never a model tool).
+    EnrollMcp(EnrollMcpCommand),
+    /// Import a local MCP bearer once from an inherited private pipe.
+    ImportMcpToken(super::mcp_token_import::McpTokenImportCommand),
     /// Search local Reborn extension packages.
     Search(ExtensionSearchCommand),
     /// Install a local Reborn extension package.
     Install(ExtensionPackageCommand),
     /// Remove an installed local Reborn extension package.
     Remove(ExtensionPackageCommand),
+}
+
+#[derive(Debug, Args)]
+struct EnrollMcpCommand {
+    /// Public endpoint registration id, without the reserved mcp- prefix.
+    id: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    endpoint: String,
+    /// Enroll a credential-free local server for an explicit development setup.
+    #[arg(long)]
+    no_auth: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -54,6 +73,28 @@ impl ExtensionCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         crate::runtime::init_tracing();
         let (command, json, label) = match self.command {
+            ExtensionSubcommand::ImportMcpToken(command) => return command.execute(context),
+            ExtensionSubcommand::EnrollMcp(command) => (
+                RebornExtensionLifecycleCommand::RegisterHostedMcp {
+                    request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest {
+                        desired_id:
+                            ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId::new(
+                                command.id,
+                            )?,
+                        desired_name: command.name,
+                        endpoint: ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
+                            command.endpoint,
+                        )?,
+                        auth_selection: Some(if command.no_auth {
+                            ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth
+                        } else {
+                            ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Bearer
+                        }),
+                    },
+                },
+                command.json,
+                "enroll_mcp",
+            ),
             ExtensionSubcommand::Search(command) => (
                 RebornExtensionLifecycleCommand::Search {
                     query: command.query.unwrap_or_default(),

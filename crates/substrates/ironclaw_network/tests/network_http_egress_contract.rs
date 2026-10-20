@@ -881,3 +881,40 @@ fn sample_scope() -> ResourceScope {
         invocation_id: InvocationId::new(),
     }
 }
+
+#[tokio::test]
+async fn literal_loopback_redirect_is_refused_even_to_the_same_enrolled_endpoint() {
+    let transport = ScriptedTransport::new(vec![
+        redirect_response("http://127.0.0.1:43127/mcp"),
+        ok_response("must not be fetched"),
+    ]);
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+    );
+    let result = egress
+        .execute(NetworkHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "http://127.0.0.1:43127/mcp".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer synthetic-local".to_string(),
+            )],
+            body: b"{}".to_vec(),
+            policy: policy("127.0.0.1", Some(43127), false, None),
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await;
+    assert!(
+        matches!(result, Err(NetworkHttpError::PolicyDenied { .. })),
+        "literal local enrollment cannot follow a redirect, including a self-redirect"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "a redirect response never causes a second request"
+    );
+}

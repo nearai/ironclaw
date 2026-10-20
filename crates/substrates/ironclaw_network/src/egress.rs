@@ -87,6 +87,10 @@ where
             );
             reject_caller_host_header(&request.headers)?;
             let target = network_target_for_http_url(&request.url, estimated_request_bytes)?;
+            let literal_loopback = target
+                .host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
             let permit = StaticNetworkPolicyEnforcer::new(request.policy.clone())
                 .authorize_blocking(NetworkRequest {
                     // This clone only carries scoped identity metadata; the sensitive
@@ -134,6 +138,17 @@ where
             // network policy does not already allow. No header follows a hop, so
             // a host-injected credential can never travel off its audience host
             // — see `clear_headers_for_next_hop`.
+            // A literal loopback endpoint names one local listener. Even a
+            // same-host redirect must not move that enrollment to another path
+            // or port. This only removes redirect behavior; it grants no local
+            // network access and leaves ordinary private-address policy intact.
+            if literal_loopback && is_redirect_status(response.status) {
+                return Err(NetworkHttpError::PolicyDenied {
+                    reason: "redirects from literal loopback endpoints are refused".to_string(),
+                    request_bytes: estimated_request_bytes,
+                    response_bytes: response.usage.response_bytes,
+                });
+            }
             if redirects_remaining == 0 || !is_redirect_status(response.status) {
                 return Ok(response);
             }

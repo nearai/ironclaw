@@ -7545,3 +7545,245 @@ fn local_yolo_command(temp: &tempfile::TempDir, args: &[&str]) -> Command {
         .env("HOME", home);
     command
 }
+
+#[test]
+fn extension_private_pipe_import_help_exposes_only_public_operands() {
+    let output = reborn_command()
+        .args(["extension", "import-mcp-token", "--help"])
+        .output()
+        .expect("private import help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains("--token-fd"));
+    assert!(help.contains("--expected-account"));
+    assert!(!help.contains("--token-value"));
+}
+
+#[cfg(unix)]
+#[test]
+fn extension_private_pipe_import_refuses_regular_stdin_before_state_or_secret_reads() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let secret_path = temp.path().join("synthetic-input");
+    std::fs::write(&secret_path, "synthetic-private-input").expect("fixture write");
+    let home = temp.path().join("reborn-home");
+    let output = reborn_command()
+        .current_dir(temp.path())
+        .env("IRONCLAW_REBORN_HOME", &home)
+        .args([
+            "extension",
+            "import-mcp-token",
+            "mcp-fixture",
+            "--token-fd",
+            "0",
+        ])
+        .stdin(std::fs::File::open(&secret_path).expect("fixture open"))
+        .output()
+        .expect("private import caller");
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("synthetic-private-input") && !stderr.contains("synthetic-private-input"),
+        "secret values must never appear in command output"
+    );
+    assert!(stderr.contains("owner-only private pipe"));
+    assert!(
+        !home.exists(),
+        "refused input must not initialize runtime state"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
+    use std::io::Read;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    let temp = tempfile::tempdir().expect("isolated fixture");
+    let home = temp.path().join("reborn-home");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("fixture MCP");
+    let endpoint = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().expect("address").port()
+    );
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let stop = Arc::new(AtomicBool::new(false));
+    let expected = Arc::new(Mutex::new("synthetic-pipe-first".to_string()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    struct ServerGuard(Arc<AtomicBool>, Option<std::thread::JoinHandle<()>>);
+    impl Drop for ServerGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.1.take() {
+                thread.join().expect("fixture joined");
+            }
+        }
+    }
+    let state = (stop.clone(), expected.clone(), observed.clone());
+    let _server = ServerGuard(
+        stop,
+        Some(std::thread::spawn(move || {
+            while !state.0.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("timeout");
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let mut length = 0;
+                let mut authenticated = false;
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().expect("length");
+                        }
+                        if name.eq_ignore_ascii_case("authorization") {
+                            authenticated = value.trim()
+                                == format!("Bearer {}", state.1.lock().expect("token guard"));
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).expect("fixture body");
+                let rpc: serde_json::Value = serde_json::from_slice(&body).expect("JSON RPC");
+                let method = rpc["method"].as_str().expect("method");
+                state
+                    .2
+                    .lock()
+                    .expect("observations")
+                    .push((method.to_string(), authenticated));
+                let result = match method {
+                    "initialize" => {
+                        serde_json::json!({"protocolVersion":"2025-03-26", "capabilities":{"tools":{}}, "serverInfo":{"name":"pipe-fixture","version":"1"}})
+                    }
+                    "tools/list" => {
+                        serde_json::json!({"tools":[{"name":"search", "description":"Local fixture", "inputSchema":{"type":"object"}, "annotations":{"readOnlyHint":true}}]})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let (status, response) = if !authenticated {
+                    ("401 Unauthorized", String::new())
+                } else if rpc.get("id").is_none() {
+                    ("202 Accepted", String::new())
+                } else {
+                    (
+                        "200 OK",
+                        serde_json::json!({"jsonrpc":"2.0","id":rpc["id"],"result":result})
+                            .to_string(),
+                    )
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).expect("fixture response");
+            }
+        })),
+    );
+    let enroll = isolated_no_llm_command(temp.path(), &home)
+        .args([
+            "extension",
+            "enroll-mcp",
+            "pipe-fixture",
+            "--name",
+            "Pipe fixture",
+            "--endpoint",
+            &endpoint,
+            "--json",
+        ])
+        .output()
+        .expect("operator enrollment");
+    assert!(
+        enroll.status.success(),
+        "enrollment: {}",
+        String::from_utf8_lossy(&enroll.stderr)
+    );
+    let install = isolated_no_llm_command(temp.path(), &home)
+        .args(["extension", "install", "mcp-pipe-fixture", "--json"])
+        .output()
+        .expect("install awaiting setup");
+    assert!(
+        install.status.success(),
+        "install: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let import = |token: &str, account: Option<&str>| {
+        let mut command = isolated_no_llm_command(temp.path(), &home);
+        command.args([
+            "extension",
+            "import-mcp-token",
+            "mcp-pipe-fixture",
+            "--token-fd",
+            "0",
+        ]);
+        if let Some(account) = account {
+            command.args(["--expected-account", account]);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("private setup process");
+        child
+            .stdin
+            .take()
+            .expect("pipe")
+            .write_all(token.as_bytes())
+            .expect("private pipe input");
+        let output = child.wait_with_output().expect("private setup exit");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+        assert!(
+            output.status.success(),
+            "private setup: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("public account receipt")
+    };
+    let first = import("synthetic-pipe-first", None);
+    assert_eq!(first["active"], true);
+    let account = first["account_id"].as_str().expect("public account id");
+    *expected.lock().expect("rotate fixture") = "synthetic-pipe-second".to_string();
+    let second = import("synthetic-pipe-second", Some(account));
+    assert_eq!(
+        second["account_id"], first["account_id"],
+        "rotation retains native account"
+    );
+    assert_eq!(second["endpoint"], endpoint);
+    let requests = observed.lock().expect("observations");
+    assert!(
+        requests
+            .iter()
+            .any(|(method, valid)| method == "tools/list" && *valid)
+    );
+    assert!(
+        requests.iter().all(|(_, valid)| *valid),
+        "all native probes use the expected scoped bearer"
+    );
+    assert!(
+        !temp
+            .path()
+            .join("isolated-home/.ironclaw/db.sqlite")
+            .exists(),
+        "no legacy database"
+    );
+    assert!(
+        !temp.path().join("isolated-home/.ironclaw/secrets").exists(),
+        "no legacy secret store"
+    );
+}

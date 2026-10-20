@@ -106,6 +106,8 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedMcpEgressEndpoint {
+    scheme: NetworkScheme,
+    enrolled_loopback: bool,
     host_pattern: String,
     port: Option<u16>,
     path: String,
@@ -114,8 +116,10 @@ pub struct HostedMcpEgressEndpoint {
 
 impl HostedMcpEgressEndpoint {
     fn parse(url: &str) -> Option<Self> {
+        let local_target =
+            ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(url);
         let parsed = url::Url::parse(url).ok()?;
-        if parsed.scheme() != "https"
+        if (parsed.scheme() != "https" && local_target.is_none())
             || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.fragment().is_some()
@@ -123,15 +127,24 @@ impl HostedMcpEgressEndpoint {
             return None;
         }
         Some(Self {
+            scheme: if local_target.is_some() {
+                NetworkScheme::Http
+            } else {
+                NetworkScheme::Https
+            },
+            enrolled_loopback: local_target.is_some(),
             host_pattern: parsed.host_str()?.to_ascii_lowercase(),
-            port: parsed.port(),
+            port: local_target
+                .as_ref()
+                .and_then(|target| target.port)
+                .or(parsed.port()),
             path: normalize_mcp_path(parsed.path()),
             query: parsed.query().map(str::to_string),
         })
     }
 
     fn allows_target(&self, target: &NetworkTargetPattern) -> bool {
-        target.scheme == Some(NetworkScheme::Https)
+        target.scheme == Some(self.scheme)
             && target.host_pattern.eq_ignore_ascii_case(&self.host_pattern)
             && target.port == self.port
     }
@@ -187,13 +200,13 @@ pub(crate) fn hosted_mcp_network_policy(package: &ExtensionPackage) -> Option<Ne
 fn hosted_mcp_network_policy_for_endpoint(endpoint: &HostedMcpEgressEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
+            scheme: Some(endpoint.scheme),
             host_pattern: endpoint.host_pattern.clone(),
             port: endpoint.port,
         }],
-        // Matches the bundled manifest's deny_private_ip_ranges default.
-        // Dispatcher would reject anyway, but the plan must agree.
-        deny_private_ip_ranges: true,
+        // This endpoint is admitted only from a user-registered MCP package.
+        // Every other package keeps private-range denial.
+        deny_private_ip_ranges: !endpoint.enrolled_loopback,
         max_egress_bytes: Some(MCP_NETWORK_EGRESS_LIMIT),
     }
 }
