@@ -398,6 +398,35 @@ mod tests {
     // ── URL allowlist unit tests ───────────────────────────────────────────
 
     #[test]
+    fn enrolled_loopback_egress_pins_the_complete_original_endpoint() {
+        for port in [1, 80, 43127, 65535] {
+            let literal = format!("http://127.0.0.1:{port}/mcp");
+            let endpoint = HostedMcpEgressEndpoint::parse(&literal).expect("enrolled endpoint");
+            assert!(hosted_mcp_url_allowed(&literal, &endpoint));
+            let policy = hosted_mcp_network_policy_for_endpoint(&endpoint);
+            assert_eq!(policy.allowed_targets[0].port, Some(port));
+            assert!(!policy.deny_private_ip_ranges);
+            for other in [
+                format!("http://127.0.0.1:{port}/mcp/"),
+                format!("http://127.0.0.1:{port}/other"),
+                format!("http://127.0.0.1:{port}/a/../mcp"),
+                format!("http://127.0.0.1:{port}/mcp?"),
+                format!("http://localhost:{port}/mcp"),
+                format!("http://127.1:{port}/mcp"),
+                format!("https://127.0.0.1:{port}/mcp"),
+                "http://127.0.0.1/mcp".to_string(),
+            ] {
+                assert!(!hosted_mcp_url_allowed(&other, &endpoint), "{other}");
+            }
+            let foreign_port = if port == 43127 { 43128 } else { 43127 };
+            assert!(!hosted_mcp_url_allowed(
+                &format!("http://127.0.0.1:{foreign_port}/mcp"),
+                &endpoint
+            ));
+        }
+    }
+
+    #[test]
     fn hosted_mcp_url_allowed_accepts_canonical_notion_url() {
         let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(hosted_mcp_url_allowed(NOTION_MCP_URL, &endpoint));

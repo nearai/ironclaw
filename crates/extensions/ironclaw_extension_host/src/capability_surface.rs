@@ -486,6 +486,7 @@ mod tests {
             extension_network_policy(&capability).deny_private_ip_ranges,
             "the receipt cannot authorize a different port"
         );
+        capability.network_targets[0].port = Some(3021);
         capability.network_targets.push(https("example.test"));
         assert!(
             extension_network_policy(&capability).deny_private_ip_ranges,

@@ -10,7 +10,6 @@ use ironclaw_auth::{
 };
 use ironclaw_composition::{RebornRuntime, RebornRuntimeInput, build_reborn_runtime};
 use ironclaw_extension_contracts::recipe::McpServerEndpoint;
-use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_manager::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleRuntime,
     execute_reborn_extension_lifecycle_command,
@@ -119,16 +118,17 @@ fn checked_pipe(fd: i32) -> anyhow::Result<std::fs::File> {
 
 #[cfg(unix)]
 async fn read_pipe(file: std::fs::File) -> anyhow::Result<SecretString> {
+    use secrecy::zeroize::Zeroizing;
     use std::io::Read;
     let source = tokio::io::unix::AsyncFd::new(file).context("private pipe registration failed")?;
     let value = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        let mut bytes = Vec::new();
+        let mut bytes = Zeroizing::new(Vec::new());
         loop {
             let mut ready = source.readable().await?;
-            let mut chunk = [0u8; 1024];
+            let mut chunk = Zeroizing::new([0u8; 1024]);
             match ready.try_io(|source| {
                 let mut file = source.get_ref();
-                file.read(&mut chunk)
+                file.read(&mut chunk[..])
             }) {
                 Ok(Ok(0)) => break,
                 Ok(Ok(count)) => {
@@ -141,12 +141,12 @@ async fn read_pipe(file: std::fs::File) -> anyhow::Result<SecretString> {
                 Err(_would_block) => continue,
             }
         }
-        let value = String::from_utf8(bytes)
-            .map_err(|error| anyhow!("private token must be UTF-8: {}", error.utf8_error()))?;
+        let value =
+            std::str::from_utf8(&bytes).map_err(|_| anyhow!("private token must be UTF-8"))?;
         if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
             bail!("private token format refused");
         }
-        Ok(SecretString::from(value))
+        Ok(SecretString::from(value.to_owned()))
     })
     .await
     .context("private token pipe timed out")??;
@@ -189,9 +189,17 @@ async fn import_from_pipe(
     {
         bail!("enrolled MCP installation does not belong to this setup scope");
     }
-    let ExtensionRuntime::Mcp { url: Some(url), .. } = &manifest.resolved().runtime else {
-        bail!("private MCP setup requires an enrolled HTTP MCP package");
-    };
+    let mcp = manifest
+        .resolved()
+        .mcp
+        .as_ref()
+        .ok_or_else(|| anyhow!("private MCP setup requires an enrolled HTTP MCP package"))?;
+    if mcp.registration_auth
+        != ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Bearer
+    {
+        bail!("private MCP setup requires explicit bearer enrollment");
+    }
+    let url = &mcp.server;
     let target = McpServerEndpoint::literal_loopback_target(url).ok_or_else(|| {
         anyhow!("private MCP setup requires the exact enrolled loopback endpoint")
     })?;

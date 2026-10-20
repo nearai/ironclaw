@@ -7603,6 +7603,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
     };
     let temp = tempfile::tempdir().expect("isolated fixture");
     let home = temp.path().join("reborn-home");
+    let legacy_home = temp.path().join("v1-home");
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("fixture MCP");
     let endpoint = format!(
         "http://127.0.0.1:{}/mcp",
@@ -7695,6 +7696,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         })),
     );
     let enroll = isolated_no_llm_command(temp.path(), &home)
+        .env("IRONCLAW_BASE_DIR", &legacy_home)
         .args([
             "extension",
             "enroll-mcp",
@@ -7713,6 +7715,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         String::from_utf8_lossy(&enroll.stderr)
     );
     let install = isolated_no_llm_command(temp.path(), &home)
+        .env("IRONCLAW_BASE_DIR", &legacy_home)
         .args(["extension", "install", "mcp-pipe-fixture", "--json"])
         .output()
         .expect("install awaiting setup");
@@ -7723,6 +7726,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
     );
     let import = |token: &str, account: Option<&str>| {
         let mut command = isolated_no_llm_command(temp.path(), &home);
+        command.env("IRONCLAW_BASE_DIR", &legacy_home);
         command.args([
             "extension",
             "import-mcp-token",
@@ -7765,6 +7769,10 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         "rotation retains native account"
     );
     assert_eq!(second["endpoint"], endpoint);
+    assert!(
+        !legacy_home.exists(),
+        "setup and rotation cannot touch any legacy state"
+    );
     let requests = observed.lock().expect("observations");
     assert!(
         requests
