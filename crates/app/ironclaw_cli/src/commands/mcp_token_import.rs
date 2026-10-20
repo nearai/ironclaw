@@ -30,8 +30,11 @@ pub(crate) struct McpTokenImportCommand {
     /// Already enrolled and installed local MCP extension id.
     extension_id: String,
     /// Inherited private pipe descriptor; never a terminal or regular file.
-    #[arg(long)]
-    token_fd: i32,
+    #[arg(long, required_unless_present = "inspect_account")]
+    token_fd: Option<i32>,
+    /// Inspect the selected public account reference without importing or activating.
+    #[arg(long, conflicts_with_all = ["token_fd", "expected_account"])]
+    inspect_account: bool,
     /// Public account id required when updating a previously selected account.
     #[arg(long)]
     expected_account: Option<uuid::Uuid>,
@@ -46,6 +49,22 @@ struct ImportReceipt {
     active: bool,
 }
 
+#[derive(Serialize)]
+struct AccountInspection {
+    kind: &'static str,
+    extension_id: ExtensionId,
+    account_id: Option<CredentialAccountId>,
+    handle: SecretHandle,
+    endpoint: String,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum SetupReceipt {
+    Imported(ImportReceipt),
+    Inspected(AccountInspection),
+}
+
 /// The native service deliberately returns a sanitized DTO, not a raw error.
 /// Retain both public code and retryability when adapting to the CLI error chain.
 #[derive(Debug, thiserror::Error)]
@@ -55,7 +74,13 @@ struct NativeAuthSetupError(ironclaw_auth::RebornAuthProductError);
 impl McpTokenImportCommand {
     #[cfg(unix)]
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let pipe = checked_pipe(self.token_fd)?;
+        let pipe = if self.inspect_account {
+            None
+        } else {
+            Some(checked_pipe(self.token_fd.ok_or_else(|| {
+                anyhow!("private token pipe descriptor is required")
+            })?)?)
+        };
         let extension_id = ExtensionId::new(self.extension_id).context("invalid extension id")?;
         let input = crate::runtime::build_services_input_with_options(
             context.boot_config(),
@@ -162,9 +187,9 @@ async fn read_pipe(file: std::fs::File) -> anyhow::Result<SecretString> {
 async fn import_from_pipe(
     runtime: &RebornRuntime,
     extension_id: ExtensionId,
-    pipe: std::fs::File,
+    pipe: Option<std::fs::File>,
     expected: Option<uuid::Uuid>,
-) -> anyhow::Result<ImportReceipt> {
+) -> anyhow::Result<SetupReceipt> {
     let surface = runtime.extension_lifecycle_surface_context();
     let scope = AuthProductScope::credential_owner(
         &ResourceScope {
@@ -239,6 +264,17 @@ async fn import_from_pipe(
         Err(AuthProductError::CredentialMissing) => None,
         Err(error) => return Err(error).context("private MCP account selection failed"),
     };
+    // A prior handoff may have stored the account before the caller received
+    // its receipt. Recover only the scoped public reference, never its bearer.
+    let Some(pipe) = pipe else {
+        return Ok(SetupReceipt::Inspected(AccountInspection {
+            kind: "mcp_account",
+            extension_id,
+            account_id: existing.map(|account| account.id),
+            handle: requirement.handle.clone(),
+            endpoint: url.clone(),
+        }));
+    };
     if expected.is_some_and(|id| existing.as_ref().map(|account| account.id.as_uuid()) != Some(id))
     {
         bail!("selected MCP account changed; private setup refused");
@@ -302,28 +338,40 @@ async fn import_from_pipe(
     if activation.phase != ironclaw_extension_contracts::state::InstallationState::Active {
         bail!("MCP account stored but authenticated activation remains unavailable");
     }
-    Ok(ImportReceipt {
+    Ok(SetupReceipt::Imported(ImportReceipt {
         extension_id,
         account_id: account.id,
         handle: requirement.handle.clone(),
         endpoint: url.clone(),
         active: true,
-    })
+    }))
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 
     fn private_pipe(bytes: &[u8]) -> std::fs::File {
-        let mut descriptors = [-1; 2];
-        // SAFETY: valid writable descriptor array, checked return value.
-        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
-        // SAFETY: a successful pipe call returns two fresh owned descriptors.
-        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
-        let mut writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+        let directory = tempfile::tempdir().expect("private pipe directory");
+        let fifo_path = directory.path().join("input.fifo");
+        let fifo_name =
+            std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).expect("FIFO path");
+        // SAFETY: NUL-terminated private test path and owner-only mode.
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&fifo_path)
+            .expect("private reader");
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&fifo_path)
+            .expect("private writer");
+        std::fs::remove_file(&fifo_path).expect("unlink before private input");
         writer.write_all(bytes).expect("test pipe write");
         drop(writer);
         checked_pipe(reader.as_raw_fd()).expect("private pipe accepted")
@@ -341,7 +389,13 @@ mod tests {
             checked_pipe(file.as_raw_fd()).is_err(),
             "regular files are never token ingress"
         );
-        for input in [b"".as_slice(), b"synthetic\nvalue".as_slice()] {
+        for input in [
+            b"".as_slice(),
+            b"synthetic\nvalue".as_slice(),
+            b"synthetic value".as_slice(),
+            b"synthetic\x7fvalue".as_slice(),
+            b"\xff".as_slice(),
+        ] {
             let error = read_pipe(private_pipe(input))
                 .await
                 .expect_err("invalid secret input");

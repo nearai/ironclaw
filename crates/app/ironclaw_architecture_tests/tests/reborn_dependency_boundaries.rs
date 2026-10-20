@@ -866,7 +866,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the cap's inline test (~63 lines). Declaration and shape
         // validation only; execution stays in ironclaw_extension_host's
         // lifecycle.
-        ("ironclaw_extension_contracts", 13_026),
+        // 13_026 -> 13_240 (exact loopback MCP enrollment): measured by
+        // this test. McpServerEndpoint adds shared endpoint vocabulary and
+        // literal-spelling validation; strict registration deserialization
+        // rejects inline credentials. Includes the existing command-menu
+        // growth above and inline shape tests. Enrollment authority, network
+        // policy, credential persistence and import stay in their owners.
+        ("ironclaw_extension_contracts", 13_240),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

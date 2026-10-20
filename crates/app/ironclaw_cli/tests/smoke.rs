@@ -7556,6 +7556,7 @@ fn extension_private_pipe_import_help_exposes_only_public_operands() {
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(help.contains("--token-fd"));
     assert!(help.contains("--expected-account"));
+    assert!(help.contains("--inspect-account"));
     assert!(!help.contains("--token-value"));
 }
 
@@ -7779,7 +7780,33 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
     };
     let first = import("synthetic-pipe-first", None);
     assert_eq!(first["active"], true);
-    let account = first["account_id"].as_str().expect("public account id");
+    let calls_before_inspection = observed.lock().expect("observations").len();
+    let inspected = isolated_no_llm_command(&workspace, &home)
+        .args([
+            "extension",
+            "import-mcp-token",
+            "mcp-pipe-fixture",
+            "--inspect-account",
+        ])
+        .output()
+        .expect("public account inspection");
+    assert!(
+        inspected.status.success(),
+        "inspection: {}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let inspected: serde_json::Value =
+        serde_json::from_slice(&inspected.stdout).expect("public scoped account receipt");
+    assert_eq!(inspected["kind"], "mcp_account");
+    assert_eq!(inspected["account_id"], first["account_id"]);
+    assert_eq!(inspected["endpoint"], endpoint);
+    assert_eq!(
+        observed.lock().expect("observations").len(),
+        calls_before_inspection,
+        "public inspection never activates or contacts the endpoint"
+    );
+    assert!(!inspected.to_string().contains("synthetic-pipe-first"));
+    let account = inspected["account_id"].as_str().expect("public account id");
     *expected.lock().expect("rotate fixture") = "synthetic-pipe-second".to_string();
     let second = import("synthetic-pipe-second", Some(account));
     assert_eq!(
