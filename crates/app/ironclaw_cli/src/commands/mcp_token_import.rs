@@ -46,6 +46,12 @@ struct ImportReceipt {
     active: bool,
 }
 
+/// The native service deliberately returns a sanitized DTO, not a raw error.
+/// Retain both public code and retryability when adapting to the CLI error chain.
+#[derive(Debug, thiserror::Error)]
+#[error("native MCP authentication failed: {0:?}")]
+struct NativeAuthSetupError(ironclaw_auth::RebornAuthProductError);
+
 impl McpTokenImportCommand {
     #[cfg(unix)]
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
@@ -252,12 +258,16 @@ async fn import_from_pipe(
             &account.projection(),
         ));
     }
-    let challenge = auth.request_manual_token_setup(setup).await?;
+    let challenge = auth
+        .request_manual_token_setup(setup)
+        .await
+        .map_err(NativeAuthSetupError)?;
     let token = match read_pipe(pipe).await {
         Ok(token) => token,
         Err(error) => {
             auth.abandon_manual_token(&scope, challenge.interaction_id)
                 .await
+                .map_err(NativeAuthSetupError)
                 .context("private MCP setup abandonment failed")?;
             return Err(error);
         }
@@ -268,7 +278,8 @@ async fn import_from_pipe(
             challenge.interaction_id,
             token,
         ))
-        .await?;
+        .await
+        .map_err(NativeAuthSetupError)?;
     let account = selector
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(scope.clone(), provider)
