@@ -141,8 +141,7 @@ async fn read_pipe(file: std::fs::File) -> anyhow::Result<SecretString> {
                 Err(_would_block) => continue,
             }
         }
-        let value =
-            std::str::from_utf8(&bytes).map_err(|_| anyhow!("private token must be UTF-8"))?;
+        let value = std::str::from_utf8(&bytes).context("private token must be UTF-8")?;
         if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
             bail!("private token format refused");
         }

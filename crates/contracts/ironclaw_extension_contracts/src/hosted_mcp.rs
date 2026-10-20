@@ -193,8 +193,8 @@ impl<'de> Deserialize<'de> for HostedMcpEndpoint {
 
 /// Caller-selected hosted MCP authentication shape. Credentials never cross
 /// this request boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostedMcpAuthSelection {
     /// Probe without credentials during registration. Resolve no-auth or OAuth
     /// only when the protocol proves it; an otherwise unexplained 401 requires
@@ -208,6 +208,32 @@ pub enum HostedMcpAuthSelection {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_profile_id: Option<String>,
     },
+}
+
+impl<'de> Deserialize<'de> for HostedMcpAuthSelection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Internally tagged unit variants silently accept extra fields even
+        // with deny_unknown_fields. Empty struct variants enforce this wire
+        // boundary without changing the public enum or its serialized shape.
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Selection {
+            Auto {},
+            NoAuth {},
+            Bearer {},
+            #[serde(rename = "oauth")]
+            OAuth {
+                #[serde(default)]
+                client_profile_id: Option<String>,
+            },
+        }
+        Ok(match Selection::deserialize(deserializer)? {
+            Selection::Auto {} => Self::Auto,
+            Selection::NoAuth {} => Self::NoAuth,
+            Selection::Bearer {} => Self::Bearer,
+            Selection::OAuth { client_profile_id } => Self::OAuth { client_profile_id },
+        })
+    }
 }
 
 /// Untrusted request to create or join a caller-owned hosted MCP package.
