@@ -3240,9 +3240,15 @@ async fn enrolled_loopback_bearer_reaches_native_discovery_and_call() {
     let ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(ref failure) = model_outcome else {
         panic!("approved model enrollment must fail with the loopback refusal: {model_outcome:?}");
     };
+    assert_eq!(failure.kind.as_str(), "input_encode");
+    let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
+        failure.detail.as_ref()
+    else {
+        panic!("loopback refusal must carry the specific structured diagnostic: {failure:?}");
+    };
     assert_eq!(
-        failure.model_visible_cause(),
-        Some("loopback MCP enrollment requires the trusted user setup surface")
+        text,
+        "loopback MCP enrollment requires the trusted user setup surface"
     );
     assert!(
         services
