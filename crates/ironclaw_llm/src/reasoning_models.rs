@@ -208,6 +208,8 @@ mod tests {
         assert!(has_native_thinking("MiniMax-M2.7"));
         assert!(has_native_thinking("MiniMax-M2.7-highspeed"));
         assert!(has_native_thinking("MiniMax-M3"));
+        assert!(has_native_thinking("MiniMax-M3.1-Flash"));
+        assert!(has_native_thinking("minimax/MiniMax-M3.1-Flash"));
     }
 
     #[test]
@@ -227,5 +229,7 @@ mod tests {
         assert!(!has_native_thinking("glm-4-air"));
         assert!(!has_native_thinking("glm-4v"));
         assert!(!has_native_thinking("step-3-mini"));
+        assert!(!has_native_thinking("MiniMax-Text-01"));
+        assert!(!has_native_thinking("MiniMax-VL-01"));
     }
 }

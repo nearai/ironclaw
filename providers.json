@@ -470,8 +470,8 @@
     "api_key_required": true,
     "base_url_env": "MINIMAX_BASE_URL",
     "model_env": "MINIMAX_MODEL",
-    "default_model": "MiniMax-M3",
-    "description": "MiniMax API (MiniMax-M3, MiniMax-M2.7 and MiniMax-M2.7-highspeed models)",
+    "default_model": "MiniMax-M3.1-Flash",
+    "description": "MiniMax API (MiniMax-M3.1-Flash and MiniMax-M3 models)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_minimax_api_key",

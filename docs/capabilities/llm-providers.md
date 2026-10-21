@@ -162,14 +162,15 @@ Pull a model first: `ollama pull llama3.2`
 
 ## MiniMax
 
-[MiniMax](https://platform.minimax.io) provides high-performance language models with 204,800 token context windows.
+[MiniMax](https://platform.minimax.io) defaults to `MiniMax-M3.1-Flash` for text and tool-calling requests through its OpenAI-compatible Chat Completions API.
 
 ```env
 LLM_BACKEND=minimax
 MINIMAX_API_KEY=...
+# MINIMAX_MODEL=MiniMax-M3.1-Flash   # default for new configurations
 ```
 
-Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
+Existing saved model selections and explicit `MINIMAX_MODEL` values are preserved. You can still select legacy models such as `MiniMax-M3`, `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed`, or enter another model ID supported by your endpoint.
 
 To use the China mainland endpoint, set:
 

@@ -50,6 +50,8 @@ pub mod testing;
 
 #[cfg(test)]
 mod codex_test_helpers;
+#[cfg(all(test, feature = "registry-provider-factory"))]
+mod minimax_tests;
 
 pub mod image_models;
 pub mod models;
