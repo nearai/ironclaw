@@ -22,7 +22,7 @@ NetworkRequest { ResourceScope, NetworkTarget, NetworkMethod, estimated_bytes }
 For host-mediated runtime HTTP, the crate also turns a `NetworkHttpRequest` into a bounded outbound transport call:
 
 ```text
-NetworkHttpRequest { scope, method, url, headers, body, policy, response_body_limit }
+NetworkHttpRequest { allow_redirects, scope, method, url, headers, body, policy, response_body_limit }
   -> URL parse + target normalization
   -> StaticNetworkPolicyEnforcer with a conservative method + URL + header + body byte estimate
   -> DNS resolution + private/reserved IP denial
@@ -120,6 +120,7 @@ The host-mediated HTTP path is:
 ```rust
 let egress = PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default());
 let response = egress.execute(NetworkHttpRequest {
+    allow_redirects: true,
     scope,
     method: NetworkMethod::Post,
     url: "https://api.example.test/v1/run".to_string(),
@@ -170,6 +171,7 @@ The crate tests cover:
 - caller-provided `Host` header denial before transport
 - default-port target matching for URL-derived requests
 - redirects are not followed by the default transport
+- `explicit_no_redirect_request_refuses_even_the_same_endpoint` covers explicit no-redirect requests, including a redirect to the same endpoint
 - streaming response body limits are enforced separately from request-byte accounting
 - omitted and oversized explicit response body limits clamp to a safe default instead of unbounded reads
 - fail-closed empty policy behavior
