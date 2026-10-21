@@ -2174,7 +2174,11 @@ async fn host_http_egress_refuses_redirect_for_exact_local_mcp_only() {
             scope: sample_scope(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
-            url: format!("{}/mcp", base_url.trim_end_matches('/')),
+            url: url::Url::parse(&base_url)
+                .unwrap()
+                .join("/mcp")
+                .unwrap()
+                .to_string(),
             headers: vec![],
             body: vec![],
             network_policy: local_http_policy(),
