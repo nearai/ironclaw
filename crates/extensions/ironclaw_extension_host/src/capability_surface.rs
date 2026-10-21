@@ -220,9 +220,13 @@ pub fn extension_network_policy(capability: &ActiveExtensionCapability) -> Netwo
     // declares the `network` effect but no targets is still caught by the
     // effect-based obligation gate and fails as misconfigured.)
     let has_egress_targets = !targets.is_empty();
+    // Only the exact target derived from native registration gets the local
+    // exception. A generic capability declaring loopback keeps the SSRF guard.
+    let enrolled_local_only =
+        targets.len() == 1 && capability.enrolled_loopback_target.as_ref() == targets.first();
     NetworkPolicy {
         allowed_targets: targets,
-        deny_private_ip_ranges: has_egress_targets,
+        deny_private_ip_ranges: has_egress_targets && !enrolled_local_only,
         max_egress_bytes: capability.max_egress_bytes.filter(|_| has_egress_targets),
     }
 }
@@ -285,6 +289,7 @@ mod tests {
         let carol = UserId::new("carol").unwrap();
         let grantee = ExtensionId::new("caller").unwrap();
         let capability = |id: &str, provider: &str, owner| ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new(id).unwrap(),
             provider: ExtensionId::new(provider).unwrap(),
             effects: vec![EffectKind::DispatchCapability],
@@ -352,6 +357,7 @@ mod tests {
         // (`network_targets` + `max_egress_bytes`); the generic path folds them
         // in exactly as the removed special-case used to synthesize them.
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("web-access.search").unwrap(),
             provider: ExtensionId::new("web-access").unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
@@ -372,6 +378,7 @@ mod tests {
     #[test]
     fn web_access_get_content_gets_exa_mcp_network_target_from_manifest() {
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("web-access.get_content").unwrap(),
             provider: ExtensionId::new("web-access").unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
@@ -399,6 +406,7 @@ mod tests {
         // to an empty, unconstrained policy so no network obligation is emitted at
         // all — even if a manifest cap were present, it is dropped with no targets.
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("ascii-renderer.draw").unwrap(),
             provider: ExtensionId::new("ascii-renderer").unwrap(),
             effects: vec![EffectKind::DispatchCapability],
@@ -428,6 +436,7 @@ mod tests {
         // `network_targets` (no credential) and gets a constrained allowlist —
         // an `ApplyNetworkPolicy` scoped to that host, no secret injection.
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("hacker-news.top_stories").unwrap(),
             provider: ExtensionId::new("hacker-news").unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
@@ -449,11 +458,49 @@ mod tests {
     }
 
     #[test]
+    fn only_a_native_enrollment_receipt_waives_private_network_denial() {
+        let target = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(3021),
+        };
+        let mut capability = ActiveExtensionCapability {
+            id: CapabilityId::new("mcp-fixture.search").unwrap(),
+            provider: ExtensionId::new("mcp-fixture").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Ask,
+            runtime_credentials: vec![],
+            network_targets: vec![target.clone()],
+            max_egress_bytes: None,
+            enrolled_loopback_target: None,
+            owner: ironclaw_extension_registry::InstallationOwner::Tenant,
+        };
+        assert!(
+            extension_network_policy(&capability).deny_private_ip_ranges,
+            "a generic capability with the same target remains denied"
+        );
+        capability.enrolled_loopback_target = Some(target);
+        assert!(!extension_network_policy(&capability).deny_private_ip_ranges);
+        capability.network_targets[0].port = Some(3022);
+        assert!(
+            extension_network_policy(&capability).deny_private_ip_ranges,
+            "the receipt cannot authorize a different port"
+        );
+        capability.network_targets[0].port = Some(3021);
+        capability.network_targets.push(https("example.test"));
+        assert!(
+            extension_network_policy(&capability).deny_private_ip_ranges,
+            "a mixed target set never gets a generic SSRF exception"
+        );
+    }
+
+    #[test]
     fn manifest_network_target_deduplicates_matching_credential_audience() {
         // A host declared in `network_targets` that also appears as a credential
         // audience is folded to a single allowlist entry, and the manifest egress
         // cap rides through.
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("web-access.search").unwrap(),
             provider: ExtensionId::new("web-access").unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
@@ -487,6 +534,7 @@ mod tests {
         // the credential audience (`gmail.googleapis.com`) dedupes against the
         // declared list, so the minted policy equals the historical gsuite one.
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("gmail.list_messages").unwrap(),
             provider: ExtensionId::new("gmail").unwrap(),
             effects: vec![
@@ -522,6 +570,7 @@ mod tests {
         // Calendar's credential audience (`www.googleapis.com`) is the first of
         // the five declared hosts, so the union is exactly the five-host policy.
         let capability = ActiveExtensionCapability {
+            enrolled_loopback_target: None,
             id: CapabilityId::new("google-calendar.list_events").unwrap(),
             provider: ExtensionId::new("google-calendar").unwrap(),
             effects: vec![

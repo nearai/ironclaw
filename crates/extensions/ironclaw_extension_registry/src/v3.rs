@@ -223,7 +223,7 @@ struct RawAudienceV3 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcpV3 {
-    server: ironclaw_extension_contracts::recipe::HttpsEndpoint,
+    server: ironclaw_extension_contracts::recipe::McpServerEndpoint,
     #[serde(default)]
     origin_gate_matrix: Option<OriginGateMatrix>,
     namespace: String,
@@ -316,6 +316,16 @@ pub(crate) fn parse_v3(
     let (runtime, mcp) = match (raw.runtime, raw.mcp) {
         (Some(runtime), None) => (runtime_from_raw(runtime), None),
         (None, Some(mcp)) => {
+            if ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(
+                mcp.server.as_str(),
+            )
+            .is_some()
+                && source != ManifestSource::UserRegistered
+            {
+                return Err(ManifestV3Error::Invalid {
+                    reason: "loopback MCP requires explicit user registration".to_string(),
+                });
+            }
             if raw.channel.is_some() {
                 return Err(ManifestV3Error::McpExclusivity);
             }
@@ -447,6 +457,11 @@ pub(crate) fn parse_v3(
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
     let mut mcp_template_credentials = None;
+    let mcp_enrolled_target = mcp.as_ref().and_then(|mcp| {
+        ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(
+            mcp.server.as_str(),
+        )
+    });
     if let Some(mcp) = &mcp {
         let template_credentials = mcp
             .credentials
@@ -458,9 +473,13 @@ pub(crate) fn parse_v3(
                         vendor: &credential.vendor,
                         scopes: &credential.scopes,
                         audience: RawAudienceV3 {
-                            scheme: NetworkScheme::Https,
-                            host: mcp.server.host(),
-                            port: None,
+                            scheme: mcp
+                                .server
+                                .network_target()
+                                .scheme
+                                .unwrap_or(NetworkScheme::Https),
+                            host: mcp.server.network_target().host_pattern,
+                            port: mcp.server.network_target().port,
                         },
                         injection: credential.injection.clone(),
                         placeholder_env: None,
@@ -492,11 +511,16 @@ pub(crate) fn parse_v3(
             origin_gate_matrix: mcp.origin_gate_matrix.clone(),
         };
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog, None).map_err(
-                |error| ManifestV3Error::Invalid {
-                    reason: error.to_string(),
-                },
-            )?,
+            CapabilityDeclV2::from_raw_with_mcp_enrollment(
+                raw_capability,
+                &id,
+                host_port_catalog,
+                None,
+                mcp_enrolled_target.as_ref(),
+            )
+            .map_err(|error| ManifestV3Error::Invalid {
+                reason: error.to_string(),
+            })?,
         );
         mcp_template_credentials = Some(template_credentials);
     }
@@ -685,11 +709,12 @@ pub(crate) fn parse_v3(
                 Some(matrix.clamp_requested_for_memory_tool(&raw_capability.id));
         }
         capabilities.push(
-            CapabilityDeclV2::from_raw(
+            CapabilityDeclV2::from_raw_with_mcp_enrollment(
                 raw_capability,
                 &id,
                 host_port_catalog,
                 memory_tool_namespace,
+                mcp_enrolled_target.as_ref(),
             )
             .map_err(|error| ManifestV3Error::Invalid {
                 reason: error.to_string(),
@@ -1219,6 +1244,75 @@ pass = { prompt = "prompts/b.md", tools = [], max_model_calls = 4 }
                 "error should name the reserved prefix, got: {error}"
             );
         }
+    }
+
+    #[test]
+    fn exact_loopback_mcp_manifest_requires_registered_provenance_and_pins_credentials() {
+        let local = mcp_manifest_with_id("fixture")
+            .replace("https://mcp.zeta.example/mcp", "http://127.0.0.1:3021/mcp");
+        for source in [
+            ManifestSource::HostBundled,
+            ManifestSource::InstalledLocal,
+            ManifestSource::RegistryInstalled,
+        ] {
+            assert!(
+                parse_v3(&local, source, &catalog()).is_err(),
+                "a manifest cannot silently grant itself local-network access: {source:?}"
+            );
+        }
+        let with_credentials = format!(
+            r#"{local}
+[[mcp.credentials]]
+handle = "hosted_mcp_account"
+vendor = "local-fixture"
+injection = {{ type = "header", name = "authorization", prefix = "Bearer " }}
+[auth.local-fixture]
+method = "api_key"
+display_name = "Local fixture"
+fields = [{{ handle = "hosted_mcp_account", label = "Token", secret = true }}]
+"#
+        );
+        let (manifest, _) = parse_v3(
+            &with_credentials,
+            ManifestSource::UserRegistered,
+            &catalog(),
+        )
+        .expect("explicit native enrollment");
+        let requirement = &manifest.capabilities[0].runtime_credentials[0];
+        assert_eq!(
+            requirement.audience,
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Http),
+                host_pattern: "127.0.0.1".to_string(),
+                port: Some(3021),
+            }
+        );
+        assert!(requirement.required);
+        assert_eq!(requirement.handle.as_str(), "hosted_mcp_account");
+        let static_tool = format!(
+            r#"{with_credentials}
+[[tools]]
+id = "fixture.search"
+description = "Static MCP search"
+default_permission = "ask"
+input_schema_ref = "schemas/search.input.v1.json"
+"#
+        );
+        let (manifest, _) = parse_v3(&static_tool, ManifestSource::UserRegistered, &catalog())
+            .expect("static tools inherit the exact enrolled MCP credential audience");
+        assert_eq!(manifest.capabilities.len(), 2);
+        assert_eq!(
+            manifest.capabilities[1].runtime_credentials,
+            manifest.capabilities[0].runtime_credentials
+        );
+        assert!(
+            parse_v3(
+                &static_tool.replace("127.0.0.1", "localhost"),
+                ManifestSource::UserRegistered,
+                &catalog()
+            )
+            .is_err()
+        );
     }
 
     #[test]

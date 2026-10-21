@@ -14,6 +14,13 @@ pub struct CanonicalHostedMcpEndpoint(String);
 
 impl CanonicalHostedMcpEndpoint {
     pub fn parse(input: &HostedMcpEndpoint) -> Result<Self, HostedMcpAdmissionError> {
+        if ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(
+            input.as_str(),
+        )
+        .is_some()
+        {
+            return Ok(Self(input.as_str().to_string()));
+        }
         let url = url::Url::parse(input.as_str())
             .map_err(|_| HostedMcpAdmissionError::InvalidEndpoint)?;
         if url.scheme() != "https"
@@ -122,6 +129,42 @@ mod tests {
             assert_eq!(
                 CanonicalHostedMcpEndpoint::parse(&input),
                 Err(HostedMcpAdmissionError::InvalidEndpoint)
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_endpoint_admits_only_the_explicit_literal_loopback_mcp_endpoint() {
+        let input = HostedMcpEndpoint::new("http://127.0.0.1:3021/mcp").expect("endpoint input");
+        assert_eq!(
+            CanonicalHostedMcpEndpoint::parse(&input)
+                .expect("explicit local enrollment")
+                .as_str(),
+            "http://127.0.0.1:3021/mcp"
+        );
+        for raw in [
+            "http://localhost:3021/mcp",
+            "http://[::1]:3021/mcp",
+            "http://127.0.0.2:3021/mcp",
+            "http://127.1:3021/mcp",
+            "http://2130706433:3021/mcp",
+            "http://0x7f000001:3021/mcp",
+            "http://127.0.0.1/mcp",
+            "http://127.0.0.1:0/mcp",
+            "http://127.0.0.1:03021/mcp",
+            "http://127.0.0.1:3021/other",
+            "http://127.0.0.1:3021/a/../mcp",
+            "http://127.0.0.1:3021/mcp/",
+            "http://127.0.0.1:3021/mcp?",
+            "http://127.0.0.1:3021/mcp#",
+            "http://user@127.0.0.1:3021/mcp",
+            "http://example.test:3021/mcp",
+        ] {
+            let input = HostedMcpEndpoint::new(raw).expect("bounded input");
+            assert_eq!(
+                CanonicalHostedMcpEndpoint::parse(&input),
+                Err(HostedMcpAdmissionError::InvalidEndpoint),
+                "{raw}"
             );
         }
     }

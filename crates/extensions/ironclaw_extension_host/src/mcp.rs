@@ -106,6 +106,8 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedMcpEgressEndpoint {
+    scheme: NetworkScheme,
+    enrolled_loopback: bool,
     host_pattern: String,
     port: Option<u16>,
     path: String,
@@ -114,8 +116,10 @@ pub struct HostedMcpEgressEndpoint {
 
 impl HostedMcpEgressEndpoint {
     fn parse(url: &str) -> Option<Self> {
+        let local_target =
+            ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(url);
         let parsed = url::Url::parse(url).ok()?;
-        if parsed.scheme() != "https"
+        if (parsed.scheme() != "https" && local_target.is_none())
             || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.fragment().is_some()
@@ -123,15 +127,24 @@ impl HostedMcpEgressEndpoint {
             return None;
         }
         Some(Self {
+            scheme: if local_target.is_some() {
+                NetworkScheme::Http
+            } else {
+                NetworkScheme::Https
+            },
+            enrolled_loopback: local_target.is_some(),
             host_pattern: parsed.host_str()?.to_ascii_lowercase(),
-            port: parsed.port(),
+            port: local_target
+                .as_ref()
+                .and_then(|target| target.port)
+                .or(parsed.port()),
             path: normalize_mcp_path(parsed.path()),
             query: parsed.query().map(str::to_string),
         })
     }
 
     fn allows_target(&self, target: &NetworkTargetPattern) -> bool {
-        target.scheme == Some(NetworkScheme::Https)
+        target.scheme == Some(self.scheme)
             && target.host_pattern.eq_ignore_ascii_case(&self.host_pattern)
             && target.port == self.port
     }
@@ -187,13 +200,13 @@ pub(crate) fn hosted_mcp_network_policy(package: &ExtensionPackage) -> Option<Ne
 fn hosted_mcp_network_policy_for_endpoint(endpoint: &HostedMcpEgressEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
+            scheme: Some(endpoint.scheme),
             host_pattern: endpoint.host_pattern.clone(),
             port: endpoint.port,
         }],
-        // Matches the bundled manifest's deny_private_ip_ranges default.
-        // Dispatcher would reject anyway, but the plan must agree.
-        deny_private_ip_ranges: true,
+        // This endpoint is admitted only from a user-registered MCP package.
+        // Every other package keeps private-range denial.
+        deny_private_ip_ranges: !endpoint.enrolled_loopback,
         max_egress_bytes: Some(MCP_NETWORK_EGRESS_LIMIT),
     }
 }
@@ -383,6 +396,35 @@ mod tests {
     }
 
     // ── URL allowlist unit tests ───────────────────────────────────────────
+
+    #[test]
+    fn enrolled_loopback_egress_pins_the_complete_original_endpoint() {
+        for port in [1, 80, 43127, 65535] {
+            let literal = format!("http://127.0.0.1:{port}/mcp");
+            let endpoint = HostedMcpEgressEndpoint::parse(&literal).expect("enrolled endpoint");
+            assert!(hosted_mcp_url_allowed(&literal, &endpoint));
+            let policy = hosted_mcp_network_policy_for_endpoint(&endpoint);
+            assert_eq!(policy.allowed_targets[0].port, Some(port));
+            assert!(!policy.deny_private_ip_ranges);
+            for other in [
+                format!("http://127.0.0.1:{port}/mcp/"),
+                format!("http://127.0.0.1:{port}/other"),
+                format!("http://127.0.0.1:{port}/a/../mcp"),
+                format!("http://127.0.0.1:{port}/mcp?"),
+                format!("http://localhost:{port}/mcp"),
+                format!("http://127.1:{port}/mcp"),
+                format!("https://127.0.0.1:{port}/mcp"),
+                "http://127.0.0.1/mcp".to_string(),
+            ] {
+                assert!(!hosted_mcp_url_allowed(&other, &endpoint), "{other}");
+            }
+            let foreign_port = if port == 43127 { 43128 } else { 43127 };
+            assert!(!hosted_mcp_url_allowed(
+                &format!("http://127.0.0.1:{foreign_port}/mcp"),
+                &endpoint
+            ));
+        }
+    }
 
     #[test]
     fn hosted_mcp_url_allowed_accepts_canonical_notion_url() {

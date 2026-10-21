@@ -33,6 +33,8 @@ pub struct NetworkPermit {
 /// carrier keeps the public field shape stable but scrubs those buffers on drop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkHttpRequest {
+    /// Host-selected restriction; false refuses every 3xx hop.
+    pub allow_redirects: bool,
     pub scope: ResourceScope,
     pub method: NetworkMethod,
     pub url: String,
@@ -137,6 +139,7 @@ mod tests {
     #[test]
     fn network_http_request_scrubs_url_and_header_values() {
         let mut request = NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
@@ -160,6 +163,7 @@ mod tests {
     #[test]
     fn network_http_request_scrubs_url_with_empty_headers() {
         let mut request = NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1?token=sk-query-secret".to_string(),

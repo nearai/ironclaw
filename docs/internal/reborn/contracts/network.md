@@ -22,7 +22,7 @@ NetworkRequest { ResourceScope, NetworkTarget, NetworkMethod, estimated_bytes }
 For host-mediated runtime HTTP, the crate also turns a `NetworkHttpRequest` into a bounded outbound transport call:
 
 ```text
-NetworkHttpRequest { scope, method, url, headers, body, policy, response_body_limit }
+NetworkHttpRequest { allow_redirects, scope, method, url, headers, body, policy, response_body_limit }
   -> URL parse + target normalization
   -> StaticNetworkPolicyEnforcer with a conservative method + URL + header + body byte estimate
   -> DNS resolution + private/reserved IP denial
@@ -84,6 +84,13 @@ V1 semantics intentionally mirror the current WASM network import policy checks 
 
 HTTP egress rejects URL userinfo before policy, DNS, or transport so credentials cannot be smuggled through an allowlisted host URL. It resolves hostnames before dispatch and denies the request before transport when `deny_private_ip_ranges` is true and any resolved address is private, loopback, link-local, documentation, multicast, broadcast, unspecified, carrier-grade NAT, unique-local, or an IPv4-mapped IPv6 address that maps to a non-public IPv4 address. The default transport disables redirects and pins the request to the vetted resolved address set so a later DNS answer cannot silently change the destination for that request, while still allowing connector-level fallback across alternate A/AAAA answers. Caller-provided `Host` headers are rejected before transport so virtual-host routing cannot diverge from the URL host that policy validated. Runtime-visible response bodies are always bounded: omitted and oversized explicit `response_body_limit` values clamp to the V1 default in-memory cap rather than reading unbounded data.
 
+Host-mediated egress may follow at most three redirects for ordinary requests,
+including explicitly authorized local requests, re-authorizing every destination
+and dropping every header before the next hop. The host sets `allow_redirects`
+false for exact local MCP requests: their 3xx response becomes a policy refusal
+without a second request, even to the same listener and path. This does not admit a private target; normal scoped network
+policy and DNS/address checks still run before the first request.
+
 Hermetic debug E2E binaries may activate the centralized transport wrapper with
 `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP`. Rewrites happen only after policy and
 DNS validation of the original destination and accept only loopback IP socket
@@ -113,6 +120,7 @@ The host-mediated HTTP path is:
 ```rust
 let egress = PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default());
 let response = egress.execute(NetworkHttpRequest {
+    allow_redirects: true,
     scope,
     method: NetworkMethod::Post,
     url: "https://api.example.test/v1/run".to_string(),
@@ -163,6 +171,7 @@ The crate tests cover:
 - caller-provided `Host` header denial before transport
 - default-port target matching for URL-derived requests
 - redirects are not followed by the default transport
+- `explicit_no_redirect_request_refuses_even_the_same_endpoint` covers explicit no-redirect requests, including a redirect to the same endpoint
 - streaming response body limits are enforced separately from request-byte accounting
 - omitted and oversized explicit response body limits clamp to a safe default instead of unbounded reads
 - fail-closed empty policy behavior

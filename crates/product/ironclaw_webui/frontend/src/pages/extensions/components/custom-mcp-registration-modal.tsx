@@ -58,13 +58,15 @@ function connectionErrors(name: string, id: string, endpoint: string, t: (key: s
     try {
       const parsed = new URL(trimmedEndpoint);
       const host = parsed.hostname.toLowerCase();
+      const enrolledLoopback = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/mcp$/.exec(trimmedEndpoint);
+      const exactLoopback = enrolledLoopback !== null && Number(enrolledLoopback[1]) <= 65535;
       const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
       const hasCredentialQuery = Array.from(parsed.searchParams.keys()).some((key) =>
         CREDENTIAL_QUERY_KEYS.has(key.toLowerCase()),
       );
       if (
-        parsed.protocol !== "https:" || !host || parsed.username || parsed.password || parsed.hash ||
-        host === "localhost" || isIpLiteral || hasCredentialQuery ||
+        (parsed.protocol !== "https:" && !exactLoopback) || !host || parsed.username || parsed.password || parsed.hash ||
+        host === "localhost" || (isIpLiteral && !exactLoopback) || hasCredentialQuery ||
         trimmedEndpoint.length > 2048 || CONTROL_CHARACTER_PATTERN.test(trimmedEndpoint)
       ) throw new Error("invalid hosted MCP endpoint");
     } catch {

@@ -2117,6 +2117,85 @@ async fn host_http_egress_with_reqwest_transport_follows_redirect_host_mediated(
 }
 
 #[tokio::test]
+async fn host_http_egress_sets_no_redirect_only_for_local_mcp_including_port80() {
+    for (runtime, url, allowed) in [
+        (RuntimeKind::Mcp, "http://127.0.0.1:80/mcp", false),
+        (RuntimeKind::Mcp, "http://127.0.0.1:43127/mcp", false),
+        (RuntimeKind::Mcp, "https://api.example.test/mcp", true),
+        (RuntimeKind::Script, "http://127.0.0.1:43127/mcp", true),
+    ] {
+        let network = RecordingNetwork::ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: vec![],
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 0,
+                resolved_ip: None,
+            },
+        });
+        let observed = network.requests.clone();
+        request_policy_staging_egress(network)
+            .execute(RuntimeHttpEgressRequest {
+                runtime,
+                scope: sample_scope(),
+                capability_id: sample_capability_id(),
+                method: NetworkMethod::Get,
+                url: url.to_string(),
+                headers: vec![],
+                body: vec![],
+                network_policy: local_http_policy(),
+                credential_injections: vec![],
+                response_body_limit: Some(1024),
+                save_body_to: None,
+                timeout_ms: None,
+            })
+            .await
+            .expect("host delegates the request after applying its restriction");
+        assert_eq!(
+            observed.lock().unwrap()[0].allow_redirects,
+            allowed,
+            "{runtime:?} {url}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_http_egress_refuses_redirect_for_exact_local_mcp_only() {
+    let (base_url, redirect_server) = single_response_server_owned(
+        "HTTP/1.1 302 Found\r\nLocation: /other\r\nContent-Length: 0\r\n\r\n".to_string(),
+    );
+    let network =
+        PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
+    let service = request_policy_staging_egress(network);
+    let result = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Mcp,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: url::Url::parse(&base_url)
+                .unwrap()
+                .join("/mcp")
+                .unwrap()
+                .to_string(),
+            headers: vec![],
+            body: vec![],
+            network_policy: local_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(1024),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await;
+    redirect_server.join().unwrap();
+    assert!(
+        matches!(result, Err(RuntimeHttpEgressError::Network { ref reason, .. }) if reason == "policy_denied"),
+        "local MCP must refuse the first redirect: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn host_http_egress_blocks_redirect_to_policy_denied_host() {
     // SSRF guarantee: a redirect `Location` pointing at a host the caller's
     // network policy does not allow is re-authorized and rejected before any

@@ -38,6 +38,7 @@ async fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
 
     let response = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1".to_string(),
@@ -77,6 +78,7 @@ async fn http_egress_forwards_timeout_to_transport() {
 
     egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1".to_string(),
@@ -114,6 +116,7 @@ async fn http_egress_forwards_sensitive_headers_in_zeroizing_transport_carrier()
 
     egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
@@ -164,6 +167,7 @@ async fn http_egress_denies_private_resolved_host_before_transport() {
 
     let error = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1".to_string(),
@@ -197,6 +201,7 @@ async fn http_egress_counts_url_and_headers_in_policy_egress_estimate_before_tra
 
     let error = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1/echo?query=large".to_string(),
@@ -251,6 +256,7 @@ async fn http_egress_rejects_caller_provided_host_header_before_transport() {
 
     let error = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1".to_string(),
@@ -285,6 +291,7 @@ async fn http_egress_rejects_userinfo_url_before_transport() {
 
     let error = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://user:pass@api.example.test/v1".to_string(),
@@ -316,6 +323,7 @@ async fn http_egress_denies_redirect_to_host_outside_policy() {
 
     let error = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url,
@@ -363,6 +371,7 @@ async fn http_egress_follows_allowlisted_redirect_and_strips_credentials() {
 
     let response = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/logs".to_string(),
@@ -506,6 +515,7 @@ async fn reqwest_transport_enforces_streaming_response_limit_separately_from_req
 
     let error = egress
         .execute(NetworkHttpRequest {
+            allow_redirects: true,
             scope: sample_scope(),
             method: NetworkMethod::Post,
             url,
@@ -777,6 +787,7 @@ fn require_zeroize_on_drop<T: ?Sized + zeroize::ZeroizeOnDrop>(_: &T) {}
 
 fn sample_request(url: &str) -> NetworkHttpRequest {
     NetworkHttpRequest {
+        allow_redirects: true,
         scope: sample_scope(),
         method: NetworkMethod::Get,
         url: url.to_string(),
@@ -880,4 +891,42 @@ fn sample_scope() -> ResourceScope {
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+#[tokio::test]
+async fn explicit_no_redirect_request_refuses_even_the_same_endpoint() {
+    let transport = ScriptedTransport::new(vec![
+        redirect_response("http://127.0.0.1:43127/mcp"),
+        ok_response("must not be fetched"),
+    ]);
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+    );
+    let result = egress
+        .execute(NetworkHttpRequest {
+            allow_redirects: false,
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "http://127.0.0.1:43127/mcp".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer synthetic-local".to_string(),
+            )],
+            body: b"{}".to_vec(),
+            policy: policy("127.0.0.1", Some(43127), false, None),
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await;
+    assert!(
+        matches!(result, Err(NetworkHttpError::PolicyDenied { .. })),
+        "literal local enrollment cannot follow a redirect, including a self-redirect"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "a redirect response never causes a second request"
+    );
 }

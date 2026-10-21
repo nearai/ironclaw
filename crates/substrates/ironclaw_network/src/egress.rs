@@ -134,6 +134,16 @@ where
             // network policy does not already allow. No header follows a hop, so
             // a host-injected credential can never travel off its audience host
             // — see `clear_headers_for_next_hop`.
+            // The host may narrow this request to one exact enrolled endpoint.
+            // Generic egress, including explicitly authorized local tests, retains
+            // the ordinary independently re-authorized redirect behavior.
+            if !request.allow_redirects && is_redirect_status(response.status) {
+                return Err(NetworkHttpError::PolicyDenied {
+                    reason: "redirects for this exact endpoint are refused".to_string(),
+                    request_bytes: estimated_request_bytes,
+                    response_bytes: response.usage.response_bytes,
+                });
+            }
             if redirects_remaining == 0 || !is_redirect_status(response.status) {
                 return Ok(response);
             }

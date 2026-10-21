@@ -95,7 +95,10 @@ fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
     else {
         return None;
     };
-    if transport != "http" || !args.is_empty() || !valid_hosted_mcp_url(url) {
+    let enrolled_local = package.manifest.source == ManifestSource::UserRegistered
+        && ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(url)
+            .is_some();
+    if transport != "http" || !args.is_empty() || !(valid_hosted_mcp_url(url) || enrolled_local) {
         return None;
     }
     Some(url.as_str())
@@ -229,6 +232,13 @@ fn discovered_capability_manifest(
 
 fn hosted_mcp_network_target(package: &ExtensionPackage) -> Option<NetworkTargetPattern> {
     let endpoint = url::Url::parse(hosted_http_mcp_url(package)?).ok()?;
+    if let Some(target) =
+        ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(
+            hosted_http_mcp_url(package)?,
+        )
+    {
+        return Some(target);
+    }
     Some(NetworkTargetPattern {
         scheme: Some(NetworkScheme::Https),
         host_pattern: endpoint.host_str()?.to_ascii_lowercase(),

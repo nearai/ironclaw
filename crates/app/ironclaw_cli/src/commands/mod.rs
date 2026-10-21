@@ -8,6 +8,7 @@ pub(crate) mod extension;
 pub(crate) mod hooks;
 pub(crate) mod ironhub;
 pub(crate) mod logs;
+pub(crate) mod mcp_token_import;
 pub(crate) mod models;
 pub(crate) mod onboard;
 pub(crate) mod profile;

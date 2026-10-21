@@ -99,9 +99,18 @@ impl ExtensionHostLifecycleProductService {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                extension_management
-                    .register_hosted_mcp(request, lifecycle_resource_scope(&context)?)
-                    .await
+                match context {
+                    LifecycleProductContext::Surface(context) => {
+                        extension_management
+                            .register_hosted_mcp_from_surface(request, context)
+                            .await
+                    }
+                    other => {
+                        extension_management
+                            .register_hosted_mcp(request, lifecycle_resource_scope(&other)?)
+                            .await
+                    }
+                }
             }
             LifecycleProductAction::SkillSearch { query } => {
                 let scope = self

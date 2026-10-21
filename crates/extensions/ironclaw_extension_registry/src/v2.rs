@@ -1196,6 +1196,22 @@ impl CapabilityDeclV2 {
         host_port_catalog: &HostPortCatalog,
         extra_id_namespace: Option<&str>,
     ) -> Result<Self, ManifestV2Error> {
+        Self::from_raw_with_mcp_enrollment(
+            raw,
+            extension_id,
+            host_port_catalog,
+            extra_id_namespace,
+            None,
+        )
+    }
+
+    pub(crate) fn from_raw_with_mcp_enrollment(
+        raw: RawCapabilityV2,
+        extension_id: &ExtensionId,
+        host_port_catalog: &HostPortCatalog,
+        extra_id_namespace: Option<&str>,
+        enrolled_target: Option<&NetworkTargetPattern>,
+    ) -> Result<Self, ManifestV2Error> {
         let id = CapabilityId::new(raw.id)?;
         // Provider-prefix check without an intermediate `format!` allocation:
         // capability id must be `<extension_id>.<...>` (the dot is required so
@@ -1388,7 +1404,9 @@ impl CapabilityDeclV2 {
                         "capability {id} declares invalid runtime credential audience: {error}"
                     ),
                 })?;
-            validate_runtime_credential_audience(&id, &raw_credential.audience)?;
+            if enrolled_target != Some(&raw_credential.audience) {
+                validate_runtime_credential_audience(&id, &raw_credential.audience)?;
+            }
             let provider_scopes = validate_runtime_credential_provider_scopes(
                 &id,
                 &raw_credential.source,

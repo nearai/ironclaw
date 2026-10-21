@@ -304,7 +304,49 @@ network-policy store, or probe hosted MCP servers directly.
 
 ---
 
-## 8. Non-goals
+## 8. Explicit loopback enrollment
+
+The trusted native Extensions UI or operator configuration may enroll one exact
+`http://127.0.0.1:<port>/mcp` endpoint. This is a human authority action:
+`register_hosted_mcp_from_surface` receives a host-created surface context, while
+the model-callable registration entry point rejects loopback even after tool
+approval. No request-body field can supply that context.
+
+The original string must contain a canonical nonzero decimal port, the literal
+IPv4 host, and exactly `/mcp`. URL normalization must not admit aliases,
+credentials, queries, fragments, dot segments, other paths, or wildcard targets.
+Only user-registered native MCP manifests can carry this exception. Registry
+provenance produces an ephemeral enrollment target for capability projection;
+a generic manifest or descriptor cannot grant itself private-network access.
+The exception applies only when the package has that single identical network
+target. All other private-network denial remains unchanged.
+
+Bearer registration uses the existing product-auth credential account service,
+account selection, secret-handle reference, and host-mediated injection. The
+manifest audience is the exact HTTP host and port; the MCP transport separately
+pins the full enrolled URL, including its path. Redirect following for literal loopback is refused by
+the host network engine, so neither discovery nor calls can move the bearer.
+
+`ironclaw extension import-mcp-token` is a trusted setup bridge, never a model
+tool. It accepts one bounded value from an inherited owner-only pipe, verifies
+the installed enrollment and credential audience before reading, and writes
+through the native manual-token account service. Updating requires the existing
+public account id and preserves that account. No raw credential is an argument,
+environment variable, durable response, or regular input file.
+
+Residual risk: if the enrolled server stops, another process running as the same
+OS user can bind the same port and receive the bearer. This exception does not
+authenticate the listener process. Persist the port, refuse takeover and silent
+migration, and use expiring, narrowly scoped, revocable credentials. Local
+servers must validate Host and Origin and reject unauthenticated requests before
+performing privileged admission or work.
+
+Primary caller regression:
+`tests/integration/hosted_mcp_registration.rs::enrolled_loopback_bearer_reaches_native_discovery_and_call`.
+
+---
+
+## 9. Non-goals
 
 This slice does not implement:
 

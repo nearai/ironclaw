@@ -187,3 +187,32 @@ test("registration errors stay in the registration modal", () => {
   const inputs = Array.from(document.querySelectorAll<HTMLInputElement>("input"));
   assert.deepEqual(inputs.map((input) => input.value), ["Linear MCP", "linear-mcp", "https://mcp.linear.app/mcp"]);
 });
+
+
+test("explicitly enrolls an exact loopback MCP endpoint without exposing credentials", () => {
+  let payload: CustomMcpRegistrationPayload | null = null;
+  renderModal({ onRegister: (request) => { payload = request; } });
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Local MCP");
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "http://127.0.0.1:3021/mcp");
+  clickButton("common.continue");
+  assert.match(document.body.textContent || "", /customMcpPhase\.review/);
+  clickButton("extensions.customMcpRegister");
+  assert.ok(payload);
+  assert.equal(payload.endpoint, "http://127.0.0.1:3021/mcp");
+  assert.equal(document.querySelector('input[type="password"]'), null);
+});
+
+
+for (const endpoint of ["http://localhost:3021/mcp", "http://127.1:3021/mcp",
+  "http://127.0.0.2:3021/mcp", "http://[::1]:3021/mcp",
+  "http://127.0.0.1:3021/a/../mcp", "http://127.0.0.1:3021/mcp/",
+  "http://127.0.0.1:3021/mcp?", "http://127.0.0.1:0/mcp"]) {
+  test(`refuses un-enrollable local endpoint ${endpoint}`, () => {
+    const props = renderModal();
+    setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Local MCP");
+    setInput(document.querySelectorAll<HTMLInputElement>("input")[2], endpoint);
+    clickButton("common.continue");
+    assert.match(document.body.textContent || "", /customMcpEndpointHttps/);
+    assert.equal(vi.mocked(props.onRegister).mock.calls.length, 0);
+  });
+}

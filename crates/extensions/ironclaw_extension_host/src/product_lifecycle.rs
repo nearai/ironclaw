@@ -290,6 +290,36 @@ impl ExtensionLifecycleManager {
         request: RegisterHostedMcpRequest,
         scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        if ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(
+            request.endpoint.as_str(),
+        )
+        .is_some()
+        {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: "loopback MCP enrollment requires the trusted user setup surface"
+                    .to_string(),
+            });
+        }
+        self.hosted_mcp_preparation.register(request, scope).await
+    }
+
+    /// Only the authenticated product setup surface and explicit local config
+    /// command construct this context. Model/runtime registration uses the
+    /// separate method above, which always refuses local enrollment.
+    pub async fn register_hosted_mcp_from_surface(
+        &self,
+        request: RegisterHostedMcpRequest,
+        context: ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        let scope = ResourceScope {
+            tenant_id: context.tenant_id,
+            user_id: context.user_id,
+            agent_id: context.agent_id,
+            project_id: context.project_id,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        };
         self.hosted_mcp_preparation.register(request, scope).await
     }
 
@@ -782,8 +812,17 @@ impl ExtensionLifecycleManager {
                     .capability_visibility(&descriptor.id)
                     .unwrap_or(CapabilityVisibility::Model)
                     == CapabilityVisibility::Model;
-                model_visible
-                    .then(|| ActiveExtensionCapability::from_descriptor(descriptor, owner.clone()))
+                model_visible.then(|| {
+                    let mut capability = ActiveExtensionCapability::from_descriptor(descriptor, owner.clone());
+                    capability.enrolled_loopback_target = registry.get_extension(&descriptor.provider)
+                        .filter(|package| package.manifest.source == ironclaw_extension_registry::ManifestSource::UserRegistered)
+                        .and_then(|package| match &package.manifest.runtime {
+                            ironclaw_extension_contracts::runtime::ExtensionRuntime::Mcp { url: Some(url), .. } =>
+                                ironclaw_extension_contracts::recipe::McpServerEndpoint::literal_loopback_target(url),
+                            _ => None,
+                        });
+                    capability
+                })
             })
             .collect())
     }

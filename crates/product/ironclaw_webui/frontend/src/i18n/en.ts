@@ -1365,7 +1365,7 @@ registerPack("en", {
   "extensions.customMcpIdRequired": "Enter a server ID.",
   "extensions.customMcpIdInvalid": "Server ID must use lowercase letters, numbers, underscores, hyphens, or dots, starting with a letter or number (128 chars max).",
   "extensions.customMcpEndpointRequired": "Enter a server address.",
-  "extensions.customMcpEndpointHttps": "Enter a public HTTPS URL without credentials, fragments, localhost, or an IP address.",
+  "extensions.customMcpEndpointHttps": "Enter a public HTTPS URL, or explicitly enroll http://127.0.0.1:<port>/mcp. Omit credentials and fragments.",
   "extensions.customMcpAuthHint": "This server requires authentication. Choose OAuth or bearer token to finish registration.",
   "extensions.customMcpReviewHint": "Add it now, then install it from Extensions. Connect an account or add a token if needed.",
   "extensions.customMcpAuth.no_auth": "No authentication",

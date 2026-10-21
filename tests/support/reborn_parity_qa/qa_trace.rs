@@ -1924,6 +1924,7 @@ mod tests {
         );
         let response = egress
             .execute(NetworkHttpRequest {
+                allow_redirects: true,
                 scope: ResourceScope {
                     tenant_id: TenantId::new("tenant1").unwrap(),
                     user_id: UserId::new("user1").unwrap(),

@@ -36,6 +36,46 @@ ironclaw extension remove notion
 
 ---
 
+## Enrolling a local server
+
+From the trusted **Extensions → Add MCP server** UI, enroll exactly
+`http://127.0.0.1:<port>/mcp` and choose bearer authentication. Only the explicit
+human enrollment path permits this endpoint; a model tool cannot enroll it.
+You can also use the trusted operator CLI:
+
+```bash
+ironclaw extension enroll-mcp local-tools --name "Local tools" --endpoint http://127.0.0.1:43127/mcp --json
+ironclaw extension install mcp-local-tools --json
+```
+
+Complete bearer setup in the native UI. An installer can instead deliver one
+credential through an inherited owner-only pipe with
+`ironclaw extension import-mcp-token mcp-local-tools --token-fd <fd>`.
+Write raw token bytes only, with no trailing newline or other whitespace, then
+close the writer within 15 seconds.
+The command prints public account metadata only. To rotate in place, supply
+`--expected-account <account-id>` from the previous receipt. If a setup process
+lost its receipt, `ironclaw extension import-mcp-token mcp-local-tools --inspect-account`
+returns the selected public account ID without reading a token or contacting the
+endpoint. Mint a replacement credential and import it with that expected ID;
+inspection never recovers the old secret.
+
+Use the same native home and configured identity as the running agent. The
+inherited descriptor must be a FIFO owned by the current user with mode `0600`.
+On macOS, create a named FIFO inside a private directory, open separate read and
+write descriptors, then unlink its name before delivering the credential. Close
+the writer after delivery. Anonymous process pipes and Node.js stdio sockets do
+not meet this descriptor contract. Do not put a bearer in command arguments,
+environment variables, or a regular file.
+
+The exception permits only that exact literal host, port, and path, without URL
+aliases or redirects. General private-network access stays denied. Persist the
+server port and refuse silent takeover: another same-user process that binds
+the enrolled port while the server is down could receive its bearer. Use
+expiring, scoped credentials that can be revoked at the local server.
+
+---
+
 ## Transport
 
 IronClaw connects to MCP servers over **HTTP(S)** using JSON-RPC 2.0.
