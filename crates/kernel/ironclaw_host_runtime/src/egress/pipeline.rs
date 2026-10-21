@@ -458,7 +458,20 @@ fn network_request(
     request: &mut RuntimeHttpEgressRequest,
     network_policy: NetworkPolicy,
 ) -> NetworkHttpRequest {
+    // Only local MCP requests acquire this additional restriction. URL and
+    // network authority were already derived/validated by the hosting boundary;
+    // this flag can remove redirect behavior, never grant network access.
+    let local_mcp = request.runtime == ironclaw_host_api::runtime::RuntimeKind::Mcp
+        && url::Url::parse(&request.url).is_ok_and(|url| {
+            url.scheme() == "http"
+                && url.host_str() == Some("127.0.0.1")
+                && url.port_or_known_default().is_some()
+                && url.path() == "/mcp"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
     NetworkHttpRequest {
+        allow_redirects: !local_mcp,
         scope: request.scope.clone(),
         method: request.method,
         url: std::mem::take(&mut request.url),

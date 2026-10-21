@@ -7782,6 +7782,7 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
     assert_eq!(first["active"], true);
     let calls_before_inspection = observed.lock().expect("observations").len();
     let inspected = isolated_no_llm_command(&workspace, &home)
+        .env("IRONCLAW_BASE_DIR", &legacy_home)
         .args([
             "extension",
             "import-mcp-token",
@@ -7829,14 +7830,11 @@ fn enrolled_loopback_pipe_setup_uses_native_account_and_rotates_in_place() {
         "all native probes use the expected scoped bearer"
     );
     assert!(
-        !temp
-            .path()
-            .join("isolated-home/.ironclaw/db.sqlite")
-            .exists(),
+        !workspace.join("isolated-home/.ironclaw/db.sqlite").exists(),
         "no legacy database"
     );
     assert!(
-        !temp.path().join("isolated-home/.ironclaw/secrets").exists(),
+        !workspace.join("isolated-home/.ironclaw/secrets").exists(),
         "no legacy secret store"
     );
 }

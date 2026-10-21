@@ -73,7 +73,11 @@ struct NativeAuthSetupError(ironclaw_auth::RebornAuthProductError);
 
 impl McpTokenImportCommand {
     #[cfg(unix)]
-    pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+    pub(crate) fn execute(
+        self,
+        context: RebornCliContext,
+        confirm_host_access: bool,
+    ) -> anyhow::Result<()> {
         let pipe = if self.inspect_account {
             None
         } else {
@@ -86,7 +90,7 @@ impl McpTokenImportCommand {
             context.boot_config(),
             RuntimeInputCaller::Run,
             RuntimeInputOptions {
-                confirm_host_access: false,
+                confirm_host_access,
             },
         )?;
         let executor = tokio::runtime::Builder::new_multi_thread()
@@ -110,7 +114,11 @@ impl McpTokenImportCommand {
     }
 
     #[cfg(not(unix))]
-    pub(crate) fn execute(self, _context: RebornCliContext) -> anyhow::Result<()> {
+    pub(crate) fn execute(
+        self,
+        _context: RebornCliContext,
+        _confirm_host_access: bool,
+    ) -> anyhow::Result<()> {
         bail!("private MCP pipe import is unsupported on this platform")
     }
 }

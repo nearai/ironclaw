@@ -73,7 +73,9 @@ impl ExtensionCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         crate::runtime::init_tracing();
         let (command, json, label) = match self.command {
-            ExtensionSubcommand::ImportMcpToken(command) => return command.execute(context),
+            ExtensionSubcommand::ImportMcpToken(command) => {
+                return command.execute(context, self.confirm_host_access);
+            }
             ExtensionSubcommand::EnrollMcp(command) => (
                 RebornExtensionLifecycleCommand::RegisterHostedMcp {
                     request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest {

@@ -3237,12 +3237,12 @@ async fn enrolled_loopback_bearer_reaches_native_discovery_and_call() {
             "endpoint":server.mcp_url(), "auth_type":"bearer"}),
     )
     .await;
-    assert!(
-        !matches!(
-            model_outcome,
-            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
-        ),
-        "even an approved model tool cannot enroll a local endpoint"
+    let ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(ref failure) = model_outcome else {
+        panic!("approved model enrollment must fail with the loopback refusal: {model_outcome:?}");
+    };
+    assert_eq!(
+        failure.model_visible_cause(),
+        Some("loopback MCP enrollment requires the trusted user setup surface")
     );
     assert!(
         services
@@ -3257,6 +3257,29 @@ async fn enrolled_loopback_bearer_reaches_native_discovery_and_call() {
     assert!(
         server.requests().is_empty(),
         "no model enrollment network probe"
+    );
+    let https_control = build_lifecycle_test_services(
+        "local-mcp-enrollment-owner",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let https_outcome = invoke_with_standalone_approval(
+        &https_control,
+        "builtin.extension_register_hosted_mcp",
+        runtime_context(scope.clone(), "builtin.extension_register_hosted_mcp"),
+        json!({"desired_id":"https-control", "desired_name":"HTTPS control",
+            "endpoint":"https://mcp.example.test/mcp", "auth_type":"bearer"}),
+    )
+    .await;
+    assert!(
+        matches!(
+            https_outcome,
+            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+        ),
+        "the same approved model caller can enroll an HTTPS server: {https_outcome:?}"
     );
     let mut request = registration_request(HostedMcpAuthSelection::Bearer);
     request.endpoint = HostedMcpEndpoint::new(server.mcp_url()).expect("literal fixture endpoint");
