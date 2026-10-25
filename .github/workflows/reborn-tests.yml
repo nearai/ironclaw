@@ -110,7 +110,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - uses: ./.github/actions/setup-rust
@@ -353,7 +353,7 @@ jobs:
 
       - name: Install Node.js for WebUI bundle builds
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -384,7 +384,7 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           # ONE shared cache for all ~60 crate-test jobs instead of a per-crate
           # key. Per-crate keys produced ~60 caches (registry + target each,
@@ -586,7 +586,7 @@ jobs:
 
       - name: Upload bucket lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-crate-cov-bucket-${{ matrix.bucket.name }}
           path: bucket-${{ matrix.bucket.name }}.lcov
@@ -641,7 +641,7 @@ jobs:
           mold: true
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           # All 4 root partitions compile the *same* root-package build (they
           # only run different test partitions), and that build is the same
@@ -699,7 +699,7 @@ jobs:
           mold: true
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           # `reborn-direct` is the plain lineage for lanes that run cargo
           # directly (no hermetic wrapper, so the host Cargo home): this job
@@ -808,7 +808,7 @@ jobs:
         run: corepack enable pnpm
 
       - name: Install Node.js for instrumented WebUI bundle builds
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -837,7 +837,7 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           # ONE shared key across all 5 instrumented lanes: they all
           # instrument the same workspace build, so a per-lane key would just
@@ -883,7 +883,7 @@ jobs:
 
       - name: Upload lane lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-integration-cov-part-${{ matrix.batch.id }}
           path: part-${{ matrix.batch.id }}.lcov
@@ -914,19 +914,19 @@ jobs:
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Download lane lcov artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: reborn-integration-cov-part-*
           path: coverage-parts
           merge-multiple: true
 
       - name: Download crate bucket lcov artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: reborn-crate-cov-bucket-*
           path: coverage-parts
@@ -1024,7 +1024,7 @@ jobs:
       # the "real hole list" — kept as an artifact for offline inspection.
       - name: Upload merged coverage report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-integration-coverage-merged
           path: |
@@ -1077,7 +1077,7 @@ jobs:
       # set a 40-minute merge-queue wall clock when the gate ran everything).
       - name: Restore Rust cache
         if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: reborn-direct
           save-if: false
@@ -1142,7 +1142,7 @@ jobs:
         run: corepack enable pnpm
 
       - name: Install Node.js for QA replay WebUI bundle builds
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -1171,7 +1171,7 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           # Same hermetic stable+mold build as the root partitions: one
           # shared lineage (see crate-tests), saved by this push-run job.

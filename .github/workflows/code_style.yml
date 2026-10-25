@@ -186,7 +186,7 @@ jobs:
         with:
           components: rustfmt
       - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Check formatting
@@ -312,7 +312,7 @@ jobs:
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -410,7 +410,7 @@ jobs:
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
         if: contains(matrix.flags, '--all-features')
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -429,7 +429,7 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: clippy
           # Saved from pushes to main only (merge_group saves land on a queue
@@ -533,7 +533,7 @@ jobs:
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
         if: contains(matrix.flags, '--all-features')
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -553,7 +553,7 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: windows-${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -573,10 +573,10 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: reborn-cli-smoke
           # Saved from pushes to main only (merge_group saves land on a queue
@@ -626,7 +626,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Self-test the publication boundary check

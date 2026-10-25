@@ -63,7 +63,7 @@ jobs:
       - name: Install Rust
         uses: ./.github/actions/setup-rust
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: ironclaw-stress-libsql
           # Saved by the nightly scan only (this workflow has no push trigger);
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload stress suite artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-suite
           path: |
@@ -144,7 +144,7 @@ jobs:
       - name: Install Rust
         uses: ./.github/actions/setup-rust
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: ironclaw-stress-ramp
           save-if: ${{ github.event_name == 'schedule' }}
@@ -169,7 +169,7 @@ jobs:
 
       - name: Upload stress ramp artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-ramp
           path: |
@@ -189,7 +189,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: ironclaw-stress-soak
           save-if: ${{ github.event_name == 'schedule' }}
@@ -206,7 +206,7 @@ jobs:
             2> target/ironclaw-stress/soak-report.txt
       - name: Upload soak artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-soak
           path: |
@@ -240,7 +240,7 @@ jobs:
         uses: ./.github/actions/setup-rust
 
       - name: Install Node.js for WebUI bundle build
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
 
@@ -254,7 +254,7 @@ jobs:
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: ironclaw-stress-libsql-scripted
           save-if: ${{ github.event_name == 'schedule' }}
@@ -372,7 +372,7 @@ jobs:
 
       - name: Upload libsql scripted memory_roundtrip artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-scripted-memory-roundtrip
           path: |
@@ -384,7 +384,7 @@ jobs:
 
       - name: Upload libsql scripted memory_grow artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-scripted-memory-grow
           path: |
@@ -396,7 +396,7 @@ jobs:
 
       - name: Upload libsql scripted memory_mixed artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-scripted-memory-mixed
           path: |
@@ -408,7 +408,7 @@ jobs:
 
       - name: Upload libsql scripted server log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-libsql-scripted-server-log
           path: |
@@ -457,7 +457,7 @@ jobs:
         uses: ./.github/actions/setup-rust
 
       - name: Install Node.js for WebUI bundle build
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
 
@@ -471,7 +471,7 @@ jobs:
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: ironclaw-stress-postgres-api
           save-if: ${{ github.event_name == 'schedule' }}
@@ -615,7 +615,7 @@ jobs:
 
       - name: Upload Postgres API capacity artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-postgres-api-capacity
           path: |
@@ -630,7 +630,7 @@ jobs:
 
       - name: Upload Postgres scripted memory roundtrip artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ironclaw-stress-postgres-scripted-memory-roundtrip
           path: |
