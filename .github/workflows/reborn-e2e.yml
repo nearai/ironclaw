@@ -158,7 +158,7 @@ jobs:
           mold: true
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           # The same hermetic stable+mold build as every guarded Tests (Reborn)
           # lane, so the four groups share that workflow's `reborn-hermetic`
@@ -206,7 +206,7 @@ jobs:
         run: corepack enable pnpm
 
       - name: Install Node.js for WebUI bundle build
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "24"
           cache: "pnpm"
@@ -238,14 +238,14 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: tests/e2e/pyproject.toml
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: reborn-e2e-webui-v2-smoke
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -325,7 +325,7 @@ jobs:
 
       - name: Upload product-surface coverage matrix
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: product-surface-coverage-${{ steps.product_surface_coverage.outputs.source_commit }}
           path: artifacts/product-surface-coverage/
@@ -369,7 +369,7 @@ jobs:
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload Reborn SSO test binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-webui-v2-sso-binary-${{ steps.live_canary_binary.outputs.product_ref }}
           path: artifacts/reborn-webui-v2-sso-binary/
@@ -378,7 +378,7 @@ jobs:
           retention-days: 1
 
       - name: Upload live-canary binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}
           path: artifacts/reborn-webui-v2-binary/
@@ -434,14 +434,14 @@ jobs:
         uses: ./.github/actions/setup-rust
 
       - name: Download default Reborn E2E binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: reborn-webui-v2-binary-${{ needs.webui-v2-smoke.outputs.product_ref }}
           path: artifacts/reborn-webui-v2-binary
 
       - name: Download Reborn SSO test binary
         if: matrix.kind == 'browser'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: reborn-webui-v2-sso-binary-${{ needs.webui-v2-smoke.outputs.product_ref }}
           path: artifacts/reborn-webui-v2-sso-binary
@@ -469,7 +469,7 @@ jobs:
           touch target/debug/.ironclaw-reborn-openai-compat.stamp
 
       - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: pip
@@ -515,7 +515,7 @@ jobs:
 
       - name: Install Node.js for Emulate
         if: matrix.kind == 'provider'
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "24"
           cache: "pnpm"
@@ -641,7 +641,7 @@ jobs:
 
       - name: Upload screenshots on failure
         if: matrix.kind == 'browser' && failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-webui-v2-screenshots
           path: tests/e2e/screenshots/
@@ -649,7 +649,7 @@ jobs:
 
       - name: Upload E2E diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reborn-e2e-${{ matrix.lane }}-diagnostics
           path: ${{ runner.temp }}/e2e-artifacts/

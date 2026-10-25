@@ -104,7 +104,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Run auth smoke lane
@@ -114,7 +114,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-auth-smoke
           path: artifacts/live-canary/
@@ -135,7 +135,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Run auth full lane
@@ -145,7 +145,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-auth-full
           path: artifacts/live-canary/
@@ -166,7 +166,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Run auth channel lane
@@ -176,7 +176,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-auth-channels
           path: artifacts/live-canary/
@@ -210,7 +210,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Materialize sensitive secrets to files
@@ -265,7 +265,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-auth-live-seeded
           path: artifacts/live-canary/
@@ -305,7 +305,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Materialize provider storage state
@@ -366,7 +366,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-auth-browser-consent
           path: artifacts/live-canary/
@@ -403,7 +403,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: live-canary-workflow-canary
       - name: Setup OVH sccache
@@ -421,7 +421,7 @@ jobs:
         run: cargo install cargo-component --locked || true
       - name: Build WASM channels
         run: ./scripts/build-wasm-extensions.sh --channels
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Run workflow canary lane
@@ -431,7 +431,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-workflow-canary
           path: artifacts/live-canary/
@@ -451,7 +451,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: live-canary-deterministic-replay
       - name: Setup OVH sccache
@@ -482,7 +482,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-deterministic-replay
           path: artifacts/live-canary/
@@ -505,7 +505,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: live-canary-public-smoke
       - name: Setup OVH sccache
@@ -536,7 +536,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-public-smoke
           path: artifacts/live-canary/
@@ -783,7 +783,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         if: steps.lookup.outputs.found != '1'
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         if: steps.lookup.outputs.found != '1'
         with:
           key: live-canary-reborn-webui-v2-live-qa
@@ -835,7 +835,7 @@ jobs:
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
 
       - name: Upload prepared Reborn WebUI v2 binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}
           path: artifacts/prepared-reborn-webui-v2-binary/
@@ -1067,7 +1067,7 @@ jobs:
           cp .canonical-live-qa-harness/tests/e2e/ironclaw_e2e.egg-info/requires.txt tests/e2e/ironclaw_e2e.egg-info/requires.txt
           rm -rf .canonical-live-qa-harness
           echo "REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF=${harness_ref}" >> "${GITHUB_ENV}"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         with:
           python-version: "3.12"
@@ -1084,7 +1084,7 @@ jobs:
 
       - name: Download prepared Reborn WebUI v2 binary
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: prepared-reborn-webui-v2-binary-${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}
           path: .live-qa-binary
@@ -1201,7 +1201,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always() && steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-reborn-webui-v2-live-qa-${{ matrix.shard_id }}
           path: |
@@ -1240,7 +1240,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: live-canary-persona-rotating
       - name: Setup OVH sccache
@@ -1271,7 +1271,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-persona-rotating
           path: artifacts/live-canary/
@@ -1321,7 +1321,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload summaries only
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-private-oauth-summary
           # results.json is emitted by scripts/live-canary/emit_results_json.py
@@ -1353,7 +1353,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: live-canary-release-public-full
       - name: Setup OVH sccache
@@ -1383,7 +1383,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-release-public-full
           path: artifacts/live-canary/
@@ -1404,7 +1404,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: live-canary-upgrade
       - name: Setup OVH sccache
@@ -1431,7 +1431,7 @@ jobs:
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-canary-upgrade
           path: artifacts/live-canary/
@@ -1465,11 +1465,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Download all lane artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           # Each upstream lane uploads to `live-canary-<lane>` / `live-canary-provider-<provider>`.
           # Merging into a single artifacts/live-canary/ tree lets notify_slack.py

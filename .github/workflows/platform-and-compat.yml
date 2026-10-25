@@ -173,7 +173,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: hooks-parity
           # Saved from pushes to main only (merge_group saves land on a queue
@@ -224,7 +224,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: windows-${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -262,7 +262,7 @@ jobs:
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -277,7 +277,7 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: wasm-extensions
           # Saved from pushes to main only (merge_group saves land on a queue
@@ -313,7 +313,7 @@ jobs:
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -328,7 +328,7 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           key: bench
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
