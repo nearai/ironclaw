@@ -25,7 +25,7 @@ thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
-libsql = { version = "0.9", default-features = false, features = ["core"] }
+libsql = { version = "0.10", default-features = false, features = ["core"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
