@@ -85,7 +85,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 toml = "1.1"
 tracing = "0.1"
 url = "2"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 ironclaw_skills = { path = "../../domains/ironclaw_skills" }

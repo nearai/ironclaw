@@ -91,7 +91,7 @@ hex = "0.4"
 ironclaw_skills = { path = "../../domains/ironclaw_skills" }
 # Test-only since WS3: the ZIP-bundle fixtures these tests build stay here; the
 # extractor moved to `ironclaw_extension_support::skills::url_install`.
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Enables the in-memory-backed approval store constructors for tests only.
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
