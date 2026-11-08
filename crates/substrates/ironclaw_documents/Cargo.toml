@@ -18,14 +18,14 @@ layer = "substrates"
 # editor copies every event through untouched except the ones it targets, so
 # attribute order, namespace prefixes, and whitespace survive a round trip.
 # A DOM re-serializer normalizes all three and would churn parts nobody edited.
-quick-xml = "0.41"
+quick-xml = "0.42"
 # Pure-Rust PDF writer for the HTML-subset renderer. Uses the PDF standard-14
 # fonts, so no font files are vendored and no system fonts are read — the
 # renderer stays hermetic.
 printpdf = { version = "0.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serde_json = "1"
