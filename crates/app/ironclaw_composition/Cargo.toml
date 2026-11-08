@@ -104,14 +104,14 @@ ironclaw_turns = { path = "../../kernel/ironclaw_turns" }
 nix = { version = "0.31", default-features = false, features = ["process"] }
 # WebUI v2 route surface + static SPA bundle merged up into
 # `ironclaw_webui`; no longer a composition dependency.
-libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.10", default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
 axum = { version = "0.8" }
 tower = { version = "0.5" }
 tower-http = { version = "0.7", features = ["cors", "set-header", "limit", "catch-panic"] }
-lru = { version = "0.18" }
+lru = { version = "0.19" }
 fs4 = "1.1"
 hex = "0.4.3"
 rand = "0.10"
