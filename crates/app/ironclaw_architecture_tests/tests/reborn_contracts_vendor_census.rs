@@ -159,7 +159,9 @@ const CENSUS: &[CensusScope] = &[
     },
     CensusScope {
         path: "crates/ironclaw_common/src/llm_costs.rs",
-        occurrences: 91,
+        // 91 -> 46: model ids listed by the `llm-prices` crate are priced from
+        // it and dropped from the local table.
+        occurrences: 46,
         distinct_vendors: 9,
         basis: "UNSANCTIONED RESIDUE, found by this census (#7150): a per-model price \
                 table in the contracts family that D-E's 'nowhere else' does not cover \

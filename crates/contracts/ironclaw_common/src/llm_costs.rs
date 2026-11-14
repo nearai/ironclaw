@@ -1,9 +1,12 @@
 //! Per-model cost lookup table for multi-provider LLM support.
 //!
 //! Returns (input_cost_per_token, output_cost_per_token) as Decimal pairs.
-//! Ollama and other local models return zero cost.
+//! Ollama and other local models return zero cost. Rates for models listed by
+//! the `llm-prices` crate (dated, source-cited provider prices) come from it;
+//! the table below covers the ids it does not list.
 
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -23,60 +26,43 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         .map(|(_, name)| name)
         .unwrap_or(model_id);
 
+    if is_local_model(id) {
+        return Some((Decimal::ZERO, Decimal::ZERO));
+    }
+
+    if let Some(price) = listed_price(id) {
+        return Some(price);
+    }
+
     match id {
         // OpenAI — GPT-5.x / Codex
-        "gpt-5.5" | "gpt-5.5-codex" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.3-codex" | "gpt-5.3-codex-spark" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.2-codex" | "gpt-5.2-pro" | "gpt-5.2" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.1-codex" | "gpt-5.1-codex-max" | "gpt-5.1" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.5-codex" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.3-codex-spark" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.2-codex" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.1-codex" | "gpt-5.1-codex-max" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-5.1-codex-mini" => Some((dec!(0.0000003), dec!(0.0000012))),
-        "gpt-5-codex" | "gpt-5-pro" | "gpt-5" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5-mini" | "gpt-5-nano" => Some((dec!(0.0000003), dec!(0.0000012))),
+        "gpt-5-codex" => Some((dec!(0.000002), dec!(0.000008))),
         // OpenAI — GPT-4.x
-        "gpt-4.1" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-4.1-mini" => Some((dec!(0.0000004), dec!(0.0000016))),
-        "gpt-4.1-nano" => Some((dec!(0.0000001), dec!(0.0000004))),
-        "gpt-4o" | "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => {
-            Some((dec!(0.0000025), dec!(0.00001)))
-        }
-        "gpt-4o-mini" | "gpt-4o-mini-2024-07-18" => Some((dec!(0.00000015), dec!(0.0000006))),
-        "gpt-4-turbo" | "gpt-4-turbo-2024-04-09" => Some((dec!(0.00001), dec!(0.00003))),
-        "gpt-4" | "gpt-4-0613" => Some((dec!(0.00003), dec!(0.00006))),
-        "gpt-3.5-turbo" | "gpt-3.5-turbo-0125" => Some((dec!(0.0000005), dec!(0.0000015))),
+        "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => Some((dec!(0.0000025), dec!(0.00001))),
+        "gpt-4o-mini-2024-07-18" => Some((dec!(0.00000015), dec!(0.0000006))),
+        "gpt-4-turbo" => Some((dec!(0.00001), dec!(0.00003))),
+        "gpt-4" => Some((dec!(0.00003), dec!(0.00006))),
         // OpenAI — reasoning
-        "o3" => Some((dec!(0.000002), dec!(0.000008))),
-        "o3-mini" | "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
-        "o4-mini" => Some((dec!(0.0000011), dec!(0.0000044))),
-        "o1" | "o1-2024-12-17" => Some((dec!(0.000015), dec!(0.00006))),
+        "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
+        "o1-2024-12-17" => Some((dec!(0.000015), dec!(0.00006))),
         "o1-mini" | "o1-mini-2024-09-12" => Some((dec!(0.000003), dec!(0.000012))),
 
         // Anthropic
-        "claude-opus-4-6"
-        | "claude-opus-4-5"
-        | "claude-opus-4-5-20251101"
-        | "claude-opus-4-1"
-        | "claude-opus-4-1-20250805"
-        | "claude-opus-4-0"
-        | "claude-opus-4-20250514"
-        | "claude-3-opus-20240229"
-        | "claude-3-opus-latest" => Some((dec!(0.000015), dec!(0.000075))),
-        "claude-sonnet-4-6"
-        | "claude-sonnet-4-5"
-        | "claude-sonnet-4-5-20250929"
-        | "claude-sonnet-4-0"
-        | "claude-sonnet-4-20250514"
+        "claude-opus-4-0" | "claude-3-opus-20240229" | "claude-3-opus-latest" => {
+            Some((dec!(0.000015), dec!(0.000075)))
+        }
+        "claude-sonnet-4-0"
         | "claude-3-7-sonnet-20250219"
         | "claude-3-7-sonnet-latest"
         | "claude-3-5-sonnet-20241022"
         | "claude-3-5-sonnet-latest" => Some((dec!(0.000003), dec!(0.000015))),
-        "claude-haiku-4-5"
-        | "claude-haiku-4-5-20251001"
-        | "claude-3-5-haiku-20241022"
-        | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
+        "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
-
-        // Ollama / local models -- free
-        _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 
         // Family fallbacks: a new GPT-5.x minor release shouldn't need a table
         // edit just to be budgeted. Exact arms above win for known per-model
@@ -89,6 +75,18 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
 
         _ => None,
     }
+}
+
+/// Per-token `(input, output)` rates from the `llm-prices` table, when it lists
+/// both for `id` (provider prefix already stripped).
+fn listed_price(id: &str) -> Option<(Decimal, Decimal)> {
+    let price = llm_prices::lookup(id)?;
+    Some((per_token(price.input?)?, per_token(price.output?)?))
+}
+
+/// Convert an `llm-prices` USD-per-1M-tokens rate to USD per token.
+fn per_token(usd_per_million: f64) -> Option<Decimal> {
+    Some(Decimal::from_f64(usd_per_million)? / dec!(1_000_000))
 }
 
 /// Default cost for unknown models.
@@ -111,14 +109,19 @@ pub struct UsageCost {
     pub total_cost: Decimal,
 }
 
-/// Cache-read discount divisor by model family, mirroring the provider defaults
-/// documented on `LlmProvider::cache_read_discount` (Anthropic 10× i.e. 90% off,
-/// OpenAI 2× i.e. 50% off, others no discount).
+/// Cache-read discount divisor for `model_id`. Models listed by `llm-prices`
+/// with a cache-read rate use their published ratio (e.g. GPT-5 10×, GPT-4.1
+/// 4×); otherwise this falls back to the provider defaults documented on
+/// `LlmProvider::cache_read_discount` (Anthropic 10× i.e. 90% off, OpenAI 2×
+/// i.e. 50% off, others no discount).
 pub fn cache_read_discount(model_id: &str) -> Decimal {
     let lower = model_id.to_ascii_lowercase();
     // Strip provider prefixes (e.g. "openai/o1-mini" -> "o1-mini") so the
     // reasoning-tier `starts_with` checks match, mirroring `model_cost`.
     let name = lower.rsplit_once('/').map(|(_, n)| n).unwrap_or(&lower);
+    if let Some(discount) = listed_cache_read_discount(name) {
+        return discount;
+    }
     if name.contains("claude") {
         Decimal::from(10)
     } else if name.contains("gpt")
@@ -130,6 +133,18 @@ pub fn cache_read_discount(model_id: &str) -> Decimal {
     } else {
         Decimal::ONE
     }
+}
+
+/// Input rate over cache-read rate from the `llm-prices` table, when it lists
+/// both for `name` (provider prefix already stripped).
+fn listed_cache_read_discount(name: &str) -> Option<Decimal> {
+    if is_local_model(name) {
+        return None;
+    }
+    let price = llm_prices::lookup(name)?;
+    let input = Decimal::from_f64(price.input?)?;
+    let cache_read = Decimal::from_f64(price.cache_read?)?;
+    (cache_read > Decimal::ZERO).then(|| input / cache_read)
 }
 
 /// Price a run's cumulative token usage in USD for `model_id`.
@@ -295,19 +310,68 @@ mod tests {
         assert_eq!(cache_read_discount("o1-mini"), Decimal::from(2));
         assert_eq!(cache_read_discount("o3-mini"), Decimal::from(2));
         // o4-mini is priced as an OpenAI reasoning model by `model_cost`, so it
-        // must receive the same 2× cache discount (regression: previously fell
-        // through to no discount).
-        assert_eq!(cache_read_discount("o4-mini"), Decimal::from(2));
+        // must receive a cache discount (regression: previously fell through to
+        // no discount). Its listed cache-read rate is $0.275 vs $1.10 input: 4×.
+        assert_eq!(cache_read_discount("o4-mini"), Decimal::from(4));
         // Provider-prefixed IDs must strip the prefix before matching, matching
         // `model_cost` (regression: "openai/o1-mini" previously got no discount).
         assert_eq!(cache_read_discount("openai/o1-mini"), Decimal::from(2));
-        assert_eq!(cache_read_discount("azure/o4-mini"), Decimal::from(2));
+        assert_eq!(cache_read_discount("azure/o4-mini"), Decimal::from(4));
+        // GPT-5 family cache reads are 90% off, not 50%.
+        assert_eq!(cache_read_discount("gpt-5"), Decimal::from(10));
+        assert_eq!(cache_read_discount("gpt-5.2"), Decimal::from(10));
         assert_eq!(
             cache_read_discount("anthropic/claude-opus-4-6"),
             Decimal::from(10)
         );
         // Unknown / local models: no discount.
         assert_eq!(cache_read_discount("llama-3.1-70b"), Decimal::ONE);
+    }
+
+    #[test]
+    fn test_listed_models_use_published_prices() {
+        // Rates from the `llm-prices` table, USD per token.
+        assert_eq!(model_cost("gpt-5.5"), Some((dec!(0.000005), dec!(0.00003))));
+        assert_eq!(
+            model_cost("gpt-5.2-pro"),
+            Some((dec!(0.000021), dec!(0.000168)))
+        );
+        assert_eq!(
+            model_cost("claude-opus-4-6"),
+            Some((dec!(0.000005), dec!(0.000025)))
+        );
+        // Dated ids and provider prefixes resolve to the same row.
+        assert_eq!(
+            model_cost("anthropic/claude-haiku-4-5-20251001"),
+            Some((dec!(0.000001), dec!(0.000005)))
+        );
+        assert_eq!(
+            model_cost("claude-opus-4-1"),
+            Some((dec!(0.000015), dec!(0.000075)))
+        );
+    }
+
+    #[test]
+    fn test_unlisted_models_keep_table_and_family_fallbacks() {
+        // Not in `llm-prices`: the local table still prices these.
+        assert_eq!(
+            model_cost("gpt-5.1-codex-mini"),
+            Some((dec!(0.0000003), dec!(0.0000012)))
+        );
+        assert_eq!(
+            model_cost("claude-3-5-sonnet-20241022"),
+            Some((dec!(0.000003), dec!(0.000015)))
+        );
+        // Unknown gpt-5 slugs still hit the family fallback.
+        assert_eq!(
+            model_cost("gpt-5.9-preview"),
+            Some((dec!(0.000002), dec!(0.000008)))
+        );
+        // Local-model heuristic still wins over a listed hosted price.
+        assert_eq!(
+            model_cost("deepseek-v4-pro"),
+            Some((Decimal::ZERO, Decimal::ZERO))
+        );
     }
 
     #[test]
@@ -347,13 +411,13 @@ mod tests {
     fn price_usage_discounts_cache_reads_and_bills_creation_at_full_rate() {
         // 3000 input of which 2000 were cache reads (claude 10× discount),
         // plus 1000 cache-creation tokens billed at the full input rate.
-        // claude-opus input rate 0.000015/tok.
+        // claude-opus-4-6 input rate 0.000005/tok.
         let cost = price_usage("claude-opus-4-6", 3_000, 0, 2_000, 1_000);
-        // fresh input = (3000 - 2000) + 1000 = 2000 → 2000 * 0.000015 = 0.03
-        assert_eq!(cost.input_cost, dec!(0.03));
-        // cached = 2000 * 0.000015 / 10 = 0.003
-        assert_eq!(cost.cached_input_cost, dec!(0.003));
-        assert_eq!(cost.total_cost, dec!(0.033));
+        // fresh input = (3000 - 2000) + 1000 = 2000 → 2000 * 0.000005 = 0.01
+        assert_eq!(cost.input_cost, dec!(0.01));
+        // cached = 2000 * 0.000005 / 10 = 0.001
+        assert_eq!(cost.cached_input_cost, dec!(0.001));
+        assert_eq!(cost.total_cost, dec!(0.011));
     }
 
     #[test]

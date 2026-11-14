@@ -1300,7 +1300,7 @@ fn response_cost_bills_cache_creation_at_full_input_rate() {
 
 #[test]
 fn response_cost_applies_claude_cache_read_discount() {
-    // claude-opus-4-6 input rate 0.000015/tok; the Claude cache-read discount is
+    // claude-opus-4-6 input rate 0.000005/tok; the Claude cache-read discount is
     // 10x (90% off). `input_tokens` is the total (3000), of which 2000 were
     // cache reads, leaving 1000 fresh.
     let usage = LoopModelUsage {
@@ -1310,10 +1310,10 @@ fn response_cost_applies_claude_cache_read_discount() {
         cache_creation_input_tokens: 0,
     };
     let cost = response_cost_from_model_usage(&usage, "claude-opus-4-6").expect("cost");
-    // fresh input = (3000 - 2000) * 0.000015 = 0.015
-    assert_eq!(cost.input_cost_usd, "0.015");
-    // cached = 2000 * 0.000015 / 10 = 0.003
-    assert_eq!(cost.cached_input_cost_usd, "0.003");
+    // fresh input = (3000 - 2000) * 0.000005 = 0.005
+    assert_eq!(cost.input_cost_usd, "0.005");
+    // cached = 2000 * 0.000005 / 10 = 0.001
+    assert_eq!(cost.cached_input_cost_usd, "0.001");
 }
 
 #[test]

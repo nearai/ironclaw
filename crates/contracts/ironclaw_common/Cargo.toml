@@ -22,6 +22,7 @@ base64 = "0.23"
 chrono-tz = "0.10"
 dirs = "6"
 hex = "0.4"
+llm-prices = "1.1"
 rand = "0.10"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"

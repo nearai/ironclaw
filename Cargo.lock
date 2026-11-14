@@ -3973,6 +3973,7 @@ dependencies = [
  "chrono-tz",
  "dirs",
  "hex",
+ "llm-prices",
  "rand 0.10.2",
  "rust_decimal",
  "rust_decimal_macros",
@@ -6082,6 +6083,12 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "llm-prices"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05b3c34e1da0701ea90961e75e9f1b14671bcdc6fa59fc1c356459ba257a2c17"
 
 [[package]]
 name = "locate-locale"
