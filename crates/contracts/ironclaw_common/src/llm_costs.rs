@@ -2,11 +2,11 @@
 //!
 //! Returns (input_cost_per_token, output_cost_per_token) as Decimal pairs.
 //! Ollama and other local models return zero cost. Rates for models listed by
-//! the `llm-prices` crate (dated, source-cited provider prices) come from it;
+//! the `llm-prices` crate (dated, source-cited provider prices) come from it,
+//! converted through their exact decimal form rather than `f64` arithmetic;
 //! the table below covers the ids it does not list.
 
 use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -30,18 +30,11 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         return Some((Decimal::ZERO, Decimal::ZERO));
     }
 
-    if let Some(price) = listed_price(id) {
+    if let Some(price) = listed_row(id).and_then(listed_rates) {
         return Some(price);
     }
 
     match id {
-        // OpenAI — GPT-5.x / Codex
-        "gpt-5.5-codex" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.3-codex-spark" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.2-codex" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.1-codex" | "gpt-5.1-codex-max" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.1-codex-mini" => Some((dec!(0.0000003), dec!(0.0000012))),
-        "gpt-5-codex" => Some((dec!(0.000002), dec!(0.000008))),
         // OpenAI — GPT-4.x
         "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => Some((dec!(0.0000025), dec!(0.00001))),
         "gpt-4o-mini-2024-07-18" => Some((dec!(0.00000015), dec!(0.0000006))),
@@ -64,29 +57,55 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
-        // Family fallbacks: a new GPT-5.x minor release shouldn't need a table
-        // edit just to be budgeted. Exact arms above win for known per-model
-        // pricing; these only catch unrecognized `gpt-5*` slugs. `*-mini` /
-        // `*-nano` bill at the small tier, everything else at the standard tier.
-        _ if id.starts_with("gpt-5") && (id.ends_with("-mini") || id.ends_with("-nano")) => {
-            Some((dec!(0.0000003), dec!(0.0000012)))
-        }
-        _ if id.starts_with("gpt-5") => Some((dec!(0.000002), dec!(0.000008))),
-
         _ => None,
     }
 }
 
-/// Per-token `(input, output)` rates from the `llm-prices` table, when it lists
-/// both for `id` (provider prefix already stripped).
-fn listed_price(id: &str) -> Option<(Decimal, Decimal)> {
-    let price = llm_prices::lookup(id)?;
-    Some((per_token(price.input?)?, per_token(price.output?)?))
+/// The `llm-prices` row that prices `id` (provider prefix already stripped):
+/// its own row when listed, else, for an unlisted `gpt-5*` slug (Codex
+/// variants, a new minor release), the row it bills at. Family fallbacks live
+/// here so a new GPT-5.x release is budgeted without a table edit and stays
+/// consistent with the listed rates.
+fn listed_row(id: &str) -> Option<&'static llm_prices::Price> {
+    if let Some(price) = llm_prices::lookup(id) {
+        return Some(price);
+    }
+    if !id.starts_with("gpt-5") {
+        return None;
+    }
+    // A `-mini` / `-nano` slug keeps its small tier, so a `*-codex-mini` is
+    // never priced as its full-size base.
+    let tier = ["-mini", "-nano"]
+        .into_iter()
+        .find(|tier| id.ends_with(tier))
+        .unwrap_or("");
+    // Variants bill at the nearest listed base: drop trailing `-segment`s
+    // until a row matches (`*-codex-spark` -> `*-codex`, `*-codex-max` and
+    // `*-codex` -> their `gpt-5.x` base, `gpt-5.4-codex-mini` -> `gpt-5.4-mini`).
+    let mut base = &id[..id.len() - tier.len()];
+    while let Some((head, _)) = base.rsplit_once('-') {
+        if let Some(price) = llm_prices::lookup(&format!("{head}{tier}")) {
+            return Some(price);
+        }
+        base = head;
+    }
+    // No listed base: bill at the GPT-5 family's row for the same tier.
+    llm_prices::lookup(&format!("gpt-5{tier}"))
 }
 
-/// Convert an `llm-prices` USD-per-1M-tokens rate to USD per token.
-fn per_token(usd_per_million: f64) -> Option<Decimal> {
-    Some(Decimal::from_f64(usd_per_million)? / dec!(1_000_000))
+/// Per-token `(input, output)` rates of an `llm-prices` row, when it lists both.
+fn listed_rates(price: &llm_prices::Price) -> Option<(Decimal, Decimal)> {
+    Some((
+        usd(price.input?)? / dec!(1_000_000),
+        usd(price.output?)? / dec!(1_000_000),
+    ))
+}
+
+/// An `llm-prices` USD-per-1M-tokens rate as an exact `Decimal`. The rate is
+/// parsed from its shortest round-trip decimal string (`1.1` -> `"1.1"`), so
+/// no binary floating-point error reaches the money math.
+fn usd(rate: f64) -> Option<Decimal> {
+    Decimal::from_str_exact(&rate.to_string()).ok()
 }
 
 /// Default cost for unknown models.
@@ -141,9 +160,9 @@ fn listed_cache_read_discount(name: &str) -> Option<Decimal> {
     if is_local_model(name) {
         return None;
     }
-    let price = llm_prices::lookup(name)?;
-    let input = Decimal::from_f64(price.input?)?;
-    let cache_read = Decimal::from_f64(price.cache_read?)?;
+    let price = listed_row(name)?;
+    let input = usd(price.input?)?;
+    let cache_read = usd(price.cache_read?)?;
     (cache_read > Decimal::ZERO).then(|| input / cache_read)
 }
 
@@ -352,20 +371,63 @@ mod tests {
     }
 
     #[test]
-    fn test_unlisted_models_keep_table_and_family_fallbacks() {
-        // Not in `llm-prices`: the local table still prices these.
+    fn test_listed_rates_are_exact_decimals() {
+        // $1.10 / $4.40 per 1M must not pick up f64 noise (1.1 is not exact
+        // in binary).
+        assert_eq!(
+            model_cost("o4-mini"),
+            Some((dec!(0.0000011), dec!(0.0000044)))
+        );
+        assert_eq!(usd(0.275), Some(dec!(0.275)));
+        assert_eq!(usd(1.75), Some(dec!(1.75)));
+    }
+
+    #[test]
+    fn test_codex_variants_bill_at_their_listed_base() {
+        assert_eq!(model_cost("gpt-5.5-codex"), model_cost("gpt-5.5"));
+        assert_eq!(model_cost("gpt-5.2-codex"), model_cost("gpt-5.2"));
+        assert_eq!(model_cost("gpt-5.1-codex"), model_cost("gpt-5.1"));
+        assert_eq!(model_cost("gpt-5.1-codex-max"), model_cost("gpt-5.1"));
+        assert_eq!(model_cost("gpt-5-codex"), model_cost("gpt-5"));
+        assert_eq!(
+            model_cost("gpt-5.3-codex-spark"),
+            model_cost("gpt-5.3-codex")
+        );
+        // Small tier: $0.25 / $2 per 1M, not the full-size gpt-5.1 rate.
         assert_eq!(
             model_cost("gpt-5.1-codex-mini"),
-            Some((dec!(0.0000003), dec!(0.0000012)))
+            Some((dec!(0.00000025), dec!(0.000002)))
         );
+        // A small tier with a listed versioned row bills at that row.
+        assert_eq!(model_cost("gpt-5.4-codex-mini"), model_cost("gpt-5.4-mini"));
+        assert_eq!(
+            model_cost("gpt-5.5-codex"),
+            Some((dec!(0.000005), dec!(0.00003)))
+        );
+        // Cache-read discount follows the same row.
+        assert_eq!(cache_read_discount("gpt-5.5-codex"), Decimal::from(10));
+        assert_eq!(cache_read_discount("openai/gpt-5-codex"), Decimal::from(10));
+    }
+
+    #[test]
+    fn test_unlisted_models_keep_table_and_family_fallbacks() {
+        // Not in `llm-prices`: the local table still prices these.
         assert_eq!(
             model_cost("claude-3-5-sonnet-20241022"),
             Some((dec!(0.000003), dec!(0.000015)))
         );
-        // Unknown gpt-5 slugs still hit the family fallback.
+        // Unknown gpt-5 slugs fall back to the listed GPT-5 family rows.
         assert_eq!(
             model_cost("gpt-5.9-preview"),
-            Some((dec!(0.000002), dec!(0.000008)))
+            Some((dec!(0.00000125), dec!(0.00001)))
+        );
+        assert_eq!(
+            model_cost("gpt-5.9-mini"),
+            Some((dec!(0.00000025), dec!(0.000002)))
+        );
+        assert_eq!(
+            model_cost("gpt-5.9-nano"),
+            Some((dec!(0.00000005), dec!(0.0000004)))
         );
         // Local-model heuristic still wins over a listed hosted price.
         assert_eq!(
