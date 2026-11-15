@@ -159,8 +159,11 @@ const CENSUS: &[CensusScope] = &[
     },
     CensusScope {
         path: "crates/ironclaw_common/src/llm_costs.rs",
-        occurrences: 91,
-        distinct_vendors: 9,
+        // 91 -> 32: model ids listed by the `llm-prices` crate are priced from
+        // it and dropped from the local table; unlisted `gpt-5*` Codex
+        // variants bill at their listed base row instead of local arms.
+        occurrences: 32,
+        distinct_vendors: 8,
         basis: "UNSANCTIONED RESIDUE, found by this census (#7150): a per-model price \
                 table in the contracts family that D-E's 'nowhere else' does not cover \
                 and the specificity scanner cannot see. Frozen and shrink-only pending \
